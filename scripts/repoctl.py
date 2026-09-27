@@ -41,6 +41,7 @@ _MODERN_ENGINEERING = None
 _CVE_POLICY = None
 _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=None)
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
+_FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 
 
 def _modern_engineering_api():
@@ -9554,11 +9555,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
                 f"{detail or 'head mismatch'}"
             )
 
-    cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
-    if cleanup_rc:
-        print("ADVISORY finish-pr merged successfully but stale-branch cleanup was incomplete", file=sys.stderr)
-
-    roadmap_rc = _roadmap_followup_after_merge()
+    cleanup_rc, roadmap_rc = _finish_pr_post_merge_tasks()
     if roadmap_rc:
         return fail(
             f"finish-pr merged PR #{number} successfully but automatic roadmap synchronization failed"
@@ -9571,11 +9568,37 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     return 1 if cleanup_rc else 0
 
 
+def _finish_pr_post_merge_tasks() -> tuple[int, int]:
+    phases = _FINISH_PR_PHASES.get()
+    try:
+        cleanup_rc = branch_cleanup(dry_run=False, fetch_remote=False)
+    except Exception:
+        if phases is not None:
+            phases["cleanup_result"] = "FAIL"
+        raise
+    if phases is not None:
+        phases["cleanup_result"] = "FAIL" if cleanup_rc else "PASS"
+    if cleanup_rc:
+        print("ADVISORY finish-pr merged successfully but stale-branch cleanup was incomplete", file=sys.stderr)
+
+    try:
+        roadmap_rc = _roadmap_followup_after_merge()
+    except Exception:
+        if phases is not None:
+            phases["roadmap_result"] = "FAIL"
+        raise
+    if phases is not None:
+        phases["roadmap_result"] = "FAIL" if roadmap_rc else "PASS"
+    return cleanup_rc, roadmap_rc
+
+
 def _finish_pr_json(base: str) -> int:
     result = _pr_loop_empty_result(0)
     result.update({"state": "BLOCKED", "next_action": "VERIFY_MERGE_STATE", "base": base})
+    phases = {"cleanup_result": "NOT_ATTEMPTED", "roadmap_result": "NOT_ATTEMPTED"}
     destination = sys.stdout
     stdout_token = _PR_LOOP_JSON_STDOUT.set(destination)
+    phases_token = _FINISH_PR_PHASES.set(phases)
     try:
         with contextlib.redirect_stdout(sys.stderr):
             gh = shutil.which("gh") or shutil.which("gh.exe")
@@ -9610,8 +9633,15 @@ def _finish_pr_json(base: str) -> int:
                         result["state"] = "MERGED"
                         merge_commit = after.get("mergeCommit") or {}
                         result["merge_commit_sha"] = str(merge_commit.get("oid") or "")
-                        result["cleanup_result"] = "PASS" if finish_rc == 0 else "FAIL"
-                        result["next_action"] = "NONE" if finish_rc == 0 else "POST_MERGE_CLEANUP"
+                        result.update(phases)
+                        if result["cleanup_result"] == "FAIL":
+                            result["next_action"] = "POST_MERGE_CLEANUP"
+                        elif result["roadmap_result"] == "FAIL":
+                            result["next_action"] = "FIX_ROADMAP_SYNC"
+                        elif finish_rc:
+                            result["next_action"] = "VERIFY_POST_MERGE"
+                        else:
+                            result["next_action"] = "NONE"
                     else:
                         result["merge_result"] = "FAIL" if finish_rc else "UNKNOWN"
                         result["blockers"].append("GitHub does not confirm a merge at the exact initial head")
@@ -9623,6 +9653,7 @@ def _finish_pr_json(base: str) -> int:
             _emit_pr_loop_result(result, json_output=True)
             return 0 if finish_rc == 0 and result["merge_result"] == "PASS" else 1
     finally:
+        _FINISH_PR_PHASES.reset(phases_token)
         _PR_LOOP_JSON_STDOUT.reset(stdout_token)
 
 
@@ -9657,6 +9688,7 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "next_action": "RETRY",
         "merge_result": "NOT_ATTEMPTED",
         "cleanup_result": "NOT_ATTEMPTED",
+        "roadmap_result": "NOT_ATTEMPTED",
         "output_contract": "PASS",
         "merge_commit_sha": "",
         "blockers": [],
@@ -9893,6 +9925,7 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
                     "state": "MERGED" if result.get("merge_result") == "PASS" else "BLOCKED",
                     "merge_result": result.get("merge_result", "UNKNOWN"),
                     "cleanup_result": result.get("cleanup_result", "NOT_ATTEMPTED"),
+                    "roadmap_result": result.get("roadmap_result", "NOT_ATTEMPTED"),
                     "output_contract": "FAIL",
                     "blockers": [f"JSON result serialization failed: {exc}"],
                 },
@@ -9919,6 +9952,8 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
         print(f"MERGE_RESULT {result['merge_result']}")
     if result.get("cleanup_result") != "NOT_ATTEMPTED":
         print(f"CLEANUP_RESULT {result['cleanup_result']}")
+    if result.get("roadmap_result") != "NOT_ATTEMPTED":
+        print(f"ROADMAP_RESULT {result['roadmap_result']}")
     if result.get("blockers"):
         for blocker in result["blockers"]:
             print(f"BLOCKER {blocker}")
@@ -10020,6 +10055,10 @@ def _pr_loop_post_merge(
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     result["cleanup_result"] = "PASS"
+    if result["roadmap_result"] == "FAIL":
+        result["next_action"] = "FIX_ROADMAP_SYNC"
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
     result["state"] = "DONE"
     result["next_action"] = "NONE"
     _emit_pr_loop_result(result, json_output=json_output)
@@ -10402,11 +10441,27 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
 
+    finish_args = ["finish-pr", "--base", "main"]
+    if json_output:
+        finish_args.append("--json")
     finish = run(
-        _controller_command("finish-pr", "--base", "main", "--json"),
+        _controller_command(*finish_args),
         check=False,
         capture=json_output,
     )
+    if json_output and finish.stdout:
+        try:
+            finish_result = json.loads(finish.stdout)
+            if (
+                isinstance(finish_result, dict)
+                and finish_result.get("pr") == pr_number
+                and finish_result.get("head_sha") == initial_head_sha
+                and isinstance(finish_result.get("roadmap_result"), str)
+                and finish_result["roadmap_result"] in {"PASS", "FAIL", "NOT_ATTEMPTED"}
+            ):
+                result["roadmap_result"] = finish_result["roadmap_result"]
+        except json.JSONDecodeError:
+            result["blockers"].append("finish-pr returned invalid JSON; GitHub merge state will be re-read")
     try:
         merged = _github_pr_snapshot(gh, name_with_owner, pr_number)
     except RuntimeError as exc:

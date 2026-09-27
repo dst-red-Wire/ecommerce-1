@@ -1226,8 +1226,12 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         }
 
         def noisy_finish(_base):
+            cleanup_rc, roadmap_rc = REPOCTL._finish_pr_post_merge_tasks()
+            return 1 if cleanup_rc or roadmap_rc else 0
+
+        def noisy_cleanup(**_kwargs):
             print("DELETE remote stale | merged")
-            print("PASS branch-cleanup candidates=1 deleted=1 kept=0 failures=0")
+            print("FAIL branch-cleanup candidates=1 deleted=0 kept=0 failures=1")
             return 1
 
         stdout = io.StringIO()
@@ -1236,7 +1240,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL, "git", return_value=self.SHA_A + "\n"
         ), mock.patch.object(
             REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
-        ), mock.patch.object(REPOCTL, "finish_pr", side_effect=noisy_finish):
+        ), mock.patch.object(REPOCTL, "finish_pr", side_effect=noisy_finish), mock.patch.object(
+            REPOCTL, "branch_cleanup", side_effect=noisy_cleanup
+        ), mock.patch.object(REPOCTL, "_roadmap_followup_after_merge", return_value=0):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 rc = REPOCTL._finish_pr_json("main")
         payload = json.loads(stdout.getvalue())
@@ -1245,9 +1251,50 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("MERGED", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["roadmap_result"])
+        self.assertEqual("POST_MERGE_CLEANUP", payload["next_action"])
         self.assertEqual("PASS", payload["output_contract"])
         self.assertIn("DELETE", stderr.getvalue())
-        self.assertIn("PASS branch-cleanup", stderr.getvalue())
+        self.assertIn("FAIL branch-cleanup", stderr.getvalue())
+
+    def test_finish_pr_json_keeps_cleanup_pass_when_roadmap_fails(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {
+            "state": "MERGED",
+            "mergedAt": "2026-09-27T10:00:00Z",
+            "headRefOid": self.SHA_A,
+            "mergeCommit": {"oid": "d" * 40},
+        }
+
+        def finish_with_roadmap_failure(_base):
+            cleanup_rc, roadmap_rc = REPOCTL._finish_pr_post_merge_tasks()
+            return 1 if cleanup_rc or roadmap_rc else 0
+
+        stdout = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), mock.patch.object(
+            REPOCTL, "git", return_value=self.SHA_A + "\n"
+        ), mock.patch.object(
+            REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
+        ), mock.patch.object(
+            REPOCTL, "finish_pr", side_effect=finish_with_roadmap_failure
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=0
+        ) as cleanup, mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=1
+        ) as roadmap:
+            with contextlib.redirect_stdout(stdout):
+                rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        cleanup.assert_called_once_with(dry_run=False, fetch_remote=False)
+        roadmap.assert_called_once_with()
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertNotIn("POST_MERGE_CLEANUP", stdout.getvalue())
 
     def test_json_serialization_fallback_keeps_merge_verdict(self):
         result = REPOCTL._pr_loop_empty_result(161)
@@ -1293,6 +1340,38 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("DONE", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("PASS", payload["cleanup_result"])
+
+    def test_pr_loop_cleanup_pass_does_not_hide_roadmap_failure(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({
+            "head_sha": self.SHA_A,
+            "merge_result": "PASS",
+            "roadmap_result": "FAIL",
+        })
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(REPOCTL, "branch_cleanup", return_value=0):
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL._pr_loop_post_merge(
+                    "gh", "owner/repo", merged, result, dry_run=False, json_output=True
+                )
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
 
     def test_head_change_during_finish_pr_is_never_reported_as_merged(self):
         pass_authorities = (
@@ -1399,7 +1478,8 @@ class PRLoopSourceContractTests(unittest.TestCase):
             source.index("def _pr_loop_post_merge(") : source.index("def pr_loop(")
         ]
         loop = source[source.index("def pr_loop(") : source.index("def precommit(")]
-        self.assertIn('_controller_command("finish-pr"', loop)
+        self.assertIn('finish_args = ["finish-pr", "--base", "main"]', loop)
+        self.assertIn('_controller_command(*finish_args)', loop)
         self.assertIn("branch_cleanup(dry_run=False, fetch_remote=False)", post_merge)
         self.assertNotIn('_controller_command("branch-cleanup"', post_merge)
         self.assertNotIn('"pr", "merge"', loop)
