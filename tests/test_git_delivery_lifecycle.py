@@ -61,6 +61,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         )
         risk = policy["pr_loop"]["risk_classification"]
         self.assertEqual("repository-policy", risk["authority"])
+        self.assertEqual("scripts/merge_risk.py#classify_merge_risk", risk["implementation"])
+        self.assertEqual("exact-pr-base-sha", risk["controller_source"])
+        self.assertEqual("sensitive", risk["bootstrap_without_controller"])
+        self.assertEqual("forbidden", risk["head_controller_execution"])
         self.assertEqual("exact-pr-base-sha", risk["policy_source"])
         self.assertEqual("forbidden", risk["llm_decision"])
         self.assertEqual("sensitive", risk["unknown_or_ambiguous"])
@@ -139,6 +143,12 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         mutations = (
             lambda value: value["pr_loop"]["merge_delegation"].__setitem__("direct_merge", "allowed"),
             lambda value: value["pr_loop"]["risk_classification"].__setitem__("llm_decision", "allowed"),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__(
+                "controller_source", "pull-request-head"
+            ),
+            lambda value: value["pr_loop"]["risk_classification"].__setitem__(
+                "head_controller_execution", "allowed"
+            ),
             lambda value: value["pr_loop"]["risk_classification"]["low_risk"].__setitem__(
                 "eligible_paths", ["**"]
             ),

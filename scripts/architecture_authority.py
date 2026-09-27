@@ -1588,7 +1588,10 @@ def validate(root):
             != {"authorization": "explicit-repository-owner"}
             or risk_classification.get("authority") != "repository-policy"
             or risk_classification.get("implementation")
-            != "scripts/repoctl.py#classify_merge_risk"
+            != "scripts/merge_risk.py#classify_merge_risk"
+            or risk_classification.get("controller_source") != "exact-pr-base-sha"
+            or risk_classification.get("bootstrap_without_controller") != "sensitive"
+            or risk_classification.get("head_controller_execution") != "forbidden"
             or risk_classification.get("policy_source") != "exact-pr-base-sha"
             or risk_classification.get("model") != "deterministic-capabilities-and-paths"
             or risk_classification.get("llm_decision") != "forbidden"

@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +15,12 @@ SPEC = importlib.util.spec_from_file_location("repoctl_pr_loop_test", ROOT / "sc
 assert SPEC and SPEC.loader
 REPOCTL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPOCTL)
+RISK_SPEC = importlib.util.spec_from_file_location(
+    "merge_risk_pr_loop_test", ROOT / "scripts/merge_risk.py"
+)
+assert RISK_SPEC and RISK_SPEC.loader
+MERGE_RISK = importlib.util.module_from_spec(RISK_SPEC)
+RISK_SPEC.loader.exec_module(MERGE_RISK)
 
 
 class PRLoopStateTests(unittest.TestCase):
@@ -193,7 +200,7 @@ class PRLoopRiskClassificationTests(unittest.TestCase):
         ordered = sorted(paths)
         payload = {path: "" for path in ordered}
         payload.update(changes or {})
-        return REPOCTL._evaluate_merge_risk(
+        return MERGE_RISK.evaluate_merge_risk(
             policy or self.policy,
             base_sha=self.BASE,
             head_sha=head or self.HEAD_A,
@@ -241,7 +248,7 @@ class PRLoopRiskClassificationTests(unittest.TestCase):
         cases = (
             self.classify(["unknown/new.surface"]),
             self.classify(["services/product/query.go"], policy=unknown_policy),
-            REPOCTL._evaluate_merge_risk(
+            MERGE_RISK.evaluate_merge_risk(
                 self.policy,
                 base_sha=self.BASE,
                 head_sha=self.HEAD_A,
@@ -256,23 +263,113 @@ class PRLoopRiskClassificationTests(unittest.TestCase):
 
     def test_git_or_policy_failure_is_sensitive(self):
         with mock.patch.object(
-            REPOCTL, "_merge_risk_policy_at_base", side_effect=RuntimeError("Git unavailable")
+            REPOCTL,
+            "_run_exact_base_merge_risk_controller",
+            side_effect=RuntimeError("Git unavailable"),
         ):
             result = REPOCTL.classify_merge_risk(self.BASE, self.HEAD_A, 162)
         self.assertEqual("SENSITIVE", result["classification"])
         self.assertFalse(result["analysis_complete"])
-        self.assertIn("classification-error", result["reasons"][0])
+        self.assertIn("trusted-base-classification-error", result["reasons"][0])
 
         with mock.patch.object(
-            REPOCTL, "_merge_risk_policy_at_base", return_value=self.policy
-        ), mock.patch.object(
             REPOCTL,
-            "_merge_risk_git_inputs",
-            side_effect=RuntimeError("partial diff"),
+            "_run_exact_base_merge_risk_controller",
+            side_effect=RuntimeError("partial exact-base result"),
         ):
             partial = REPOCTL.classify_merge_risk(self.BASE, self.HEAD_A, 162)
         self.assertEqual("SENSITIVE", partial["classification"])
-        self.assertIn("partial diff", partial["reasons"][0])
+        self.assertIn("partial exact-base result", partial["reasons"][0])
+
+    def test_tampered_head_classifier_still_requires_owner_authorization(self):
+        def git(repository, *args):
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=repository,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            if completed.returncode:
+                self.fail(completed.stderr or completed.stdout)
+            return (completed.stdout or "").strip()
+
+        with tempfile.TemporaryDirectory(prefix="merge-risk-tamper-") as directory:
+            repository = Path(directory)
+            (repository / "scripts").mkdir()
+            (repository / "config/contracts").mkdir(parents=True)
+            (repository / "scripts/merge_risk.py").write_bytes(
+                (ROOT / "scripts/merge_risk.py").read_bytes()
+            )
+            (repository / "config/contracts/review-policy.yaml").write_bytes(
+                (ROOT / "config/contracts/review-policy.yaml").read_bytes()
+            )
+            git(repository, "init", "-q")
+            git(repository, "add", ".")
+            git(
+                repository,
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "trusted base",
+            )
+            base_sha = git(repository, "rev-parse", "HEAD")
+
+            (repository / "scripts/merge_risk.py").write_text(
+                """#!/usr/bin/env python3
+import argparse, json
+p = argparse.ArgumentParser()
+p.add_argument('--base-sha', required=True)
+p.add_argument('--head-sha', required=True)
+p.add_argument('--pr', type=int)
+a = p.parse_args()
+print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy',
+    'controller_source': 'exact-pr-base-sha', 'controller_path': 'scripts/merge_risk.py',
+    'policy_source': 'exact-pr-base-sha', 'pr': a.pr, 'base_sha': a.base_sha,
+    'head_sha': a.head_sha, 'changed_files': ['services/fake.go'], 'reasons': [],
+    'matched_capabilities': [], 'analysis_complete': True}))
+""",
+                encoding="utf-8",
+            )
+            (repository / "scripts/repoctl.py").write_text(
+                "def classify_merge_risk(*_args): return {'classification': 'LOW_RISK'}\n",
+                encoding="utf-8",
+            )
+            git(repository, "add", ".")
+            git(
+                repository,
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "tamper with head classifier",
+            )
+            head_sha = git(repository, "rev-parse", "HEAD")
+
+            with mock.patch.object(REPOCTL, "ROOT", repository):
+                result = REPOCTL.classify_merge_risk(base_sha, head_sha, 161)
+
+        self.assertEqual("SENSITIVE", result["classification"])
+        self.assertEqual("exact-pr-base-sha", result["controller_source"])
+        self.assertIn("delivery-authority", result["matched_capabilities"], result)
+        state = REPOCTL.derive_pr_loop_state(
+            PRLoopStateTests().pr(base_sha=base_sha, head_sha=head_sha),
+            {"status": "PASS"},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
+            {"status": "MISSING"},
+            risk=result,
+        )
+        self.assertEqual(("OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"), state)
 
     def test_sha_change_invalidates_prior_classification_and_reviews(self):
         prior = self.classify(["services/product/query.go"], head=self.HEAD_A)
@@ -1119,6 +1216,18 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_risk_decision_executes_only_the_exact_base_controller(self):
+        source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        runner = source[
+            source.index("def _run_exact_base_merge_risk_controller(") : source.index(
+                "def classify_merge_risk("
+            )
+        ]
+        self.assertNotIn("import merge_risk", source)
+        self.assertNotIn("def _evaluate_merge_risk(", source)
+        self.assertIn('f"{base_sha}:{MERGE_RISK_CONTROLLER_PATH}"', runner)
+        self.assertIn('"-I"', runner)
+
     def test_finish_pr_enforces_owner_boundary_and_resolved_conversations(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         finish = source[source.index("def finish_pr(") : source.index("def _pr_loop_empty_result(")]

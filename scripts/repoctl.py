@@ -13,7 +13,6 @@ import ast
 import copy
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-import fnmatch
 import functools
 import hashlib
 import json
@@ -7352,6 +7351,7 @@ MERGE_RISK_CAPABILITIES = (
     "security-policy",
     "artifact-publication-authority",
 )
+MERGE_RISK_CONTROLLER_PATH = "scripts/merge_risk.py"
 
 
 def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
@@ -7361,6 +7361,9 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
     if set(policy) != {
         "authority",
         "implementation",
+        "controller_source",
+        "bootstrap_without_controller",
+        "head_controller_execution",
         "policy_source",
         "model",
         "llm_decision",
@@ -7378,7 +7381,10 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
     if any(
         (
             policy.get("authority") != "repository-policy",
-            policy.get("implementation") != "scripts/repoctl.py#classify_merge_risk",
+            policy.get("implementation") != "scripts/merge_risk.py#classify_merge_risk",
+            policy.get("controller_source") != "exact-pr-base-sha",
+            policy.get("bootstrap_without_controller") != "sensitive",
+            policy.get("head_controller_execution") != "forbidden",
             policy.get("policy_source") != "exact-pr-base-sha",
             policy.get("model") != "deterministic-capabilities-and-paths",
             policy.get("llm_decision") != "forbidden",
@@ -7448,7 +7454,12 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         return False
     required_anchors = {
         "governance": {"architecture.lock.yaml", "config/contracts/review-policy.yaml"},
-        "delivery-authority": {"scripts/repoctl.py", "scripts/pr_monitor.py", "Makefile"},
+        "delivery-authority": {
+            "scripts/merge_risk.py",
+            "scripts/repoctl.py",
+            "scripts/pr_monitor.py",
+            "Makefile",
+        },
         "branch-protection": {".github/CODEOWNERS", ".github/rulesets/**"},
         "infrastructure-apply": {"platform/terraform/**", "platform/ansible/**"},
         "state-migration": {"**/migrations/**"},
@@ -8358,10 +8369,6 @@ def _review_result_is_pass(result: dict) -> bool:
     return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
 
 
-def _merge_risk_path_matches(path: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
-
-
 def _merge_risk_result(
     classification: str,
     *,
@@ -8376,6 +8383,8 @@ def _merge_risk_result(
     return {
         "classification": classification,
         "authority": "repository-policy",
+        "controller_source": "exact-pr-base-sha",
+        "controller_path": MERGE_RISK_CONTROLLER_PATH,
         "policy_source": "exact-pr-base-sha",
         "pr": pr_number,
         "base_sha": base_sha,
@@ -8407,252 +8416,134 @@ def _sensitive_merge_risk(
     )
 
 
-def _merge_risk_policy_at_base(base_sha: str) -> dict:
-    policy_file = "config/contracts/review-policy.yaml"
-    response = run(
-        ["git", "show", f"{base_sha}:{policy_file}"],
-        check=False,
-        capture=True,
-    )
-    if response.returncode:
-        detail = (response.stderr or response.stdout or "").strip()
-        raise RuntimeError(detail or "exact base review policy is unavailable")
-    with tempfile.TemporaryDirectory(prefix="ecommerce-merge-risk-policy-") as directory:
-        materialized = Path(directory) / "review-policy.yaml"
-        materialized.write_text(response.stdout or "", encoding="utf-8")
-        document = qualification_cache.psych_load(materialized)
-    pr_loop_policy = (document.get("repository_delivery") or {}).get("pr_loop") or {}
-    risk_policy = pr_loop_policy.get("risk_classification")
-    owner_boundary = pr_loop_policy.get("owner_boundary")
-    if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
-        raise RuntimeError("exact base review policy has no valid merge-risk authority")
-    return copy.deepcopy(risk_policy)
-
-
-def _merge_risk_git_inputs(base_sha: str, head_sha: str) -> tuple[list[str], dict[str, str]]:
-    for label, sha in (("base", base_sha), ("head", head_sha)):
-        if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
-            raise RuntimeError(f"{label} SHA is not exact")
-        exists = run(
-            ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
-            check=False,
-            capture=True,
-        )
-        if exists.returncode:
-            raise RuntimeError(f"{label} commit is unavailable")
-    lineage = run(
-        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-        check=False,
-        capture=True,
-    )
-    if lineage.returncode:
-        raise RuntimeError("head is not descended from the exact PR base")
-    status = run(
-        [
-            "git",
-            "diff",
-            "--name-status",
-            "-z",
-            "--no-renames",
-            base_sha,
-            head_sha,
-            "--",
-        ],
-        check=False,
-        capture=True,
-    )
-    if status.returncode:
-        detail = (status.stderr or status.stdout or "").strip()
-        raise RuntimeError(detail or "cannot read complete exact-SHA diff status")
-    fields = (status.stdout or "").split("\0")
-    if fields and fields[-1] == "":
-        fields.pop()
-    if len(fields) % 2:
-        raise RuntimeError("partial exact-SHA diff status")
-    changed_files: list[str] = []
-    for index in range(0, len(fields), 2):
-        change_status, path = fields[index : index + 2]
-        if change_status not in set("ACDMRTUXB"):
-            raise RuntimeError(f"unknown diff status: {change_status!r}")
-        if (
-            not path
-            or path.startswith("/")
-            or "\\" in path
-            or "\x00" in path
-            or ".." in Path(path).parts
-        ):
-            raise RuntimeError("diff contains an invalid repository path")
-        changed_files.append(path)
-    if len(changed_files) != len(set(changed_files)):
-        raise RuntimeError("diff contains duplicate or ambiguous paths")
-    changes: dict[str, str] = {}
-    for path in sorted(changed_files):
-        diff = run(
-            [
-                "git",
-                "diff",
-                "--no-ext-diff",
-                "--no-renames",
-                "--no-color",
-                "--unified=0",
-                base_sha,
-                head_sha,
-                "--",
-                path,
-            ],
-            check=False,
-            capture=True,
-        )
-        if diff.returncode:
-            raise RuntimeError(f"partial exact-SHA diff for {path}")
-        if "Binary files " in (diff.stdout or "") or "GIT binary patch" in (diff.stdout or ""):
-            raise RuntimeError(f"unclassifiable binary diff for {path}")
-        changed_lines = [
-            line[1:]
-            for line in (diff.stdout or "").splitlines()
-            if (line.startswith("+") and not line.startswith("+++"))
-            or (line.startswith("-") and not line.startswith("---"))
-        ]
-        changes[path] = "\n".join(changed_lines)
-    if set(changes) != set(changed_files):
-        raise RuntimeError("partial exact-SHA changed-file analysis")
-    return sorted(changed_files), changes
-
-
-def _evaluate_merge_risk(
-    policy: dict,
+def _validated_trusted_merge_risk_result(
+    result: object,
     *,
     base_sha: str,
     head_sha: str,
     pr_number: int | None,
-    changed_files: list[str],
-    file_changes: dict[str, str],
 ) -> dict:
-    """Pure deterministic capability/path classification over complete exact-SHA inputs."""
-    if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
-        return _sensitive_merge_risk(
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reason="invalid-base-sha",
-        )
-    if re.fullmatch(r"[0-9a-f]{40}", head_sha or "") is None:
-        return _sensitive_merge_risk(
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reason="invalid-head-sha",
-        )
-    owner_boundary = {
-        "mode": "risk-based",
-        "automatic_generation": "forbidden",
-        "required_for": list(MERGE_RISK_CAPABILITIES),
-        "low_risk": {"authorization": "not-required-by-policy"},
-        "sensitive": {"authorization": "explicit-repository-owner"},
+    required = {
+        "classification",
+        "authority",
+        "controller_source",
+        "controller_path",
+        "policy_source",
+        "pr",
+        "base_sha",
+        "head_sha",
+        "changed_files",
+        "reasons",
+        "matched_capabilities",
+        "analysis_complete",
     }
-    if not _merge_risk_policy_is_valid(policy, owner_boundary):
-        return _sensitive_merge_risk(
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reason="unknown-or-invalid-policy",
-        )
+    if not isinstance(result, dict) or set(result) != required:
+        raise RuntimeError("exact-base merge-risk controller returned an invalid envelope")
     if (
-        not isinstance(changed_files, list)
-        or not changed_files
-        or len(changed_files) != len(set(changed_files))
-        or sorted(changed_files) != changed_files
-        or not isinstance(file_changes, dict)
-        or set(file_changes) != set(changed_files)
-        or any(not isinstance(value, str) for value in file_changes.values())
+        result.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or result.get("authority") != "repository-policy"
+        or result.get("controller_source") != "exact-pr-base-sha"
+        or result.get("controller_path") != MERGE_RISK_CONTROLLER_PATH
+        or result.get("policy_source") != "exact-pr-base-sha"
+        or result.get("pr") != pr_number
+        or result.get("base_sha") != base_sha
+        or result.get("head_sha") != head_sha
+        or not isinstance(result.get("changed_files"), list)
+        or not isinstance(result.get("reasons"), list)
+        or not isinstance(result.get("matched_capabilities"), list)
+        or type(result.get("analysis_complete")) is not bool
     ):
-        return _sensitive_merge_risk(
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files if isinstance(changed_files, list) else [],
-            reason="partial-or-ambiguous-diff",
-        )
-    capabilities = policy["sensitive"]["capabilities"]
-    matched: set[str] = set()
-    for capability, rule in capabilities.items():
-        direct_paths = rule.get("paths", [])
-        if any(_merge_risk_path_matches(path, direct_paths) for path in changed_files):
-            matched.add(capability)
-        candidates = [
-            path
-            for path in changed_files
-            if _merge_risk_path_matches(path, rule.get("content_paths", []))
-        ]
-        if candidates and any(
-            re.search(pattern, file_changes[path], flags=re.IGNORECASE | re.MULTILINE)
-            for pattern in rule.get("content_patterns", [])
-            for path in candidates
+        raise RuntimeError("exact-base merge-risk controller result is not exact-SHA bound")
+    if result["classification"] == "LOW_RISK" and (
+        result["analysis_complete"] is not True
+        or result["reasons"]
+        or result["matched_capabilities"]
+        or not result["changed_files"]
+    ):
+        raise RuntimeError("exact-base merge-risk controller returned an incomplete low-risk result")
+    return result
+
+
+def _run_exact_base_merge_risk_controller(
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+) -> dict:
+    """Execute only the classifier blob owned by the exact PR base commit."""
+    for label, sha in (("base", base_sha), ("head", head_sha)):
+        if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
+            raise RuntimeError(f"{label} SHA is not exact")
+        if run(["git", "cat-file", "-e", f"{sha}^{{commit}}"], check=False, capture=True).returncode:
+            raise RuntimeError(f"{label} commit is unavailable")
+    if run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError("head is not descended from the exact PR base")
+    controller = run(
+        ["git", "show", f"{base_sha}:{MERGE_RISK_CONTROLLER_PATH}"],
+        check=False,
+        capture=True,
+    )
+    if controller.returncode:
+        raise RuntimeError("exact-base merge-risk controller is unavailable")
+    with tempfile.TemporaryDirectory(prefix="ecommerce-exact-base-risk-") as directory:
+        controller_path = Path(directory) / "merge_risk.py"
+        controller_path.write_text(controller.stdout or "", encoding="utf-8")
+        environment = os.environ.copy()
+        for name in (
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_WORK_TREE",
+            "PYTHONHOME",
+            "PYTHONINSPECT",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
         ):
-            matched.add(capability)
-    if matched:
-        return _merge_risk_result(
-            "SENSITIVE",
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reasons=sorted(matched),
-            matched_capabilities=sorted(matched),
-            analysis_complete=True,
-        )
-    eligible_paths = policy["low_risk"]["eligible_paths"]
-    unclassified = [
-        path for path in changed_files if not _merge_risk_path_matches(path, eligible_paths)
-    ]
-    if unclassified:
-        return _merge_risk_result(
-            "SENSITIVE",
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reasons=[f"unclassified-path:{path}" for path in unclassified],
-            matched_capabilities=[],
-            analysis_complete=True,
-        )
-    return _merge_risk_result(
-        "LOW_RISK",
+            environment.pop(name, None)
+        command = [
+            sys.executable,
+            "-I",
+            str(controller_path),
+            "--base-sha",
+            base_sha,
+            "--head-sha",
+            head_sha,
+        ]
+        if pr_number is not None:
+            command.extend(["--pr", str(pr_number)])
+        executed = run(command, env=environment, check=False, capture=True)
+    if executed.returncode:
+        detail = (executed.stderr or executed.stdout or "").strip()
+        raise RuntimeError(detail or "exact-base merge-risk controller failed")
+    try:
+        result = json.loads((executed.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("exact-base merge-risk controller returned invalid JSON") from exc
+    return _validated_trusted_merge_risk_result(
+        result,
         base_sha=base_sha,
         head_sha=head_sha,
         pr_number=pr_number,
-        changed_files=changed_files,
-        reasons=[],
-        matched_capabilities=[],
-        analysis_complete=True,
     )
 
 
 def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = None) -> dict:
-    """Classify from base-owned policy; every unavailable or partial input is sensitive."""
-    changed_files: list[str] = []
+    """Classify only with exact-base executable authority; bootstrap/errors are sensitive."""
     try:
-        policy = _merge_risk_policy_at_base(base_sha)
-        changed_files, file_changes = _merge_risk_git_inputs(base_sha, head_sha)
-        return _evaluate_merge_risk(
-            policy,
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            file_changes=file_changes,
-        )
+        return _run_exact_base_merge_risk_controller(base_sha, head_sha, pr_number)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         detail = re.sub(r"\s+", " ", str(exc)).strip()[:300] or type(exc).__name__
         return _sensitive_merge_risk(
             base_sha=base_sha,
             head_sha=head_sha,
             pr_number=pr_number,
-            changed_files=changed_files,
-            reason=f"classification-error:{detail}",
+            changed_files=[],
+            reason=f"trusted-base-classification-error:{detail}",
         )
 
 

@@ -211,7 +211,10 @@ repository_delivery:
         authorization: explicit-repository-owner
     risk_classification:
       authority: repository-policy
-      implementation: scripts/repoctl.py#classify_merge_risk
+      implementation: scripts/merge_risk.py#classify_merge_risk
+      controller_source: exact-pr-base-sha
+      bootstrap_without_controller: sensitive
+      head_controller_execution: forbidden
       policy_source: exact-pr-base-sha
       model: deterministic-capabilities-and-paths
       llm_decision: forbidden
@@ -262,6 +265,7 @@ repository_delivery:
               - docs/architecture/**
           delivery-authority:
             paths:
+              - scripts/merge_risk.py
               - scripts/repoctl.py
               - scripts/pr_monitor.py
               - scripts/repository_delivery.py
