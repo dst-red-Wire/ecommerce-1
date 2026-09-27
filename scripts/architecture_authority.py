@@ -1514,7 +1514,13 @@ def validate(root):
         ]
         if (
             pr_loop.get("schema_version") != 2
-            or pr_loop.get("controller") != "scripts/repoctl.py"
+            or pr_loop.get("controller") != "scripts/repository_delivery.py"
+            or pr_loop.get("controller_source") != "exact-pr-base-sha"
+            or pr_loop.get("command") != "trusted-pr-transition"
+            or pr_loop.get("target_worktree") != "exact-pr-head-clean-checkout"
+            or pr_loop.get("direct_head_controller") != "forbidden"
+            or pr_loop.get("bootstrap_without_controller")
+            != "explicit-repository-owner"
             or pr_loop.get("state_persistence") != "forbidden"
             or pr_loop.get("transition_order")
             != [

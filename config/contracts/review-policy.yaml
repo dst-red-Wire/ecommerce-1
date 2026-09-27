@@ -116,8 +116,12 @@ repository_delivery:
 
   pr_loop:
     schema_version: 2
-    controller: scripts/repoctl.py
-    command: pr-loop
+    controller: scripts/repository_delivery.py
+    controller_source: exact-pr-base-sha
+    command: trusted-pr-transition
+    target_worktree: exact-pr-head-clean-checkout
+    direct_head_controller: forbidden
+    bootstrap_without_controller: explicit-repository-owner
     state_persistence: forbidden
     state_sources:
       - github-current-pull-request
@@ -306,6 +310,20 @@ repository_delivery:
               - platform/**/keycloak/**
               - platform/**/spire/**
               - platform/**/rbac/**
+              - services/**/auth/**
+              - services/**/authentication/**
+              - services/**/authorization/**
+              - services/**/security/**
+              - services/**/oidc/**
+              - services/**/oauth/**
+              - services/**/jwt/**
+              - services/**/session/**
+              - services/**/*auth*
+              - services/**/*security*
+              - services/**/*oidc*
+              - services/**/*oauth*
+              - services/**/*jwt*
+              - services/**/*session*
             content_paths: [services/**, frontend/**, platform/**, config/**, scripts/**]
             content_patterns:
               - '\b(?:iam|rbac|rolebinding|clusterrole|permission|authorization)\b'

@@ -1045,6 +1045,105 @@ def ruby_yaml(path: str) -> dict:
     return qualification_cache.psych_load(source)
 
 
+_TRUSTED_PR_EXECUTION_CONTEXT: dict[str, object] | None = None
+
+
+def _trusted_pr_execution_context(*, required: bool = False) -> dict[str, object] | None:
+    """Validate the exact-base wrapper environment before trusting delivery policy."""
+    global _TRUSTED_PR_EXECUTION_CONTEXT
+    if _TRUSTED_PR_EXECUTION_CONTEXT is not None:
+        return _TRUSTED_PR_EXECUTION_CONTEXT
+    names = (
+        "REPOCTL_TRUSTED_WRAPPER",
+        "REPOCTL_TRUSTED_CONTROLLER",
+        "REPOCTL_TRUSTED_POLICY_ROOT",
+        "REPOCTL_TRUSTED_BASE_SHA",
+        "REPOCTL_TRUSTED_TARGET_ROOT",
+        "REPOCTL_TRUSTED_HEAD_SHA",
+        "REPOCTL_TRUSTED_PR_NUMBER",
+    )
+    values = {name: os.environ.get(name, "").strip() for name in names}
+    if not any(values.values()):
+        if required:
+            raise RuntimeError(
+                "delivery requires scripts/repository_delivery.py trusted-pr-transition "
+                "from a clean exact-base checkout"
+            )
+        return None
+    if not all(values.values()):
+        raise RuntimeError("trusted PR execution context is incomplete")
+
+    trusted_root = Path(values["REPOCTL_TRUSTED_POLICY_ROOT"]).resolve()
+    target_root = Path(values["REPOCTL_TRUSTED_TARGET_ROOT"]).resolve()
+    wrapper = Path(values["REPOCTL_TRUSTED_WRAPPER"]).resolve()
+    controller = Path(values["REPOCTL_TRUSTED_CONTROLLER"]).resolve()
+    base_sha = values["REPOCTL_TRUSTED_BASE_SHA"]
+    head_sha = values["REPOCTL_TRUSTED_HEAD_SHA"]
+    pr_number = values["REPOCTL_TRUSTED_PR_NUMBER"]
+    if not re.fullmatch(r"[0-9a-f]{40}", base_sha):
+        raise RuntimeError("trusted PR base SHA is invalid")
+    if not re.fullmatch(r"[0-9a-f]{40}", head_sha):
+        raise RuntimeError("trusted PR head SHA is invalid")
+    if not pr_number.isdigit() or int(pr_number) < 1:
+        raise RuntimeError("trusted PR number is invalid")
+    if wrapper != trusted_root / "scripts/repository_delivery.py":
+        raise RuntimeError("trusted PR wrapper is outside the exact-base checkout")
+    if controller != trusted_root / "scripts/repoctl.py":
+        raise RuntimeError("trusted PR controller is outside the exact-base checkout")
+    if Path(__file__).resolve() != controller:
+        raise RuntimeError("delivery is not executing the exact-base trusted controller")
+    if target_root != ROOT.resolve():
+        raise RuntimeError("trusted PR target does not match the active worktree")
+    trusted_head = output(["git", "-C", str(trusted_root), "rev-parse", "HEAD"]).strip()
+    if trusted_head != base_sha:
+        raise RuntimeError("trusted controller checkout does not match the exact PR base")
+    if output(
+        ["git", "-C", str(trusted_root), "status", "--porcelain", "--untracked-files=all"]
+    ).strip():
+        raise RuntimeError("trusted exact-base controller checkout is dirty")
+    target_head = git("rev-parse", "HEAD").strip()
+    if target_head != head_sha:
+        raise RuntimeError("target worktree does not match the exact PR head")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        raise RuntimeError("target exact-head worktree is dirty")
+    _TRUSTED_PR_EXECUTION_CONTEXT = {
+        "trusted_root": trusted_root,
+        "target_root": target_root,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+        "pr_number": int(pr_number),
+    }
+    return _TRUSTED_PR_EXECUTION_CONTEXT
+
+
+def _require_trusted_pr_execution(
+    *,
+    pr_number: int | None = None,
+    base_sha: str | None = None,
+    head_sha: str | None = None,
+) -> dict[str, object]:
+    context = _trusted_pr_execution_context(required=True)
+    assert context is not None
+    expected = {
+        "pr_number": pr_number,
+        "base_sha": base_sha,
+        "head_sha": head_sha,
+    }
+    for field, value in expected.items():
+        if value is not None and context[field] != value:
+            raise RuntimeError(
+                f"trusted PR {field.replace('_', ' ')} mismatch: "
+                f"expected {context[field]}, got {value}"
+            )
+    return context
+
+
+def _review_policy_document() -> dict:
+    context = _trusted_pr_execution_context()
+    policy_root = Path(context["trusted_root"]) if context else ROOT
+    return ruby_yaml(str(policy_root / "config/contracts/review-policy.yaml"))
+
+
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
 
 
@@ -7463,7 +7562,23 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         "branch-protection": {".github/CODEOWNERS", ".github/rulesets/**"},
         "infrastructure-apply": {"platform/terraform/**", "platform/ansible/**"},
         "state-migration": {"**/migrations/**"},
-        "iam": {"config/contracts/identity-boundary-policy.yaml"},
+        "iam": {
+            "config/contracts/identity-boundary-policy.yaml",
+            "services/**/auth/**",
+            "services/**/authentication/**",
+            "services/**/authorization/**",
+            "services/**/security/**",
+            "services/**/oidc/**",
+            "services/**/oauth/**",
+            "services/**/jwt/**",
+            "services/**/session/**",
+            "services/**/*auth*",
+            "services/**/*security*",
+            "services/**/*oidc*",
+            "services/**/*oauth*",
+            "services/**/*jwt*",
+            "services/**/*session*",
+        },
         "secrets": {"config/contracts/secret-delivery-policy.yaml"},
         "network": {"config/infrastructure/network-plan.yaml"},
         "dns": {"config/contracts/dns-authority-policy.yaml"},
@@ -7519,6 +7634,23 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     ]
     if normalized.get("schema_version") != 2:
         return {}
+    trusted_boundary = {
+        "controller": normalized.get("controller"),
+        "controller_source": normalized.pop("controller_source", None),
+        "command": normalized.get("command"),
+        "target_worktree": normalized.pop("target_worktree", None),
+        "direct_head_controller": normalized.pop("direct_head_controller", None),
+        "bootstrap_without_controller": normalized.pop("bootstrap_without_controller", None),
+    }
+    if trusted_boundary != {
+        "controller": "scripts/repository_delivery.py",
+        "controller_source": "exact-pr-base-sha",
+        "command": "trusted-pr-transition",
+        "target_worktree": "exact-pr-head-clean-checkout",
+        "direct_head_controller": "forbidden",
+        "bootstrap_without_controller": "explicit-repository-owner",
+    }:
+        return {}
     if normalized.get("transition_order") != expected_transition:
         return {}
     if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
@@ -7528,6 +7660,8 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     ) != 1:
         return {}
     normalized["schema_version"] = 1
+    normalized["controller"] = "scripts/repoctl.py"
+    normalized["command"] = "pr-loop"
     normalized["state_sources"].remove("exact-sha-deterministic-risk-classification")
     normalized["transition_order"] = [
         "qualification",
@@ -7804,7 +7938,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
 
 
 def repository_delivery_policy() -> dict:
-    review_policy = ruby_yaml("config/contracts/review-policy.yaml")
+    review_policy = _review_policy_document()
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
 
 
@@ -7969,7 +8103,7 @@ def remote_commit_provenance_check(gh: str, base: str, head: str, *, quiet: bool
 
 
 def pull_request_review_policy() -> dict:
-    policy = ruby_yaml("config/contracts/review-policy.yaml").get("pull_request_review") or {}
+    policy = _review_policy_document().get("pull_request_review") or {}
     ai = policy.get("ai_reviewer") or {}
     evidence = ai.get("evidence") or {}
     codex = ai.get("codex") or {}
@@ -9126,6 +9260,10 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 
 def finish_pr(base: str) -> int:
+    try:
+        _require_trusted_pr_execution()
+    except RuntimeError as exc:
+        return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
     if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
@@ -9802,6 +9940,14 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["blockers"].append("PR number must be a positive integer")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
+    try:
+        _require_trusted_pr_execution(pr_number=pr_number)
+    except RuntimeError as exc:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "USE_EXACT_BASE_CONTROLLER"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
         result["blockers"].append("GitHub CLI missing")
@@ -9818,6 +9964,11 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             if fetch.returncode:
                 raise RuntimeError("git fetch origin --prune failed")
         initial = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        _require_trusted_pr_execution(
+            pr_number=initial["number"],
+            base_sha=initial["base_sha"],
+            head_sha=initial["head_sha"],
+        )
     except RuntimeError as exc:
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)

@@ -240,6 +240,25 @@ class PRLoopRiskClassificationTests(unittest.TestCase):
                 self.assertEqual("SENSITIVE", result["classification"])
                 self.assertIn(capability, result["matched_capabilities"])
 
+    def test_application_auth_paths_are_sensitive_without_keyword_content(self):
+        paths = (
+            "services/order/internal/auth/guard.go",
+            "services/order/internal/authentication/login.go",
+            "services/order/internal/authorization/check.go",
+            "services/order/internal/security/policy.go",
+            "services/order/internal/oidc/client.go",
+            "services/order/internal/oauth/callback.go",
+            "services/order/internal/jwt/parser.go",
+            "services/order/internal/session/store.go",
+            "services/order/internal/http/middleware/authenticate.go",
+            "services/order/internal/http/session_manager.go",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                result = self.classify([path], {path: "return nil\n"})
+                self.assertEqual("SENSITIVE", result["classification"])
+                self.assertIn("iam", result["matched_capabilities"])
+
     def test_unknown_capability_path_and_partial_inputs_never_become_low_risk(self):
         unknown_policy = copy.deepcopy(self.policy)
         unknown_policy["sensitive"]["capabilities"]["unknown-capability"] = {
@@ -738,7 +757,11 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 "_github_repository_identity",
                 return_value=("owner", "owner/repo"),
             ),
-            mock.patch.object(REPOCTL, "_pr_loop_checkout_errors", return_value=[]),
+            mock.patch.multiple(
+                REPOCTL,
+                _pr_loop_checkout_errors=mock.Mock(return_value=[]),
+                _require_trusted_pr_execution=mock.Mock(return_value={}),
+            ),
         )
 
     def test_dry_run_is_read_only_and_emits_exact_code_handoff(self):
@@ -1216,6 +1239,20 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_direct_pr_loop_requires_the_exact_base_wrapper(self):
+        with (
+            mock.patch.dict(REPOCTL.os.environ, {}, clear=True),
+            mock.patch.object(REPOCTL, "_TRUSTED_PR_EXECUTION_CONTEXT", None),
+        ):
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL.pr_loop(162, json_output=True)
+        result = json.loads(stream.getvalue().strip().splitlines()[-1])
+        self.assertEqual(1, rc)
+        self.assertEqual("BLOCKED", result["state"])
+        self.assertEqual("USE_EXACT_BASE_CONTROLLER", result["next_action"])
+        self.assertIn("trusted-pr-transition", result["blockers"][0])
+
     def test_risk_decision_executes_only_the_exact_base_controller(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         runner = source[
@@ -1239,6 +1276,8 @@ class PRLoopSourceContractTests(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         self.assertIn("pr-loop:", makefile)
+        self.assertIn("trusted-pr-transition", makefile)
+        self.assertIn("TRUSTED_ROOT", makefile)
         self.assertIn('sub.add_parser("pr-loop")', source)
         self.assertIn('loop.add_argument("--json"', source)
         self.assertIn('loop.add_argument("--dry-run"', source)

@@ -29,6 +29,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             ],
         )
         self.assertEqual(2, policy["pr_loop"]["schema_version"])
+        self.assertEqual("scripts/repository_delivery.py", policy["pr_loop"]["controller"])
+        self.assertEqual("exact-pr-base-sha", policy["pr_loop"]["controller_source"])
+        self.assertEqual("trusted-pr-transition", policy["pr_loop"]["command"])
+        self.assertEqual("forbidden", policy["pr_loop"]["direct_head_controller"])
         handoff = policy["pr_loop"]["chatgpt_handoff"]
         self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
@@ -142,6 +146,8 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         policy = repoctl.repository_delivery_policy()
         mutations = (
             lambda value: value["pr_loop"]["merge_delegation"].__setitem__("direct_merge", "allowed"),
+            lambda value: value["pr_loop"].__setitem__("controller_source", "pull-request-head"),
+            lambda value: value["pr_loop"].__setitem__("direct_head_controller", "allowed"),
             lambda value: value["pr_loop"]["risk_classification"].__setitem__("llm_decision", "allowed"),
             lambda value: value["pr_loop"]["risk_classification"].__setitem__(
                 "controller_source", "pull-request-head"
@@ -152,6 +158,9 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             lambda value: value["pr_loop"]["risk_classification"]["low_risk"].__setitem__(
                 "eligible_paths", ["**"]
             ),
+            lambda value: value["pr_loop"]["risk_classification"]["sensitive"][
+                "capabilities"
+            ]["iam"]["paths"].remove("services/**/oauth/**"),
             lambda value: value["pr_loop"]["risk_classification"]["sensitive"][
                 "capabilities"
             ].pop("governance"),
@@ -167,8 +176,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
         self.assertIn("publish-change:", makefile)
         self.assertIn("scripts/repoctl.py publish-change", makefile)
+        self.assertIn("trusted-pr-transition", makefile)
+        self.assertIn("TRUSTED_ROOT", makefile)
         self.assertIn("finish-pr:", makefile)
-        self.assertIn("scripts/repoctl.py finish-pr", makefile)
+        self.assertIn("finish-pr is internal", makefile)
 
 
 if __name__ == "__main__":

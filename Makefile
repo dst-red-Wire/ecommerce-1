@@ -220,11 +220,13 @@ publish-change: ## Canonical alias: qualify, commit and push the current feature
 deliver: signing-rotation-check ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-pr-loop: ## Derive and perform the next exact-SHA PR delivery transition; PR required, DRY_RUN=1 is read-only
-	@$(PYTHON) scripts/repoctl.py pr-loop --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+pr-loop: ## Run from TRUSTED_ROOT checked out cleanly at the PR BASE_SHA; PR required
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@$(PYTHON) "$(TRUSTED_ROOT)/scripts/repository_delivery.py" trusted-pr-transition --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
 
-finish-pr: signing-rotation-check ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
-	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
+finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
+	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2
+	@exit 1
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
 	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"

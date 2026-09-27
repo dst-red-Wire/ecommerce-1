@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from typing import Any
 import urllib.error
@@ -307,6 +309,148 @@ def _worktree_snapshot(root: Path) -> tuple[str, str, str]:
     return branch, head, status
 
 
+def _github_repository(root: Path, gh: str) -> str:
+    raw = _output([gh, "repo", "view", "--json", "nameWithOwner"], cwd=root)
+    try:
+        repository = str(json.loads(raw or "{}").get("nameWithOwner") or "")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub repository identity returned invalid JSON") from exc
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
+        raise RuntimeError("GitHub repository identity is missing or invalid")
+    return repository
+
+
+def _github_pr_binding(root: Path, gh: str, pr_number: int) -> dict[str, Any]:
+    raw = _output(
+        [
+            gh,
+            "pr",
+            "view",
+            str(pr_number),
+            "--json",
+            "number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
+        ],
+        cwd=root,
+    )
+    try:
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHub pull request binding returned invalid JSON") from exc
+    if not isinstance(value, dict) or value.get("number") != pr_number:
+        raise RuntimeError("GitHub pull request binding does not match the requested PR")
+    for field in ("baseRefOid", "headRefOid"):
+        if not re.fullmatch(r"[0-9a-f]{40}", str(value.get(field) or "")):
+            raise RuntimeError(f"GitHub pull request {field} is missing or invalid")
+    if value.get("baseRefName") != "main":
+        raise RuntimeError("trusted PR transition requires the main default branch")
+    if value.get("state") not in {"OPEN", "MERGED"}:
+        raise RuntimeError(f"trusted PR transition refuses PR state {value.get('state')!r}")
+    return value
+
+
+def _require_clean_sha(root: Path, expected_sha: str, label: str) -> None:
+    if not root.is_dir():
+        raise RuntimeError(f"{label} checkout does not exist: {root}")
+    actual_sha = _git(root, "rev-parse", "HEAD").strip()
+    if actual_sha != expected_sha:
+        raise RuntimeError(
+            f"{label} checkout SHA mismatch: expected {expected_sha}, got {actual_sha}"
+        )
+    if _git(root, "status", "--porcelain", "--untracked-files=all").strip():
+        raise RuntimeError(f"{label} checkout must be clean at the exact SHA")
+
+
+def trusted_pr_transition(
+    trusted_root: Path,
+    target_root: Path,
+    pr_number: int,
+    python_executable: str,
+    *,
+    dry_run: bool = False,
+    json_output: bool = False,
+) -> int:
+    """Run the PR state machine exclusively from the PR's clean exact-base checkout."""
+    trusted_root = trusted_root.resolve()
+    target_root = target_root.resolve()
+    if pr_number < 1:
+        raise RuntimeError("PR number must be a positive integer")
+    if trusted_root == target_root:
+        raise RuntimeError("trusted base and target PR checkouts must be distinct")
+
+    wrapper = Path(__file__).resolve()
+    expected_wrapper = trusted_root / "scripts/repository_delivery.py"
+    trusted_controller = trusted_root / "scripts/repoctl.py"
+    if wrapper != expected_wrapper.resolve():
+        raise RuntimeError("trusted PR wrapper must execute from its own trusted checkout")
+    if not trusted_controller.is_file():
+        raise RuntimeError("trusted exact-base repoctl.py is unavailable")
+
+    gh = require_command("gh")
+    binding = _github_pr_binding(trusted_root, gh, pr_number)
+    base_sha = str(binding["baseRefOid"])
+    head_sha = str(binding["headRefOid"])
+    _require_clean_sha(trusted_root, base_sha, "trusted base")
+    _require_clean_sha(target_root, head_sha, "target PR")
+
+    trusted_repository = _github_repository(trusted_root, gh)
+    target_repository = _github_repository(target_root, gh)
+    if target_repository != trusted_repository:
+        raise RuntimeError(
+            f"target repository mismatch: expected {trusted_repository}, got {target_repository}"
+        )
+    if _run(
+        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+        cwd=target_root,
+        check=False,
+        capture=True,
+    ).returncode:
+        raise RuntimeError("target PR head is not descended from its exact GitHub base")
+
+    environment = os.environ.copy()
+    for name in (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_WORK_TREE",
+        "PYTHONHOME",
+        "PYTHONINSPECT",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+    ):
+        environment.pop(name, None)
+    environment.update(
+        {
+            "REPOCTL_TRUSTED_WRAPPER": str(wrapper),
+            "REPOCTL_TRUSTED_CONTROLLER": str(trusted_controller.resolve()),
+            "REPOCTL_TRUSTED_POLICY_ROOT": str(trusted_root),
+            "REPOCTL_TRUSTED_BASE_SHA": base_sha,
+            "REPOCTL_TRUSTED_TARGET_ROOT": str(target_root),
+            "REPOCTL_TRUSTED_HEAD_SHA": head_sha,
+            "REPOCTL_TRUSTED_PR_NUMBER": str(pr_number),
+        }
+    )
+    command = [
+        python_executable,
+        "-I",
+        str(trusted_controller.resolve()),
+        "pr-loop",
+        "--pr",
+        str(pr_number),
+    ]
+    if dry_run:
+        command.append("--dry-run")
+    if json_output:
+        command.append("--json")
+    return _run(
+        command,
+        cwd=target_root,
+        check=False,
+        env=environment,
+    ).returncode
+
+
 def bundle_deliver(
     root: Path, trusted_controller: Path, bundle: str, expected_head: str, title: str, base: str, python_executable: str
 ) -> int:
@@ -493,3 +637,32 @@ def publish_remote_status(
         _publish_github_status(head_sha, state, description, target_url, context)
         return True
     return False
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    transition = subparsers.add_parser("trusted-pr-transition")
+    transition.add_argument("--target-root", required=True)
+    transition.add_argument("--pr", required=True, type=int)
+    transition.add_argument("--dry-run", action="store_true")
+    transition.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+    try:
+        if args.command == "trusted-pr-transition":
+            return trusted_pr_transition(
+                Path(__file__).resolve().parents[1],
+                Path(args.target_root),
+                args.pr,
+                sys.executable,
+                dry_run=args.dry_run,
+                json_output=args.json,
+            )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        print(f"BLOCKED {exc}", file=sys.stderr)
+        return 1
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
