@@ -406,20 +406,13 @@ def trusted_pr_transition(
     ).returncode:
         raise RuntimeError("target PR head is not descended from its exact GitHub base")
 
-    environment = os.environ.copy()
-    for name in (
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-        "GIT_COMMON_DIR",
-        "GIT_DIR",
-        "GIT_INDEX_FILE",
-        "GIT_OBJECT_DIRECTORY",
-        "GIT_WORK_TREE",
-        "PYTHONHOME",
-        "PYTHONINSPECT",
-        "PYTHONPATH",
-        "PYTHONSTARTUP",
-    ):
-        environment.pop(name, None)
+    # The wrapper is exact-base code, but its controller executes some commands
+    # against the untrusted head checkout. Never forward an arbitrary runner env.
+    allowed = {
+        "PATH", "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING",
+        "GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY",
+    }
+    environment = {name: value for name, value in os.environ.items() if name in allowed}
     environment.update(
         {
             "REPOCTL_TRUSTED_WRAPPER": str(wrapper),

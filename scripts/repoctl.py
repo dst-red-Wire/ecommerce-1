@@ -1015,6 +1015,35 @@ def run(
     check: bool = True,
     capture: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        # The controller is exact-base code, but cwd is the untrusted PR head.
+        # Default every child to a small, credential-free environment.
+        safe_keys = {"PATH", "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING"}
+        source = env if env is not None else os.environ
+        allowed = set(safe_keys)
+        executable = Path(cmd[0]).name if cmd else ""
+        trusted_controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "")
+        is_trusted_controller = (
+            len(cmd) >= 2
+            and Path(cmd[0]).resolve() == Path(sys.executable).resolve()
+            and bool(trusted_controller)
+            and Path(cmd[1]).resolve() == Path(trusted_controller).resolve()
+        )
+        if executable in {"gh", "gh.exe"} or is_trusted_controller or cmd[:2] == ["git", "push"]:
+            allowed.update({"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY"})
+        if is_trusted_controller:
+            allowed.update(name for name in os.environ if name.startswith("REPOCTL_TRUSTED_"))
+        env = {name: value for name, value in source.items() if name in allowed}
+        if cmd[:2] == ["git", "push"]:
+            # Git is a trusted external tool here. Disable repository hooks and
+            # authenticate only this exact push via gh; no HEAD script is run.
+            env.update({
+                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "core.hooksPath",
+                "GIT_CONFIG_VALUE_0": "/dev/null",
+                "GIT_CONFIG_KEY_1": "credential.helper",
+                "GIT_CONFIG_VALUE_1": "!gh auth git-credential",
+            })
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -6984,14 +7013,20 @@ def branch_cleanup(*, dry_run: bool = False, fetch_remote: bool = True) -> int:
 
 
 def roadmap_check(*, quiet: bool = False) -> int:
-    command = [sys.executable, "scripts/roadmap_sync.py", "check"]
+    script = "scripts/roadmap_sync.py"
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        script = str(Path(os.environ["REPOCTL_TRUSTED_POLICY_ROOT"]) / script)
+    command = [sys.executable, script, "check"]
     if quiet:
         command.append("--quiet")
     return run(command, check=False).returncode
 
 
 def roadmap_sync() -> int:
-    return run([sys.executable, "scripts/roadmap_sync.py", "sync"], check=False).returncode
+    script = "scripts/roadmap_sync.py"
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        script = str(Path(os.environ["REPOCTL_TRUSTED_POLICY_ROOT"]) / script)
+    return run([sys.executable, script, "sync"], check=False).returncode
 
 
 def qce_status_command(*, json_output: bool = False, sector: str = "", trace: bool = False) -> int:
@@ -7331,6 +7366,8 @@ def _roadmap_followup_after_merge() -> int:
         return 0
     if check_rc != 1:
         return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        return fail("roadmap drift requires a separate credential-free follow-up; no HEAD-owned delivery after merge")
 
     main_sha = git("rev-parse", "HEAD").strip()
     if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
@@ -9262,12 +9299,13 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
 
 def finish_pr(base: str) -> int:
     try:
-        _require_trusted_pr_execution()
+        trusted_context = _require_trusted_pr_execution()
     except RuntimeError as exc:
         return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
-    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+    rotation = Path(trusted_context["trusted_root"]) / "scripts/signing_rotation.py"
+    if run([sys.executable, str(rotation), "rotation-check"], cwd=Path(trusted_context["trusted_root"]), check=False).returncode:
         return fail("finish-pr requires the signing rotation delivery gate")
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
@@ -9303,11 +9341,7 @@ def finish_pr(base: str) -> int:
 
     evidence = _valid_exact_evidence(base_ref, head)
     if evidence is None:
-        if verify_change(base_ref, head):
-            return 1
-        evidence = _valid_exact_evidence(base_ref, head)
-    if evidence is None:
-        return fail(f"finish-pr exact PASS evidence missing for {head}")
+        return fail(f"finish-pr exact PASS evidence missing for {head}; external Tekton qualification required")
 
     proof_workflow = qualification_workflow("qualification_proof")
     if proof_workflow.get("merge_authoritative") is not True:
@@ -10053,6 +10087,12 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         risk=result["risk"],
     )
     if state == "QUALIFICATION_REQUIRED" and not dry_run:
+        if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+            result["state"] = "QUALIFICATION_REQUIRED"
+            result["next_action"] = "EXTERNAL_TEKTON_QUALIFICATION"
+            result["blockers"].append("trusted transition requires pre-existing exact-SHA Tekton evidence")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         try:
             before_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
         except RuntimeError as exc:

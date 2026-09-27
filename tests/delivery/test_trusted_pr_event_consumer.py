@@ -60,9 +60,16 @@ class EventConsumerTests(unittest.TestCase):
         with mock.patch.object(MODULE, "github", side_effect=[repo, pr]):
             self.assertEqual(MODULE.live_binding(163), ("a" * 40, "b" * 40))
 
+    def test_draft_pr_is_blocked_before_mutation(self):
+        repo = {"full_name": MODULE.REPOSITORY, "default_branch": "main"}
+        pr = {"number": 163, "state": "open", "draft": True, "base": {"ref": "main", "repo": {"full_name": MODULE.REPOSITORY}, "sha": "a" * 40}, "head": {"sha": "b" * 40}}
+        with mock.patch.object(MODULE, "github", side_effect=[repo, pr]):
+            with self.assertRaises(MODULE.Blocked):
+                MODULE.live_binding(163)
+
     def test_missing_qualification_never_invokes_mutating_transition(self):
         probe = mock.Mock(returncode=0, stdout='{"head_sha":"' + "b" * 40 + '","qualification":{"status":"MISSING"}}')
-        with mock.patch.object(MODULE.subprocess, "run", return_value=probe) as subprocess_run:
+        with mock.patch.dict(MODULE.os.environ, {"GH_TOKEN": "test-token", "GITHUB_REPOSITORY": MODULE.REPOSITORY}), mock.patch.object(MODULE.subprocess, "run", return_value=probe) as subprocess_run:
             with self.assertRaises(MODULE.Blocked):
                 MODULE.transition(Path("/base"), Path("/head"), 163)
         self.assertEqual(subprocess_run.call_count, 1)

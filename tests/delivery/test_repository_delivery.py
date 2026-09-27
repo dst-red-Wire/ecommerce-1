@@ -329,6 +329,13 @@ class BundleDeliveryTests(unittest.TestCase):
                 return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
 
             with (
+                mock.patch.dict(RD.os.environ, {
+                    "GH_TOKEN": "merge-token",
+                    "TRUSTED_PR_WEBHOOK_SECRET": "webhook-secret",
+                    "CI_EVIDENCE_COSIGN_KEY": "signing-key",
+                    "REGISTRY_PASSWORD": "registry-secret",
+                    "SUPER_SECRET_NEW_VARIABLE": "should-not-leak",
+                }),
                 mock.patch.object(RD, "__file__", str(trusted_wrapper)),
                 mock.patch.object(RD, "require_command", return_value="gh"),
                 mock.patch.object(RD, "_github_pr_binding", return_value=binding),
@@ -348,6 +355,12 @@ class BundleDeliveryTests(unittest.TestCase):
             self.assertEqual(str(trusted_controller), seen["cmd"][2])
             self.assertEqual(base_sha, seen["env"]["REPOCTL_TRUSTED_BASE_SHA"])
             self.assertEqual(head_sha, seen["env"]["REPOCTL_TRUSTED_HEAD_SHA"])
+            self.assertEqual("merge-token", seen["env"]["GH_TOKEN"])
+            for secret in (
+                "TRUSTED_PR_WEBHOOK_SECRET", "CI_EVIDENCE_COSIGN_KEY",
+                "REGISTRY_PASSWORD", "SUPER_SECRET_NEW_VARIABLE",
+            ):
+                self.assertNotIn(secret, seen["env"])
 
 
 class RemoteStatusTests(unittest.TestCase):
