@@ -181,7 +181,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 with (
                     mock.patch.object(
                         sys, "argv",
-                        ["repoctl.py", action, selector, "platform:ansible", "--base", "origin/main",
+                        ["repoctl.py", action, selector, "governance", "--base", "origin/main",
                          "--head", current_head, "--record-dir", ".context/tekton/test"],
                     ),
                     mock.patch("native_workspace.workspace_error", return_value=None),
