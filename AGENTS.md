@@ -14,6 +14,12 @@ Before changing code or structure, read:
 
 Validated architecture is not to be redesigned during implementation unless an explicit contradiction is found and routed back to architecture governance.
 
+## Windows workspace rule
+
+- On Windows, perform every repository operation from WSL2 with the entire checkout on its native Linux filesystem (for example `/home/dev/ecommerce-1`).
+- Do not run repository Git, GPG, Ansible, build, test, or automation commands from a Windows-mounted path such as `/mnt/c`.
+- The canonical machine rule is `architecture.lock.yaml#repository_governance.windows_workspace`.
+
 ## Repository rules
 
 - Do not recreate, rename or move top-level architecture arbitrarily.

@@ -127,10 +127,14 @@
         - name: Destroy only owned VM
           ansible.builtin.include_tasks: destroy.yml
           when: vm_action == 'destroy'
+        - name: Mark completed disposable qualification
+          ansible.builtin.set_fact:
+            vm_qualification_complete: true
+          when: vm_action == 'qualify'
       always:
-        - name: Clean the owned VM after qualification success or failure
+        - name: Clean the owned VM after successful disposable qualification
           ansible.builtin.include_tasks: destroy.yml
-          when: vm_action == 'qualify' and vm_creation_authorized | default(false) | bool
+          when: vm_action == 'qualify' and vm_qualification_complete | default(false) | bool and vm_creation_authorized | default(false) | bool
         - name: Remove invocation-owned SSH sockets after success or failure
           ansible.builtin.file:
             path: "{{ vm_control_path.path }}"

@@ -206,13 +206,21 @@ def fetch_evidence(root: Path, context: Path, head_sha: str) -> Path:
 
 
 def _gitea_config() -> tuple[str, str, str] | None:
-    api = os.environ.get("GITEA_API_URL", "").strip().rstrip("/")
+    root_url = os.environ.get("GITEA_HTTPS_URL", "").strip().rstrip("/")
+    configured_api = os.environ.get("GITEA_API_URL", "").strip().rstrip("/")
+    derived_api = f"{root_url}/api/v1" if root_url else ""
+    if configured_api and derived_api and configured_api != derived_api:
+        raise RuntimeError("GITEA_API_URL contradicts GITEA_HTTPS_URL")
+    api = configured_api or derived_api
     repository = os.environ.get("GITEA_REPOSITORY", "").strip().strip("/")
     token = os.environ.get("GITEA_TOKEN", "").strip()
-    if not any((api, repository, token)):
+    if not repository and not token:
         return None
     if not all((api, repository, token)):
-        raise RuntimeError("GITEA_API_URL, GITEA_REPOSITORY and GITEA_TOKEN must be configured together")
+        raise RuntimeError(
+            "GITEA_HTTPS_URL (or GITEA_API_URL), GITEA_REPOSITORY and GITEA_TOKEN "
+            "must be configured together"
+        )
     if not re.fullmatch(r"[^/]+/[^/]+", repository):
         raise RuntimeError("GITEA_REPOSITORY must use owner/repository form")
     return api, repository, token
