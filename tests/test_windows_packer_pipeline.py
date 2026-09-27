@@ -192,7 +192,10 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("BLOCKED_PRIVILEGE", launcher)
         self.assertIn("GitHub PR #148 HEAD differs", launcher)
         self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("image-rocky-windows-native-prepare"))
-        self.assertLess(launcher.index("image-rocky-windows-native-prepare"), launcher.index("-Action Reboot"))
+        self.assertIn("python3 scripts/repoctl.py image-rocky-windows-native-reboot", launcher)
+        self.assertLess(launcher.index("image-rocky-windows-native-prepare"), launcher.index("image-rocky-windows-native-reboot"))
+        self.assertNotRegex(launcher, r"(?i)-Action\s+Reboot\b")
+        self.assertNotIn("$cycleScript", launcher)
         self.assertIn("BCD remains unchanged", launcher)
 
     def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):
@@ -200,6 +203,27 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("Read-SharedUtf8Text -Path $log", self.native)
         self.assertIn("$attempt -le 20", self.native)
         self.assertIn("shared VirtualBox log read self-test failed", self.native)
+
+    def test_canonical_launcher_reboot_requires_global_virtualization_lock(self):
+        launcher = self.native_launcher
+        self.assertIn(
+            "python3 scripts/repoctl.py image-rocky-windows-native-reboot", launcher
+        )
+        self.assertNotRegex(launcher, r"(?i)-Action\s+Reboot\b")
+        self.assertNotRegex(launcher, r"(?i)-File\s+\$cycleScript")
+        repoctl = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        wrapper = repoctl.split("if args.cmd in {", 1)[1].split(
+            '} and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED")', 1
+        )[0]
+        self.assertIn('"image-rocky-windows-native-reboot"', wrapper)
+        self.assertIn("return image_phase_with_runtime(args.cmd", repoctl)
+        policy = yaml.safe_load(
+            (ROOT / "config/contracts/qualification-execution-policy.yaml").read_text()
+        )
+        self.assertTrue(
+            policy["runtime_orchestration"]["capabilities"]
+            ["local-virtualization-serialization"]["global_lock"]
+        )
 
     def test_packer_source_and_plugins_are_exact(self):
         source = self.machine["packer_image"]["source"]
