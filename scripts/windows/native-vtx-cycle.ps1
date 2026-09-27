@@ -32,6 +32,7 @@ Set-PipelineUtf8
 . (Join-Path $PSScriptRoot 'NativeLocalServices.ps1')
 . (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1')
 . (Join-Path $PSScriptRoot 'LabNetworkSeed.ps1')
+. (Join-Path $PSScriptRoot 'NativeStorageGc.ps1')
 
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
@@ -134,6 +135,33 @@ function New-NativeRuntimeIdentity {
         throw
     }
     return $destination
+}
+
+function Test-NativeStorageGcRuntimeClear {
+    $hostState = Get-NormalHostState
+    if (-not $hostState.hypervisor_present -or $hostState.hypervisorlaunchtype -eq 'off') { return $false }
+    $preparedPath = Join-Path $script:LabRootResolved 'prepared.json'
+    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+        $prepared = Read-JsonFile $preparedPath
+        if ($prepared.status -eq 'PREPARED') { return $false }
+    }
+    $startupStatePath = Join-Path $script:LabRootResolved 'startup-real\state.json'
+    if (Test-Path -LiteralPath $startupStatePath -PathType Leaf) {
+        $startupState = Read-JsonFile $startupStatePath
+        if ($startupState.phase -notin @('COMPLETE','FAILED')) { return $false }
+    }
+    $normalStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
+    if (Test-Path -LiteralPath $normalStatePath -PathType Leaf) {
+        $normalState = Read-JsonFile $normalStatePath
+        if ($normalState.current_loader_id -ne $hostState.current_loader_id) { return $false }
+    }
+    if ($hostState.current_loader_id -in @(Find-NativeWindowsLoaderIds)) { return $false }
+    foreach ($taskName in @($NativeTaskName, $WatchdogTaskName, $ResumeTaskName)) {
+        if ($null -ne (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)) { return $false }
+    }
+    $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))
+    $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $env:SystemRoot
+    return $machines.Count -eq 0
 }
 
 function Assert-NativeFreeSpace {
@@ -1196,6 +1224,11 @@ function Invoke-NativeRun {
             staging_manifest_sha256 = [string]$prepared.staging_manifest_sha256
             packer_log_sha256 = Get-FileSha256 -Path $retainedPackerLog
         }) -Path (Join-Path $artifactRoot 'manifest.json')
+        Write-Utf8Json -InputObject ([ordered]@{
+            schema=1; owner='ecommerce-1/native-vtx'; kind='artifacts'
+            generation=(Split-Path -Leaf $artifactRoot); source_sha=$sourceSha
+            status='successful'; completed_at=Get-UtcTimestamp
+        }) -Path (Join-Path $artifactRoot 'storage-generation.json')
         [IO.File]::WriteAllText((Join-Path $artifactRoot 'SHA256SUMS'), "$artifactSha256  $([IO.Path]::GetFileName($artifact))`n", [Text.UTF8Encoding]::new($false))
         }
 
@@ -1662,7 +1695,7 @@ function Invoke-Prepare {
         throw 'Prepare repository root must be the exact WSL worktree that owns the source SHA'
     }
     $minimumStageGiB = if ($ReuseBoxPath) { 24 } else { 40 }
-    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB $minimumStageGiB -Operation 'native cycle preparation'
+    $targetStageGiB = if ($ReuseBoxPath) { 32 } else { 48 }
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
     if (-not $gitState.Clean) { throw 'Native VT-x staging requires a clean exact-SHA worktree' }
     $treeResult = Invoke-WslProcess -Distribution $WslDistribution -WslWorkingDirectory $WslRepoRoot -Command 'git' -Arguments @('rev-parse', 'HEAD^{tree}') -TimeoutSeconds 60
@@ -1708,6 +1741,8 @@ function Invoke-Prepare {
             source_sha = [string]$manifest.source_sha
         }
     }
+    [void](Invoke-NativeStorageGc -LabRoot $script:LabRootResolved -RequiredFreeGiB $minimumStageGiB -TargetFreeGiB $targetStageGiB -ReuseBoxPath $ReuseBoxPath -RuntimeClearProbe { Test-NativeStorageGcRuntimeClear })
+    Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB $minimumStageGiB -Operation 'native cycle preparation'
     [void](Assert-StartupDryRunProof -SourceSha $sourceSha)
     $normalHostState = Get-NormalHostState
     $hostStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
@@ -1764,6 +1799,7 @@ function Invoke-Prepare {
         Copy-Item -LiteralPath (Join-Path $root 'platform\vagrant\rocky-image-smoke\Vagrantfile') -Destination (Join-Path $preparedStage 'smoke\Vagrantfile')
         Copy-Item -LiteralPath (Join-Path $root 'scripts\windows\RockyImagePipeline.psm1') -Destination (Join-Path $preparedStage 'runner\RockyImagePipeline.psm1')
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $preparedStage 'runner\native-vtx-cycle.ps1')
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeStorageGc.ps1') -Destination (Join-Path $preparedStage 'runner\NativeStorageGc.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeLocalServices.ps1') -Destination (Join-Path $preparedStage 'runner\NativeLocalServices.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'NativeVagrantSshSmoke.ps1') -Destination (Join-Path $preparedStage 'runner\NativeVagrantSshSmoke.ps1')
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LabNetworkSeed.ps1') -Destination (Join-Path $preparedStage 'runner\LabNetworkSeed.ps1')
@@ -2040,6 +2076,7 @@ function Invoke-CyclePreflight {
     if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
         throw 'Native cycle preflight must target the exact WSL source worktree'
     }
+    [void](Invoke-NativeStorageGc -LabRoot $script:LabRootResolved -RequiredFreeGiB 40 -TargetFreeGiB 48 -RuntimeClearProbe { Test-NativeStorageGcRuntimeClear })
     Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preflight'
     Assert-LocalHostOnlyNetwork
     $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))

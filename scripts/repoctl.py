@@ -9420,9 +9420,13 @@ def _windows_powershell_environment() -> dict[str, str]:
     inherited_wslenv = [
         entry
         for entry in environment.get("WSLENV", "").split(":")
-        if entry and entry.split("/", 1)[0].lower() != "psmodulepath"
+        if entry and entry.split("/", 1)[0].lower() not in {
+            "psmodulepath", "ecommerce_runtime_orchestrated"
+        }
     ]
-    environment["WSLENV"] = ":".join(["PSModulePath", *inherited_wslenv])
+    environment["WSLENV"] = ":".join(
+        ["PSModulePath", "ECOMMERCE_RUNTIME_ORCHESTRATED", *inherited_wslenv]
+    )
     return environment
 
 

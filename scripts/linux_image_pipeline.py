@@ -160,7 +160,12 @@ def run(
             stdout, stderr = process.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=10)
+            except subprocess.TimeoutExpired as kill_exc:
+                raise PipelineError(
+                    f"command remained alive 10s after SIGKILL: {arguments[0]}"
+                ) from kill_exc
         raise PipelineError(
             f"bounded command timed out after {timeout}s: {arguments[0]}"
         ) from exc
@@ -171,6 +176,26 @@ def run(
             f"command failed with exit code {result.returncode}: {arguments[0]}: {detail}"
         )
     return result
+
+
+def stop_qemu_process(process: subprocess.Popen[str]) -> str | None:
+    """Stop a QEMU process group without allowing cleanup to block evidence."""
+    try:
+        if process.poll() is not None:
+            return None
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            return "QEMU remained alive 10s after SIGKILL"
+        except OSError as exc:
+            return str(exc)
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def safe_remove_tree(path: Path) -> None:
@@ -867,18 +892,17 @@ def qualify() -> int:
         evidence["error"] = str(exc)
     finally:
         cleanup_failed = False
-        if qemu_process is not None and qemu_process.poll() is None:
+        if qemu_process is not None:
+            qemu_cleanup_error = stop_qemu_process(qemu_process)
+            if qemu_cleanup_error is not None:
+                cleanup_failed = True
+                evidence["error"] = evidence["error"] or qemu_cleanup_error
+        if qemu_log is not None:
             try:
-                os.killpg(qemu_process.pid, signal.SIGTERM)
-                qemu_process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                os.killpg(qemu_process.pid, signal.SIGKILL)
-                qemu_process.wait(timeout=10)
+                qemu_log.close()
             except OSError as exc:
                 cleanup_failed = True
                 evidence["error"] = evidence["error"] or str(exc)
-        if qemu_log is not None:
-            qemu_log.close()
         evidence["qualification"]["cleanup"] = "FAIL" if cleanup_failed else "PASS"
         try:
             if private_key is not None:

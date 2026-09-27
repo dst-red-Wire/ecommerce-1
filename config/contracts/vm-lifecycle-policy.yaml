@@ -37,6 +37,33 @@ vagrant:
   single_bounded_boot_attempt: required
   stage_level_readiness_evidence: required
   generic_ssh_timeout_result: forbidden
+storage_gc:
+  enabled: true
+  automatic: true
+  fail_closed: true
+  serialization_capability: local-virtualization-serialization
+  trigger:
+    required_free_gib: {build: 40, reuse: 24}
+    target_free_gib: {build: 48, reuse: 32}
+  ownership:
+    root: C:/ecommerce-lab
+    manifest_required: true
+    foreign_paths: forbidden
+  retention:
+    successful_generations: 1
+    failed_generations: 1
+  deletion:
+    oldest_first: true
+    stop_when_target_free_space_reached: true
+    reparse_points: forbidden
+    active_generation: forbidden
+    referenced_generation: forbidden
+    registered_vm_generation: forbidden
+  verification:
+    measure_before: required
+    measure_after_each_delete: required
+    final_free_space: required
+    evidence: required
 virtualbox:
   lifecycle_state_detection: required
   unnecessary_power_cycle: forbidden

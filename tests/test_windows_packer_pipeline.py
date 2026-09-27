@@ -1,6 +1,7 @@
 import json
 import importlib.util
 import re
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -96,6 +97,29 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("Remove superseded WSL Packer installation", ansible)
         self.assertIn("local_bin }}/packer", ansible)
+
+    def test_windows_runtime_regressions_with_real_powershell(self):
+        pwsh = Path("/mnt/c/Program Files/PowerShell/7/pwsh.exe")
+        if not pwsh.is_file():
+            self.skipTest("Windows PowerShell interop is unavailable")
+        for script in ("BoundedProcess.Tests.ps1", "NativeStorageGc.Tests.ps1"):
+            result = subprocess.run(
+                [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                 "Bypass", "-File", f"tests/windows/{script}"],
+                cwd=ROOT, capture_output=True, text=True, timeout=90,
+            )
+            self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_native_storage_gc_contract(self):
+        policy = yaml.safe_load((ROOT / "config/contracts/vm-lifecycle-policy.yaml").read_text())
+        gc = policy["storage_gc"]
+        self.assertTrue(gc["automatic"])
+        self.assertTrue(gc["fail_closed"])
+        self.assertEqual("local-virtualization-serialization", gc["serialization_capability"])
+        self.assertEqual({"build": 40, "reuse": 24}, gc["trigger"]["required_free_gib"])
+        self.assertEqual({"build": 48, "reuse": 32}, gc["trigger"]["target_free_gib"])
+        self.assertEqual(1, gc["retention"]["successful_generations"])
+        self.assertEqual(1, gc["retention"]["failed_generations"])
 
     def test_preparation_defers_firmware_probe_until_native_boot(self):
         self.assertIn(
@@ -217,6 +241,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn(r"C:\Windows\system32\WindowsPowerShell\v1.0\Modules", repoctl)
         self.assertNotIn(r"C:\Program Files\PowerShell\7\Modules", repoctl)
         self.assertIn('environment["WSLENV"]', repoctl)
+        self.assertIn('"ECOMMERCE_RUNTIME_ORCHESTRATED", *inherited_wslenv', repoctl)
         primitives = {
             entry["command"] for entry in self.capabilities["platform_primitives"]
         }

@@ -514,3 +514,30 @@ HAProxy behavior, internal DNS/NTP availability, control-plane loss/recovery or
 RKE2 runtime security proof. Those remain owned by the existing Ansible/RKE2
 qualification workflow. A build that was not executed is `NOT EXECUTED`; static
 tests can never manufacture runtime `PASS` evidence.
+
+
+### Native laboratory storage collection
+
+The Windows native preflight and preparation measure free space on the volume
+containing `C:\ecommerce-lab`. A build requires 40 GiB and targets 48 GiB;
+a validated reused box requires 24 GiB and targets 32 GiB. If the required
+space is already free, collection reports `NOT_REQUIRED` and removes nothing.
+
+When space is short, the collector considers only generation directories under
+`staging` and `artifacts` with a recognized
+`storage-generation.json` and matching pipeline provenance. Artifact boxes
+and retained Packer logs are checked against their manifest hashes. Unknown
+directories and reparse points are rejected. It protects `current`, the box
+selected for reuse, prepared and recovery references, and refuses mutation
+while a native task or VirtualBox VM is registered. The newest successful and
+newest failed generation are retained; failed material remains available for
+investigation. Candidates are removed oldest first and collection stops as
+soon as the target is reached.
+
+The collector uses the repository's
+`local-virtualization-serialization` capability before mutation. Results,
+rejections, protected paths, free-space measurements and deleted generations
+are recorded in `C:\ecommerce-lab\evidence\current\storage-gc.json`.
+If verified generations cannot restore the required free space, the preflight
+ends `BLOCKED_RUNTIME`. No unrelated Windows, WSL, VirtualBox or user data is
+included in the collection scope.

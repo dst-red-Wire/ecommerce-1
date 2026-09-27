@@ -40,6 +40,18 @@ function ConvertTo-NativeArgument {
     return $builder.ToString()
 }
 
+function Assert-BoundedProcessTermination {
+    param(
+        [Parameter(Mandatory = $true)]$Process,
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+    if (-not $Process.WaitForExit(10000)) {
+        throw "Timed out after ${TimeoutSeconds}s; process remained alive 10s after taskkill: $FilePath"
+    }
+}
+
+
 function Invoke-BoundedProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
@@ -93,9 +105,33 @@ function Invoke-BoundedProcess {
         }
     }
     if ($timedOut) {
-        & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F *> $null
-        $process.WaitForExit()
-        throw "Timed out after ${TimeoutSeconds}s: $FilePath"
+        $killerInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $killerInfo.FileName = "$env:SystemRoot\System32\taskkill.exe"
+        $killerInfo.Arguments = "/PID $($process.Id) /T /F"
+        $killerInfo.UseShellExecute = $false
+        $killerInfo.CreateNoWindow = $true
+        $killer = [System.Diagnostics.Process]::Start($killerInfo)
+        try {
+            if (-not $killer.WaitForExit(10000)) {
+                $killer.Kill()
+                throw "Timed out after ${TimeoutSeconds}s; taskkill itself exceeded 10s: $FilePath"
+            }
+        }
+        finally { $killer.Dispose() }
+        Assert-BoundedProcessTermination -Process $process -FilePath $FilePath -TimeoutSeconds $TimeoutSeconds
+        $diagnostic = @()
+        if ($stdoutTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+            $diagnostic += $stdoutTask.Result
+        }
+        if ($stderrTask.Status -eq [System.Threading.Tasks.TaskStatus]::RanToCompletion) {
+            $diagnostic += $stderrTask.Result
+        }
+        $tail = (($diagnostic -join "`n").Trim())
+        if ($tail.Length -gt 2000) { $tail = $tail.Substring($tail.Length - 2000) }
+        throw "Timed out after ${TimeoutSeconds}s: $FilePath; output=$tail"
+    }
+    if (-not [System.Threading.Tasks.Task]::WaitAll(@($stdoutTask, $stderrTask), 10000)) {
+        throw "Process output streams did not close within 10s: $FilePath"
     }
     $stdout = $stdoutTask.GetAwaiter().GetResult()
     $stderr = $stderrTask.GetAwaiter().GetResult()
@@ -403,4 +439,4 @@ function Assert-ImageSupplyChainEvidence {
     }
 }
 
-Export-ModuleMember -Function Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine, New-ImageSupplyChainEvidence, Assert-ImageSupplyChainEvidence
+Export-ModuleMember -Function Assert-BoundedProcessTermination, Set-PipelineUtf8, ConvertTo-NativeArgument, Invoke-BoundedProcess, Assert-ProcessSuccess, Write-Utf8Json, Read-JsonFile, Get-RepositoryRoot, Get-ToolchainLock, Resolve-WindowsTool, Get-LocalPipelineRoot, Assert-SafeChildPath, Remove-SafeTree, Get-FileSha256, Convert-ToWslPath, Invoke-WslProcess, Get-GitState, Get-VBoxMachines, Remove-OwnedVirtualMachine, New-ImageSupplyChainEvidence, Assert-ImageSupplyChainEvidence

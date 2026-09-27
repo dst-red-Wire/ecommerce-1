@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import subprocess
+from unittest import mock
 import unittest
 from pathlib import Path
 
@@ -98,7 +100,7 @@ class LinuxPackerPipelineTest(unittest.TestCase):
         self.assertIn('"virtio-net-pci,netdev=net0"', self.pipeline)
         self.assertIn('"smoke-overlay.qcow2"', self.pipeline)
         self.assertIn("for attempt in range(1, 13)", self.pipeline)
-        self.assertIn("os.killpg(qemu_process.pid, signal.SIGTERM)", self.pipeline)
+        self.assertIn("stop_qemu_process(qemu_process)", self.pipeline)
         self.assertIn("private_key.unlink(missing_ok=True)", self.pipeline)
         self.assertNotIn("shell=True", self.pipeline)
 
@@ -125,6 +127,38 @@ class LinuxPackerPipelineTest(unittest.TestCase):
         evidence["sbom"]["components"].pop()
         with self.assertRaises(PIPELINE.PipelineError):
             PIPELINE.assert_image_supply_chain(evidence, digest)
+
+    def test_command_timeout_bounds_term_and_kill(self):
+        process = mock.Mock(pid=421)
+        process.communicate.side_effect = [
+            subprocess.TimeoutExpired("packer", 1),
+            subprocess.TimeoutExpired("packer", 10),
+            subprocess.TimeoutExpired("packer", 10),
+        ]
+        with mock.patch.object(PIPELINE.subprocess, "Popen", return_value=process), mock.patch.object(
+            PIPELINE.os, "killpg"
+        ) as kill:
+            with self.assertRaisesRegex(PIPELINE.PipelineError, "remained alive 10s after SIGKILL"):
+                PIPELINE.run(["packer"], timeout=1)
+        self.assertEqual([mock.call(timeout=1), mock.call(timeout=10), mock.call(timeout=10)],
+                         process.communicate.call_args_list)
+        self.assertEqual([mock.call(421, PIPELINE.signal.SIGTERM),
+                          mock.call(421, PIPELINE.signal.SIGKILL)], kill.call_args_list)
+
+    def test_qemu_cleanup_second_timeout_is_recorded(self):
+        process = mock.Mock(pid=422)
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("qemu", 30),
+            subprocess.TimeoutExpired("qemu", 10),
+        ]
+        with mock.patch.object(PIPELINE.os, "killpg") as kill:
+            error = PIPELINE.stop_qemu_process(process)
+        self.assertIn("remained alive", error)
+        self.assertEqual([mock.call(timeout=30), mock.call(timeout=10)],
+                         process.wait.call_args_list)
+        self.assertEqual([mock.call(422, PIPELINE.signal.SIGTERM),
+                          mock.call(422, PIPELINE.signal.SIGKILL)], kill.call_args_list)
 
     def test_make_and_repoctl_expose_all_linux_stages(self):
         makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
