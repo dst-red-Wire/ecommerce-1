@@ -129,7 +129,10 @@ def ansible_collections_root() -> Path:
     return ROOT / relative
 
 
-os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
+# In the exact-base trusted controller ROOT is the untrusted PR HEAD. Its
+# toolchain lock must never influence executable resolution for tokened work.
+if not os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+    os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
@@ -1007,6 +1010,22 @@ def require(name: str) -> str:
     return path
 
 
+def _trusted_executable(name: str) -> str:
+    raw = os.environ.get(f"REPOCTL_TRUSTED_{name.upper()}_PATH", "")
+    if not raw or not Path(raw).is_absolute():
+        raise RuntimeError(f"trusted {name} executable was not pinned by the base wrapper")
+    path = Path(raw).resolve(strict=True)
+    if not path.is_file() or path.is_relative_to(ROOT.resolve()):
+        raise RuntimeError(f"trusted {name} executable is inside the PR head")
+    return str(path)
+
+
+def _github_cli() -> str | None:
+    if os.environ.get("REPOCTL_TRUSTED_WRAPPER"):
+        return _trusted_executable("gh")
+    return shutil.which("gh") or shutil.which("gh.exe")
+
+
 def run(
     cmd: list[str],
     *,
@@ -1019,31 +1038,46 @@ def run(
         # The controller is exact-base code, but cwd is the untrusted PR head.
         # Default every child to a small, credential-free environment.
         safe_keys = {"PATH", "LANG", "LC_ALL", "TZ", "PYTHONIOENCODING"}
+        command = list(cmd)
+        trusted_gh = _trusted_executable("gh")
+        trusted_git = _trusted_executable("git")
+        if command and command[0] in {"gh", "gh.exe"}:
+            command[0] = trusted_gh
+        elif command and Path(command[0]).name in {"gh", "gh.exe"} and Path(command[0]).resolve() != Path(trusted_gh):
+            raise RuntimeError("untrusted GitHub CLI executable")
+        is_gh = bool(command and command[0] == trusted_gh)
+        is_push = len(command) >= 2 and command[0] in {"git", trusted_git} and command[1] == "push"
+        if is_push:
+            command[0] = trusted_git
         source = env if env is not None else os.environ
         allowed = set(safe_keys)
-        executable = Path(cmd[0]).name if cmd else ""
         trusted_controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "")
         is_trusted_controller = (
-            len(cmd) >= 2
-            and Path(cmd[0]).resolve() == Path(sys.executable).resolve()
+            len(command) >= 2
+            and Path(command[0]).resolve() == Path(sys.executable).resolve()
             and bool(trusted_controller)
-            and Path(cmd[1]).resolve() == Path(trusted_controller).resolve()
+            and Path(command[1]).resolve() == Path(trusted_controller).resolve()
         )
-        if executable in {"gh", "gh.exe"} or is_trusted_controller or cmd[:2] == ["git", "push"]:
+        if is_gh or is_trusted_controller or is_push:
             allowed.update({"GH_TOKEN", "GITHUB_TOKEN", "GITHUB_REPOSITORY"})
         if is_trusted_controller:
             allowed.update(name for name in os.environ if name.startswith("REPOCTL_TRUSTED_"))
         env = {name: value for name, value in source.items() if name in allowed}
-        if cmd[:2] == ["git", "push"]:
+        if is_gh or is_trusted_controller or is_push:
+            env["PATH"] = os.environ.get("PATH", "")
+        if is_push:
             # Git is a trusted external tool here. Disable repository hooks and
-            # authenticate only this exact push via gh; no HEAD script is run.
+            # authenticate only this exact push via the pinned GitHub CLI.
             env.update({
-                "GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_COUNT": "3",
                 "GIT_CONFIG_KEY_0": "core.hooksPath",
                 "GIT_CONFIG_VALUE_0": "/dev/null",
                 "GIT_CONFIG_KEY_1": "credential.helper",
-                "GIT_CONFIG_VALUE_1": "!gh auth git-credential",
+                "GIT_CONFIG_VALUE_1": "",
+                "GIT_CONFIG_KEY_2": "credential.helper",
+                "GIT_CONFIG_VALUE_2": f"!{shlex.quote(trusted_gh)} auth git-credential",
             })
+        cmd = command
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -6682,7 +6716,7 @@ def _evaluate_github_cleanup_evidence(
 def _github_cleanup_evidence(
     default_branch: str, base_ref: str, merge_method: str, proof_contract: dict
 ) -> dict:
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         print("INFO branch-cleanup: GitHub CLI unavailable; GitHub criteria unavailable")
         return _unavailable_github_cleanup_evidence()
@@ -8880,7 +8914,7 @@ def deliver(base: str, title: str, message: str) -> int:
         return fail(f"deliver base must match contract default branch {policy['default_branch']!r}")
     if publish(base_name, message or title):
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         return fail("GitHub CLI missing")
     branch = git("branch", "--show-current").strip()
@@ -9321,7 +9355,7 @@ def finish_pr(base: str) -> int:
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("finish-pr requires a clean worktree")
 
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         return fail("GitHub CLI missing")
 
@@ -9981,7 +10015,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _github_cli()
     if not gh:
         result["blockers"].append("GitHub CLI missing")
         _emit_pr_loop_result(result, json_output=json_output)

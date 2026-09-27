@@ -6,6 +6,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -52,7 +54,7 @@ class CredentialBoundaryTests(unittest.TestCase):
             )
             raw = json.dumps({"repository": {"full_name": CONSUMER.REPOSITORY}, "action": "closed", "pull_request": {"number": 163}}).encode()
             signature = "sha256=" + hmac.new(SECRETS["TRUSTED_PR_WEBHOOK_SECRET"].encode(), raw, hashlib.sha256).hexdigest()
-            with mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": "/trusted/wrapper", "REPOCTL_TRUSTED_CONTROLLER": "/trusted/repoctl.py"}):
+            with mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": "/trusted/wrapper", "REPOCTL_TRUSTED_CONTROLLER": "/trusted/repoctl.py", "REPOCTL_TRUSTED_GH_PATH": sys.executable, "REPOCTL_TRUSTED_GIT_PATH": shutil.which("git")}):
                 self.assertIsNone(CONSUMER.authenticated_event_pr(raw, signature, "pull_request"))
                 self.assertNotIn("TRUSTED_PR_WEBHOOK_SECRET", os.environ)
                 result = REPOCTL.run([sys.executable, "scripts/signing_rotation.py", str(output)], cwd=head, check=False)
@@ -73,12 +75,95 @@ class CredentialBoundaryTests(unittest.TestCase):
                 encoding="utf-8",
             )
             gh.chmod(0o755)
-            with mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": "/trusted/wrapper"}):
+            with mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": "/trusted/wrapper", "REPOCTL_TRUSTED_GH_PATH": str(gh), "REPOCTL_TRUSTED_GIT_PATH": shutil.which("git")}):
                 result = REPOCTL.run([str(gh)], cwd=root, capture=True)
             observed = json.loads(result.stdout)
             self.assertEqual("github-secret", observed["GH_TOKEN"])
             self.assertEqual("github-secret", observed["GITHUB_TOKEN"])
             self.assertIsNone(observed["random"])
+
+    def test_head_toolchain_lock_cannot_inject_credentialed_gh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            head = root / "head"
+            runner_bin = root / "runner-bin"
+            malicious_bin = head / "attacker" / "bin"
+            (head / "config/contracts").mkdir(parents=True)
+            runner_bin.mkdir()
+            malicious_bin.mkdir(parents=True)
+            subprocess.run([shutil.which("git"), "init", str(head)], check=True, capture_output=True)
+            (head / "config/contracts/toolchain-lock.json").write_text(json.dumps({
+                "capability_policy": {"managed_install_root": {
+                    "environment": "ATTACKER_TOOL_ROOT", "fallback": "/nonexistent", "bin_subdirectory": "bin",
+                }},
+                "native_tool_configs": {"ansible": {"collections_install_root": ".ansible/collections"}},
+                "projections": {"ansible_config": {"path": "platform/ansible/ansible.cfg"}},
+            }), encoding="utf-8")
+            real_gh = runner_bin / "gh"
+            fake_gh = malicious_bin / "gh"
+            marker = root / "stolen-token"
+            real_gh.write_text(
+                f"#!{sys.executable}\nimport os\nprint('TRUSTED:' + os.environ.get('GH_TOKEN', ''))\n",
+                encoding="utf-8",
+            )
+            fake_gh.write_text(
+                f"#!{sys.executable}\nimport os\nfrom pathlib import Path\n"
+                f"Path({str(marker)!r}).write_text(os.environ.get('GH_TOKEN', ''))\n",
+                encoding="utf-8",
+            )
+            real_gh.chmod(0o755)
+            fake_gh.chmod(0o755)
+            driver = root / "probe.py"
+            driver.write_text(
+                "import importlib.util, os, sys\n"
+                "spec = importlib.util.spec_from_file_location('trusted_repoctl', sys.argv[1])\n"
+                "module = importlib.util.module_from_spec(spec)\n"
+                "spec.loader.exec_module(module)\n"
+                "assert os.environ['PATH'].split(os.pathsep)[0] == sys.argv[2]\n"
+                "assert module._github_cli() == sys.argv[3]\n"
+                "result = module.run(['gh', 'api', 'user'], capture=True)\n"
+                "assert result.stdout.strip() == 'TRUSTED:github-secret'\n"
+                "try:\n"
+                "    module.run([sys.argv[4], 'api', 'user'], capture=True)\n"
+                "except RuntimeError as exc:\n"
+                "    assert 'untrusted GitHub CLI executable' in str(exc)\n"
+                "else:\n"
+                "    raise AssertionError('injected gh was accepted')\n",
+                encoding="utf-8",
+            )
+            environment = {
+                "PATH": f"{runner_bin}{os.pathsep}{os.environ['PATH']}",
+                "GH_TOKEN": "github-secret",
+                "REPOCTL_TRUSTED_WRAPPER": str(root / "trusted-wrapper.py"),
+                "REPOCTL_TRUSTED_GH_PATH": str(real_gh),
+                "REPOCTL_TRUSTED_GIT_PATH": shutil.which("git"),
+                "ATTACKER_TOOL_ROOT": str(head / "attacker"),
+            }
+            result = subprocess.run(
+                [sys.executable, "-I", str(driver), str(ROOT / "scripts/repoctl.py"), str(runner_bin), str(real_gh), str(fake_gh)],
+                cwd=head, env=environment, text=True, capture_output=True,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertFalse(marker.exists(), "HEAD-injected gh must not receive the GitHub token")
+
+    def test_credentialed_push_uses_pinned_git_and_pinned_gh_helper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gh = root / "trusted-gh"
+            gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            gh.chmod(0o755)
+            git = str(Path(shutil.which("git")).resolve())
+            with (
+                mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": "/trusted/wrapper", "REPOCTL_TRUSTED_GH_PATH": str(gh), "REPOCTL_TRUSTED_GIT_PATH": git}),
+                mock.patch.object(REPOCTL.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as execute,
+            ):
+                REPOCTL.run(["git", "push", "origin", "HEAD"])
+            command = execute.call_args.args[0]
+            environment = execute.call_args.kwargs["env"]
+            self.assertEqual([git, "push", "origin", "HEAD"], command)
+            self.assertEqual("github-secret", environment["GH_TOKEN"])
+            self.assertEqual("", environment["GIT_CONFIG_VALUE_1"])
+            self.assertEqual(f"!{gh} auth git-credential", environment["GIT_CONFIG_VALUE_2"])
 
     def test_evidence_phase_is_separate_from_github_and_head(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,7 +216,7 @@ class CredentialBoundaryTests(unittest.TestCase):
                     encoding="utf-8",
                 )
             with (
-                mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": str(base / "scripts/repository_delivery.py"), "REPOCTL_TRUSTED_CONTROLLER": str(base / "scripts/repoctl.py")}),
+                mock.patch.dict(REPOCTL.os.environ, {**SECRETS, "REPOCTL_TRUSTED_WRAPPER": str(base / "scripts/repository_delivery.py"), "REPOCTL_TRUSTED_CONTROLLER": str(base / "scripts/repoctl.py"), "REPOCTL_TRUSTED_GH_PATH": sys.executable, "REPOCTL_TRUSTED_GIT_PATH": shutil.which("git")}),
                 mock.patch.object(REPOCTL, "ROOT", head),
                 mock.patch.object(REPOCTL, "_require_trusted_pr_execution", return_value={"trusted_root": base}),
                 mock.patch.object(REPOCTL, "toolchain_closure", return_value=0),
