@@ -9,6 +9,10 @@ NATIVE_WORKSPACE := $(shell $(PYTHON) scripts/native_workspace.py --quiet >/dev/
 ifneq ($(NATIVE_WORKSPACE),PASS)
 $(error Repository operations require a WSL2 checkout on the native Linux filesystem, such as /home/dev/ecommerce-1)
 endif
+.PHONY: workspace-check
+workspace-check:
+	@$(PYTHON) scripts/repoctl.py workspace-check
+
 .PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix capabilities security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
@@ -35,7 +39,7 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates
+ci: workspace-check signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates
 	@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required when affected)
@@ -43,13 +47,13 @@ ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required wh
 
 ci-global: ## Run canonical global gates through the central execution planner
 	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
-governance: runtime-efficiency ## Validate canonical architecture and all registered governance contracts
+governance: workspace-check runtime-efficiency ## Validate canonical architecture and all registered governance contracts
 	@$(PYTHON) scripts/repoctl.py governance
 
 runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
 	@$(PYTHON) scripts/repoctl.py runtime-efficiency
 
-contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
+contracts: workspace-check ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
 	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
 
 automation: ## Enforce Ansible-first and zero repository Shell scripts
@@ -133,17 +137,17 @@ ansible: ## Validate Ansible sources and local developer playbook syntax
 
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
-local-services-up: ## Start pinned local Gitea/Harbor on native WSL storage
+local-services-up: workspace-check ## Start pinned local Gitea/Harbor on native WSL storage
 	@$(PYTHON) platform/local-services/manage.py up
 
-local-services-provision: ## Create dedicated local Gitea/Harbor identities
+local-services-provision: workspace-check ## Create dedicated local Gitea/Harbor identities
 	@$(PYTHON) platform/local-services/manage.py gitea-users
 	@$(PYTHON) platform/local-services/manage.py harbor-robot
 
-local-gpg-register: ## Register public automation key on Gitea only after reboot proof
+local-gpg-register: workspace-check ## Register public automation key on Gitea only after reboot proof
 	@$(PYTHON) platform/local-services/manage.py register-gpg
 
-local-services-proof: ## Verify TLS, DNS, identities, GPG and Harbor robot login
+local-services-proof: workspace-check ## Verify TLS, DNS, identities, GPG and Harbor robot login
 	@$(PYTHON) platform/local-services/manage.py proof
 
 .PHONY: mgmt-runtime-inventory
@@ -246,7 +250,10 @@ perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities 
 perf-campaign: ## Run the repository-defined statistical performance campaign
 	@$(PYTHON) scripts/repoctl.py perf-campaign --base "$${BASE:-origin/main}" $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
 
-qualification-proof: ## Run one exact-SHA qualification plus its performance audit
+.PHONY: qualification
+qualification: qualification-proof ## Run exact-SHA qualification from the canonical workspace
+
+qualification-proof: workspace-check ## Run one exact-SHA qualification plus its performance audit
 	@$(PYTHON) scripts/repoctl.py qualification-proof --base "$${BASE:-origin/main}"
 .PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
 

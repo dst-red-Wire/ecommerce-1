@@ -488,6 +488,7 @@ def bundle_deliver(
         # delivery controller used to validate and publish itself.
         trusted_env = os.environ.copy()
         trusted_env["REPOCTL_TRUSTED_CONTROLLER"] = str(trusted_controller)
+        trusted_env["ECOMMERCE_EXECUTION_SCOPE"] = "isolated-delivery"
         proc = _run(
             [
                 python_executable,

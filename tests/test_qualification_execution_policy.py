@@ -29,6 +29,23 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def test_unit_subprocess_does_not_inherit_trusted_delivery_identity(self):
+        env = dict(os.environ, REPOCTL_TRUSTED_CONTROLLER="/invalid/controller.py")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "tests.test_commit_provenance.CommitProvenanceTests.test_placeholder_author_email_is_rejected",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
     def test_workstation_aggregate_tag_is_blocked_outside_wsl_before_mutation(self):
         detected = types.SimpleNamespace(name="linux_container")
         with (
@@ -185,6 +202,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         ["repoctl.py", action, selector, "platform:ansible", "--base", "origin/main",
                          "--head", "a" * 40, "--record-dir", ".context/tekton/test"],
                     ),
+                    mock.patch(
+                        "canonical_workspace.check",
+                        return_value={
+                            "status": "PASS",
+                            "execution_scope": "ci",
+                            "publication_allowed": False,
+                        },
+                    ),
                     mock.patch("native_workspace.workspace_error", return_value=None),
                     mock.patch.object(MOD, "_execute_direct_gate_with_runtime", return_value=0) as execute,
                 ):
@@ -231,6 +256,54 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(
             "1", callback.call_args.args[0]["ECOMMERCE_RUNTIME_ORCHESTRATED"]
         )
+
+    def test_workspace_check_requires_native_filesystem_before_success(self):
+        with (
+            mock.patch.object(sys, "argv", ["repoctl.py", "workspace-check"]),
+            mock.patch(
+                "canonical_workspace.check",
+                return_value={
+                    "status": "PASS",
+                    "execution_scope": "local",
+                    "publication_allowed": True,
+                },
+            ),
+            mock.patch(
+                "native_workspace.workspace_error",
+                return_value="WSL2 checkout must use a native Linux filesystem",
+            ),
+        ):
+            self.assertNotEqual(0, MOD.main())
+
+    def test_ci_scope_cannot_run_publication_commands(self):
+        with (
+            mock.patch.object(
+                sys, "argv", ["repoctl.py", "deliver", "--title", "proof"]
+            ),
+            mock.patch(
+                "canonical_workspace.check",
+                return_value={
+                    "status": "PASS",
+                    "execution_scope": "ci",
+                    "publication_allowed": False,
+                },
+            ),
+            mock.patch.object(MOD, "deliver") as deliver,
+        ):
+            self.assertEqual(1, MOD.main())
+        deliver.assert_not_called()
+
+    def test_ci_scope_rejects_frontend_generation_before_dispatch(self):
+        with (
+            mock.patch.object(sys, "argv", ["repoctl.py", "frontend", "generate", "all"]),
+            mock.patch(
+                "canonical_workspace.check",
+                return_value={"status": "PASS", "execution_scope": "ci"},
+            ),
+            mock.patch.object(MOD, "frontend") as frontend,
+        ):
+            self.assertEqual(1, MOD.main())
+        frontend.assert_not_called()
 
     def test_runtime_restore_failures_always_add_a_failed_evidence_record(self):
         class FakeExecutor:
@@ -379,6 +452,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ]
             with (
                 mock.patch.object(sys, "argv", argv),
+                mock.patch(
+                    "canonical_workspace.check",
+                    return_value={
+                        "status": "PASS",
+                        "execution_scope": "ci",
+                        "publication_allowed": False,
+                    },
+                ),
                 mock.patch.object(
                     MOD, "_require_clean_exact_checkout", return_value=(head, head)
                 ),
@@ -397,6 +478,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             (root / "platform" / "terraform").mkdir(parents=True)
             with (
                 mock.patch.object(sys, "argv", ["repoctl.py", "opentofu"]),
+                mock.patch(
+                    "canonical_workspace.check",
+                    return_value={
+                        "status": "PASS",
+                        "execution_scope": "local",
+                        "publication_allowed": True,
+                    },
+                ),
                 mock.patch.object(MOD, "ROOT", root),
                 mock.patch("native_workspace.workspace_error", return_value=None),
                 mock.patch.object(MOD, "_execute_direct_gate_with_runtime") as runtime,

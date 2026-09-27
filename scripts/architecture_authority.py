@@ -72,8 +72,28 @@ V5_SECTION_KEYS = {
             "scope",
             "automation_signing",
             "windows_workspace",
+            "canonical_workspace",
             "transverse_rule_contract",
             "owner_authorization",
+        }
+    ),
+    "repository_governance.canonical_workspace": frozenset(
+        {
+            "version",
+            "kind",
+            "status",
+            "canonical_path",
+            "repository",
+            "additional_clones",
+            "additional_worktrees",
+            "execution_outside_canonical_path",
+            "execution_scope_environment",
+            "noncanonical_execution_scopes",
+            "publication_scopes",
+            "command_allowlist",
+            "fail_closed",
+            "required_before",
+            "evidence",
         }
     ),
     "repository_governance.windows_workspace": frozenset(

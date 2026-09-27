@@ -10384,6 +10384,7 @@ def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in [
+        "workspace-check",
         "governance",
         "toolchain-closure",
         "runtime-efficiency",
@@ -10575,11 +10576,26 @@ def main() -> int:
     ec.add_argument("--full", required=True)
     ec.add_argument("--incremental", required=True)
     args = p.parse_args()
+    from canonical_workspace import check as check_canonical_workspace, command_allowed
+
+    workspace_result = check_canonical_workspace()
+    if workspace_result["status"] != "PASS":
+        return fail("canonical-workspace " + workspace_result["reason"], 1)
+    if not command_allowed(args.cmd, workspace_result["execution_scope"], set(sub.choices)):
+        return fail(
+            f"canonical-workspace command {args.cmd} forbidden in {workspace_result['execution_scope']} scope",
+            1,
+        )
+    if workspace_result["execution_scope"] == "ci" and args.cmd == "frontend" and args.action != "check":
+        return fail("canonical-workspace frontend action forbidden in ci scope", 1)
     from native_workspace import workspace_error
 
     workspace_failure = workspace_error(ROOT)
     if workspace_failure:
         return fail(workspace_failure)
+    if args.cmd == "workspace-check":
+        print("PASS canonical-workspace")
+        return 0
     try:
         if args.cmd == "vm":
             from vm_lifecycle import reconcile_cli

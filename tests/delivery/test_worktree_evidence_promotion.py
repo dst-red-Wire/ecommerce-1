@@ -32,7 +32,7 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
         self.assertIn(
-            'ci: signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates\n\t@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE',
+            'ci: workspace-check signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates\n\t@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE',
             MAKEFILE,
         )
         self.assertIn(

@@ -3,6 +3,110 @@ status: locked-for-build
 project: ecommerce
 
 repository_governance:
+  canonical_workspace:
+    version: 1
+    kind: CanonicalWorkspacePolicy
+    status: enforced
+    canonical_path: /home/dev/ecommerce-1
+    repository: dst-red-Wire/ecommerce-1
+    additional_clones: forbidden_for_local_scope
+    additional_worktrees: forbidden
+    execution_outside_canonical_path: forbidden_unless_explicit_scope
+    execution_scope_environment: ECOMMERCE_EXECUTION_SCOPE
+    noncanonical_execution_scopes: [ci, isolated-delivery]
+    publication_scopes: [local, isolated-delivery]
+    command_allowlist:
+      local:
+        - workspace-check
+        - governance
+        - toolchain-closure
+        - runtime-efficiency
+        - automation-policy
+        - format-check
+        - lint
+        - test
+        - security
+        - qualification-tools-contract
+        - qualification-tools-smoke
+        - opentofu
+        - ansible
+        - system
+        - doctor
+        - git-sync
+        - precommit
+        - prepush
+        - site
+        - product-run
+        - product-migrate
+        - product-benchmark
+        - branch-cleanup
+        - roadmap-check
+        - roadmap-sync
+        - qce-status
+        - qce-trace
+        - qce-check
+        - execution-properties
+        - capabilities
+        - engineering-metrics
+        - security-datasets-sync
+        - govulncheck-scan
+        - vulnerability-evaluate
+        - cve-evaluate
+        - experiment
+        - contracts
+        - frontend
+        - service
+        - affected
+        - verify-change
+        - global-check
+        - qualification-proof
+        - rke2-local-virtualbox-qualification
+        - vm
+        - perf-campaign
+        - diff-context
+        - failure-context
+        - context
+        - api-generate
+        - nx-graph
+        - service-new
+        - reconcile
+        - bazel-verify
+        - resource-candidate
+        - tekton-proof
+        - publish
+        - publish-change
+        - deliver
+        - pr-loop
+        - finish-pr
+        - bundle-deliver
+        - tekton-trigger-readiness
+        - tekton-plan
+        - source-check
+        - ci-global
+        - ci-component
+        - ci-finalize
+        - evidence-publish
+        - evidence-fetch
+        - evidence-compare
+      ci:
+        - workspace-check
+        - tekton-plan
+        - ci-global
+        - ci-component
+        - ci-finalize
+        - frontend
+        - service
+        - source-check
+        - govulncheck-scan
+        - security-datasets-sync
+        - vulnerability-evaluate
+        - opentofu
+        - ansible
+        - system
+      isolated-delivery: [deliver]
+    fail_closed: true
+    required_before: [ci, qualification, governance, reconciliation, ansible, packer, vagrant, release, publication, pull_request_operations]
+    evidence: [canonical_root, git_head, git_branch, worktree_count]
   scope: entire-repository
   windows_workspace:
     status: enforced

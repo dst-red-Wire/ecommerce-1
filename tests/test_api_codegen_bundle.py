@@ -162,6 +162,7 @@ class ApiCodegenBundleTest(unittest.TestCase):
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
             shutil.copy2(ROOT / "scripts/native_workspace.py", root / "scripts/native_workspace.py")
+            shutil.copy2(ROOT / "scripts/canonical_workspace.py", root / "scripts/canonical_workspace.py")
             shutil.copy2(
                 ROOT / "scripts/qualification_cache.py",
                 root / "scripts/qualification_cache.py",
@@ -169,6 +170,15 @@ class ApiCodegenBundleTest(unittest.TestCase):
             shutil.copy2(
                 ROOT / "architecture.lock.yaml",
                 root / "architecture.lock.yaml",
+            )
+            lock_path = root / "architecture.lock.yaml"
+            lock_path.write_text(
+                lock_path.read_text(encoding="utf-8").replace(
+                    "canonical_path: /home/dev/ecommerce-1",
+                    f"canonical_path: {root}",
+                    1,
+                ),
+                encoding="utf-8",
             )
             (root / "config/contracts").mkdir(parents=True)
             shutil.copy2(
@@ -227,10 +237,21 @@ class ApiCodegenBundleTest(unittest.TestCase):
             fake_gofmt.chmod(0o755)
 
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "remote", "add", "origin", "https://github.com/dst-red-Wire/ecommerce-1.git"],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-c", "user.name=CLI Test", "-c", "user.email=cli@example.invalid",
+                 "commit", "--allow-empty", "-qm", "fixture"],
+                cwd=root,
+                check=True,
+            )
             env = os.environ.copy()
             env["PATH"] = f"{bindir}:{env['PATH']}"
             result = subprocess.run(
-                ["python3", "scripts/repoctl.py", "api-generate", "--target", "go"],
+                ["python3", "scripts/repoctl.py", "api-generate", "--target", "go", "--service", "product"],
                 cwd=root,
                 env=env,
                 text=True,
@@ -240,6 +261,18 @@ class ApiCodegenBundleTest(unittest.TestCase):
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("PASS generated API bindings target=go", result.stdout)
             self.assertTrue((root / "services/product/api/generated/openapi.gen.go").is_file())
+
+            ci_env = dict(env, ECOMMERCE_EXECUTION_SCOPE="ci")
+            denied = subprocess.run(
+                ["python3", "scripts/repoctl.py", "api-generate", "--target", "go", "--service", "product"],
+                cwd=root,
+                env=ci_env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            self.assertEqual(1, denied.returncode)
+            self.assertIn("command api-generate forbidden in ci scope", denied.stderr)
 
     def test_node_application_bindings_are_rejected(self):
         with mock.patch.object(MOD, "ruby_yaml", side_effect=AssertionError("must reject before loading contracts")):
