@@ -19,6 +19,8 @@ spec:
     - name: verify-exact-source
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - {name: ECOMMERCE_EXECUTION_SCOPE, value: ci}
       command: [python3, scripts/repoctl.py]
       args: [source-check, --head, $(params.head)]
     - name: build-and-push-multi-arch
@@ -99,6 +101,8 @@ spec:
     - name: govulncheck-reachability
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - {name: ECOMMERCE_EXECUTION_SCOPE, value: ci}
       command: [python3, scripts/repoctl.py]
       args:
         - govulncheck-scan
@@ -111,11 +115,15 @@ spec:
     - name: sync-security-risk-datasets
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - {name: ECOMMERCE_EXECUTION_SCOPE, value: ci}
       command: [python3, scripts/repoctl.py]
       args: [security-datasets-sync]
     - name: evaluate-vulnerability-policy
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)
+      env:
+        - {name: ECOMMERCE_EXECUTION_SCOPE, value: ci}
       command: [python3, scripts/repoctl.py]
       args:
         - vulnerability-evaluate

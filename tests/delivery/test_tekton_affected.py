@@ -1,6 +1,8 @@
 from pathlib import Path
 import unittest
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -30,6 +32,26 @@ class TektonAffectedContractTests(unittest.TestCase):
             content = self.read(path)
             self.assertIn("scripts/repoctl.py", content, path)
             self.assertNotIn(".sh", content, path)
+
+    def test_every_repoctl_step_declares_ci_execution_scope(self):
+        for path in sorted((ROOT / "platform/tekton/tasks").glob("*.yaml")):
+            for document in yaml.safe_load_all(path.read_text(encoding="utf-8")):
+                if not isinstance(document, dict):
+                    continue
+                for step in document.get("spec", {}).get("steps", []):
+                    command = step.get("command", [])
+                    if "scripts/repoctl.py" not in command:
+                        continue
+                    environment = {
+                        entry.get("name"): entry.get("value")
+                        for entry in step.get("env", [])
+                        if isinstance(entry, dict)
+                    }
+                    self.assertEqual(
+                        "ci",
+                        environment.get("ECOMMERCE_EXECUTION_SCOPE"),
+                        f"{path}:{step.get('name')}",
+                    )
 
     def test_ci_topology_delegates_execution_to_central_policy(self):
         topology = self.read("config/contracts/ci-topology.yaml")

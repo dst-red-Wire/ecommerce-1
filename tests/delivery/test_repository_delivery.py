@@ -248,6 +248,7 @@ class BundleDeliveryTests(unittest.TestCase):
             self.assertNotEqual(source, seen["cwd"])
             self.assertIn(str(trusted), seen["cmd"])
             self.assertEqual(str(trusted), seen["env"]["REPOCTL_TRUSTED_CONTROLLER"])
+            self.assertEqual("isolated-delivery", seen["env"]["ECOMMERCE_EXECUTION_SCOPE"])
 
     def test_trusted_pr_transition_ignores_head_wrapper_and_controller(self):
         with tempfile.TemporaryDirectory() as td:

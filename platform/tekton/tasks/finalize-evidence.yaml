@@ -32,6 +32,8 @@ spec:
       env:
         - name: HOME
           value: /tekton/home
+        - name: ECOMMERCE_EXECUTION_SCOPE
+          value: ci
         - name: CI_EVIDENCE_REPOSITORY
           value: $(params.evidence-repository)
         - name: CI_EVIDENCE_COSIGN_KEY

@@ -9,9 +9,12 @@ repository_governance:
     status: enforced
     canonical_path: /home/dev/ecommerce-1
     repository: dst-red-Wire/ecommerce-1
-    additional_clones: forbidden
+    additional_clones: forbidden_for_local_scope
     additional_worktrees: forbidden
-    execution_outside_canonical_path: forbidden
+    execution_outside_canonical_path: forbidden_unless_explicit_scope
+    execution_scope_environment: ECOMMERCE_EXECUTION_SCOPE
+    noncanonical_execution_scopes: [ci, isolated-delivery]
+    publication_scopes: [local, isolated-delivery]
     fail_closed: true
     required_before: [ci, qualification, governance, reconciliation, ansible, packer, vagrant, release, publication, pull_request_operations]
     evidence: [canonical_root, git_head, git_branch, worktree_count]

@@ -85,7 +85,7 @@ except ModuleNotFoundError as exc:
     publish_remote_status = _missing_repository_delivery
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 
 
 def _raw_toolchain_lock() -> dict:
@@ -10579,18 +10579,28 @@ def main() -> int:
     from canonical_workspace import check as check_canonical_workspace
 
     workspace_result = check_canonical_workspace()
-    if args.cmd == "workspace-check":
-        if workspace_result["status"] == "PASS":
-            print("PASS canonical-workspace")
-            return 0
-        return fail("canonical-workspace " + workspace_result["reason"], 1)
     if workspace_result["status"] != "PASS":
         return fail("canonical-workspace " + workspace_result["reason"], 1)
+    publication_commands = {
+        "bundle-deliver",
+        "deliver",
+        "finish-pr",
+        "publish",
+        "publish-change",
+    }
+    if args.cmd in publication_commands and not workspace_result["publication_allowed"]:
+        return fail(
+            f"canonical-workspace publication forbidden in {workspace_result['execution_scope']} scope",
+            1,
+        )
     from native_workspace import workspace_error
 
     workspace_failure = workspace_error(ROOT)
     if workspace_failure:
         return fail(workspace_failure)
+    if args.cmd == "workspace-check":
+        print("PASS canonical-workspace")
+        return 0
     try:
         if args.cmd == "vm":
             from vm_lifecycle import reconcile_cli
