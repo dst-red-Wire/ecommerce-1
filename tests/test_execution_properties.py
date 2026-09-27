@@ -1,6 +1,10 @@
 import copy
+import hashlib
 import importlib.util
+import json
 from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 
 
@@ -16,17 +20,44 @@ class ExecutionPropertiesTests(unittest.TestCase):
     def setUpClass(cls):
         cls.policy, cls.registry = REPOCTL.execution_properties_contracts(ROOT)
 
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        lock = self.root / "config/contracts/toolchain-lock.json"
+        lock.parent.mkdir(parents=True)
+        lock.write_bytes((ROOT / "config/contracts/toolchain-lock.json").read_bytes())
+        (self.root / ".gitignore").write_text(".context/\n", encoding="utf-8")
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "add", "."],
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture"],
+        ):
+            subprocess.run(command, cwd=self.root, capture_output=True, check=True)
+        self.head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.root, text=True,
+            capture_output=True, check=True,
+        ).stdout.strip()
+
     def valid_ansible_evidence(self):
-        digest = "sha256:" + "a" * 64
-        return {
+        artifact = self.root / ".context/evidence" / self.head / "ansible.json"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_text(
+            json.dumps({"source_sha": self.head, "kind": "ExecutionArtifact"}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        digest = "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest()
+        evidence = {
             "implementation": "ansible",
             "gate": "ansible",
             "status": "PASS",
             "observed_at": "2026-09-25T00:00:00Z",
-            "source_sha": "b" * 40,
-            "toolchain_digest": digest,
+            "source_sha": self.head,
+            "toolchain_digest": "sha256:" + hashlib.sha256(
+                (self.root / "config/contracts/toolchain-lock.json").read_bytes()
+            ).hexdigest(),
             "artifact_digest": digest,
-            "evidence_digest": digest,
             "second_apply_changes": 0,
             "changed": 0,
             "timeout_seconds": 300,
@@ -34,13 +65,17 @@ class ExecutionPropertiesTests(unittest.TestCase):
             "capture_digest": digest,
             "restore_verification": True,
         }
+        evidence["evidence_digest"] = "sha256:" + hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return evidence
 
     def test_canonical_policy_registry_and_runtime_evidence_pass(self):
         self.assertEqual([], REPOCTL.execution_properties_violations(self.policy, self.registry))
         self.assertEqual(
             [],
             REPOCTL.execution_evidence_violations(
-                self.policy, self.registry, self.valid_ansible_evidence()
+                self.policy, self.registry, self.valid_ansible_evidence(), root=self.root
             ),
         )
         matrix = REPOCTL.execution_properties_matrix(self.registry)
@@ -50,7 +85,9 @@ class ExecutionPropertiesTests(unittest.TestCase):
     def assertEvidenceRejected(self, mutate, expected):
         evidence = self.valid_ansible_evidence()
         mutate(evidence)
-        violations = REPOCTL.execution_evidence_violations(self.policy, self.registry, evidence)
+        violations = REPOCTL.execution_evidence_violations(
+            self.policy, self.registry, evidence, root=self.root
+        )
         self.assertTrue(any(expected in item for item in violations), violations)
 
     def assertRegistryRejected(self, mutate, expected):
@@ -87,7 +124,51 @@ class ExecutionPropertiesTests(unittest.TestCase):
             )
             registry["implementations"]["mystery"].pop("authority_ref")
 
-        self.assertRegistryRejected(mutate, "unknown")
+        self.assertRegistryRejected(mutate, "canonical authority references")
+
+    def test_dangling_authority_fragment_fails_closed(self):
+        self.assertRegistryRejected(
+            lambda registry: registry["implementations"]["harbor"].update(
+                authority_ref="architecture.lock.yaml#platform.harbor"
+            ),
+            "unresolved canonical authority_ref",
+        )
+
+    def test_digest_shape_without_content_match_fails_closed(self):
+        for field, expected in (
+            ("toolchain_digest", "toolchain_digest does not match"),
+            ("artifact_digest", "artifact_digest does not match"),
+            ("evidence_digest", "evidence_digest does not match"),
+        ):
+            with self.subTest(field=field):
+                self.assertEvidenceRejected(
+                    lambda evidence, field=field: evidence.update({field: "sha256:" + "a" * 64}),
+                    expected,
+                )
+
+    def test_source_sha_must_match_checkout(self):
+        self.assertEvidenceRejected(
+            lambda evidence: evidence.update(source_sha="a" * 40),
+            "source_sha does not match",
+        )
+
+    def test_tampered_artifact_and_dirty_checkout_fail_closed(self):
+        evidence = self.valid_ansible_evidence()
+        artifact = self.root / ".context/evidence" / self.head / "ansible.json"
+        artifact.write_text("tampered\n", encoding="utf-8")
+        self.assertIn(
+            "runtime evidence artifact_digest does not match the canonical artifact",
+            REPOCTL.execution_evidence_violations(
+                self.policy, self.registry, evidence, root=self.root
+            ),
+        )
+        (self.root / "config/contracts/toolchain-lock.json").write_text("{}\n", encoding="utf-8")
+        self.assertIn(
+            "runtime evidence checkout contains uncommitted inputs",
+            REPOCTL.execution_evidence_violations(
+                self.policy, self.registry, evidence, root=self.root
+            ),
+        )
 
     def test_unknown_property_fails_closed(self):
         self.assertRegistryRejected(

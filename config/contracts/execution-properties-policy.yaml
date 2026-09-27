@@ -146,4 +146,5 @@ evidence_contract:
   - observed_at
   - evidence_digest
   digest_pattern: ^sha256:[0-9a-f]{64}$
+  digest_canonicalization: json-sort-keys-compact-excluding-evidence-digest
   unknown_or_missing: FAIL

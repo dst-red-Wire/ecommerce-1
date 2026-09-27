@@ -157,7 +157,7 @@ implementations:
       - restore_verification
     not_guaranteed:
     - external-host-stability
-    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.ansible
+    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.ansible-core
   packer_ansible_chain:
     lifecycle: active
     relationships:
@@ -225,7 +225,7 @@ implementations:
       - context_digest
       - cache_result
     not_guaranteed: registry-retention
-    authority_ref: architecture.lock.yaml#tooling.oci_build
+    authority_ref: architecture.lock.yaml#tooling.container.image_builder
   cosign:
     lifecycle: active
     relationships:
@@ -281,7 +281,9 @@ implementations:
     not_guaranteed:
     - confidentiality-runtime
     - key-availability
-    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.deferred.sops+age
+    authority_refs:
+    - config/contracts/toolchain-lock.json#tool_lifecycle.deferred.sops
+    - config/contracts/toolchain-lock.json#tool_lifecycle.deferred.age
   fleet:
     lifecycle: active
     relationships:
@@ -383,7 +385,7 @@ implementations:
       - retention_result
     not_guaranteed:
     - provenance-creation
-    authority_ref: architecture.lock.yaml#platform.harbor
+    authority_ref: architecture.lock.yaml#platform.registry
   rke2:
     lifecycle: active
     relationships:
@@ -425,7 +427,7 @@ implementations:
       - timeout_seconds
     not_guaranteed:
     - declared-state-as-runtime-proof
-    authority_ref: architecture.lock.yaml#platform.rke2
+    authority_ref: architecture.lock.yaml#platform.kubernetes
   cilium:
     lifecycle: active
     relationships:
@@ -453,7 +455,7 @@ implementations:
       - observed_digest
       - drift_detected
     not_guaranteed: contract-authority
-    authority_ref: architecture.lock.yaml#platform.cilium
+    authority_ref: architecture.lock.yaml#platform.cni
   qce:
     lifecycle: active
     relationships:
@@ -671,7 +673,9 @@ implementations:
       - decision
     not_guaranteed:
     - property-semantics-authority
-    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.conftest+opa
+    authority_refs:
+    - config/contracts/toolchain-lock.json#tool_lifecycle.active.conftest
+    - config/contracts/toolchain-lock.json#tool_lifecycle.active.opa
   k6:
     lifecycle: active
     relationships:
@@ -962,7 +966,7 @@ implementations:
       - output_digest
     not_guaranteed:
     - runtime-api-compatibility
-    authority_ref: config/contracts/toolchain-lock.json#tool_lifecycle.active.buf
+    authority_ref: architecture.lock.yaml#machine_contracts.protobuf_toolchain
   bazel:
     lifecycle: active
     relationships:

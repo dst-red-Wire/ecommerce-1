@@ -2145,6 +2145,18 @@ def _contains_forbidden_execution_claim(value: object) -> bool:
     return False
 
 
+def _execution_authority_ref_exists(reference: str, documents: dict[str, dict]) -> bool:
+    source, separator, fragment = reference.partition("#")
+    if not separator or source not in documents or not fragment:
+        return False
+    value: object = documents[source]
+    for segment in fragment.split("."):
+        if not segment or not isinstance(value, dict) or segment not in value:
+            return False
+        value = value[segment]
+    return value is not None and value != ""
+
+
 def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
     """Validate authority separation and fail-closed implementation/evidence declarations."""
     violations: list[str] = []
@@ -2180,6 +2192,15 @@ def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
         violations.append("static execution proof status must be forbidden")
     if evidence_contract.get("unknown_or_missing") != "FAIL":
         violations.append("unknown or missing execution evidence must fail closed")
+    if evidence_contract.get("digest_canonicalization") != "json-sort-keys-compact-excluding-evidence-digest":
+        violations.append("execution evidence digest canonicalization is invalid")
+
+    authority_documents = {
+        "architecture.lock.yaml": ruby_yaml("architecture.lock.yaml"),
+        "config/contracts/toolchain-lock.json": json.loads(
+            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        ),
+    }
 
     if registry.get("version") != 1 or registry.get("kind") != "ExecutionPropertiesImplementations":
         violations.append("execution implementation registry identity is invalid")
@@ -2203,8 +2224,26 @@ def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
         if not isinstance(entry, dict):
             violations.append(f"implementation {tool} must be a mapping")
             continue
-        if not isinstance(entry.get("authority_ref"), str) or not entry["authority_ref"]:
-            violations.append(f"implementation {tool} is unknown to the canonical toolchain or architecture")
+        if "authority_ref" in entry and "authority_refs" in entry:
+            violations.append(f"implementation {tool} declares competing canonical authority references")
+        references = entry.get("authority_refs", entry.get("authority_ref"))
+        if isinstance(references, str):
+            references = [references]
+        if (
+            not isinstance(references, list)
+            or not references
+            or any(not isinstance(reference, str) for reference in references)
+            or len(references) != len(set(references))
+        ):
+            violations.append(f"implementation {tool} has invalid canonical authority references")
+        else:
+            for authority_ref in references:
+                if not isinstance(authority_ref, str) or not _execution_authority_ref_exists(
+                    authority_ref, authority_documents
+                ):
+                    violations.append(
+                        f"implementation {tool} has an unresolved canonical authority_ref: {authority_ref!r}"
+                    )
         relationships = entry.get("relationships")
         if not isinstance(relationships, dict) or not relationships:
             violations.append(f"implementation {tool} has no property relationships")
@@ -2242,7 +2281,9 @@ def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
     return violations
 
 
-def execution_evidence_violations(policy: dict, registry: dict, evidence: dict) -> list[str]:
+def execution_evidence_violations(
+    policy: dict, registry: dict, evidence: dict, *, root: Path = ROOT
+) -> list[str]:
     """Validate one runtime proof record; absence and ambiguity are failures, never passes."""
     violations: list[str] = []
     if not isinstance(evidence, dict):
@@ -2267,6 +2308,67 @@ def execution_evidence_violations(policy: dict, registry: dict, evidence: dict) 
             violations.append(f"runtime evidence {field} is not an exact sha256 digest")
     if not isinstance(evidence.get("source_sha"), str) or re.fullmatch(r"[0-9a-f]{40}", evidence.get("source_sha", "")) is None:
         violations.append("runtime evidence source_sha is not an exact full SHA")
+    else:
+        source_sha = evidence["source_sha"]
+        checkout = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=root,
+            text=True, capture_output=True, check=False,
+        )
+        lines = checkout.stdout.splitlines()
+        if (
+            checkout.returncode
+            or len(lines) != 2
+            or Path(lines[0]).resolve() != root.resolve()
+            or lines[1] != source_sha
+        ):
+            violations.append("runtime evidence source_sha does not match the exact checkout")
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
+            text=True, capture_output=True, check=False,
+        )
+        if dirty.returncode or dirty.stdout.strip():
+            violations.append("runtime evidence checkout contains uncommitted inputs")
+
+        toolchain = root / "config/contracts/toolchain-lock.json"
+        if not toolchain.is_file() or toolchain.is_symlink():
+            violations.append("runtime evidence canonical toolchain lock is missing or unsafe")
+        else:
+            actual_toolchain_digest = "sha256:" + hashlib.sha256(toolchain.read_bytes()).hexdigest()
+            if evidence.get("toolchain_digest") != actual_toolchain_digest:
+                violations.append("runtime evidence toolchain_digest does not match the canonical lock")
+
+        artifact_template = entry["evidence"].get("artifact")
+        if not isinstance(artifact_template, str) or artifact_template.count("<sha>") != 1:
+            violations.append("runtime evidence canonical artifact path is invalid")
+        else:
+            artifact_relative = Path(artifact_template.replace("<sha>", source_sha))
+            if (
+                artifact_relative.is_absolute()
+                or ".." in artifact_relative.parts
+                or artifact_relative.parts[:2] != (".context", "evidence")
+            ):
+                violations.append("runtime evidence canonical artifact path is unsafe")
+            else:
+                artifact = root / artifact_relative
+                if any(
+                    (root / Path(*artifact_relative.parts[:index])).is_symlink()
+                    for index in range(1, len(artifact_relative.parts) + 1)
+                ) or not artifact.is_file():
+                    violations.append("runtime evidence canonical artifact is missing or unsafe")
+                elif evidence.get("artifact_digest") != "sha256:" + hashlib.sha256(artifact.read_bytes()).hexdigest():
+                    violations.append("runtime evidence artifact_digest does not match the canonical artifact")
+
+        digest_payload = {key: value for key, value in evidence.items() if key != "evidence_digest"}
+        try:
+            canonical = json.dumps(
+                digest_payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            violations.append("runtime evidence payload cannot be canonicalized")
+        else:
+            actual_evidence_digest = "sha256:" + hashlib.sha256(canonical).hexdigest()
+            if evidence.get("evidence_digest") != actual_evidence_digest:
+                violations.append("runtime evidence evidence_digest does not match its payload")
     if any(str(value).lower() == "latest" for value in evidence.values()):
         violations.append("runtime evidence contains a mutable latest version")
     relationships = entry["relationships"]

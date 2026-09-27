@@ -59,8 +59,8 @@ def toolchain_digest(root: Path) -> str:
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
-def _assert_commit_bound(root: Path, source_sha: str, registry: dict[str, Any]) -> None:
-    """Reject live-worktree inputs which differ from the claimed commit."""
+def _assert_commit_bound(root: Path, source_sha: str) -> None:
+    """Exact-SHA capability decisions require a clean checkout of that commit."""
     probe = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"], cwd=root, text=True,
         capture_output=True, check=False,
@@ -73,16 +73,8 @@ def _assert_commit_bound(root: Path, source_sha: str, registry: dict[str, Any]) 
     ).stdout.strip()
     if head != source_sha:
         raise ResolutionError("resolver source SHA is not the checked-out exact HEAD")
-    relevant = {
-        "config/contracts/tool-capabilities.yaml",
-        "config/contracts/composed-capabilities.yaml",
-        "config/contracts/toolchain-lock.json",
-        "scripts/capability_resolver.py",
-    }
-    for entry in registry["tools"].values():
-        relevant.update(str(probe["path"]) for probe in entry.get("discovery", []))
     dirty = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all", "--", *sorted(relevant)],
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
         cwd=root, text=True, capture_output=True, check=False,
     )
     if dirty.returncode or dirty.stdout.strip():
@@ -245,7 +237,7 @@ def resolve(
     exact_sha = source_sha or _head(root)
     if not SHA.fullmatch(exact_sha):
         raise ResolutionError("source SHA must be an exact full SHA")
-    _assert_commit_bound(root, exact_sha, registry)
+    _assert_commit_bound(root, exact_sha)
     digest = toolchain_digest(root)
     if isinstance(now_epoch, bool):
         raise ResolutionError("capability resolution time is invalid")
@@ -505,7 +497,7 @@ def write_gate_evidence(
     exact_sha = source_sha or _head(root)
     if not SHA.fullmatch(exact_sha):
         raise ResolutionError("source SHA must be an exact full SHA")
-    _assert_commit_bound(root, exact_sha, registry)
+    _assert_commit_bound(root, exact_sha)
     declaration = registry.get("tools", {}).get(tool, {}).get("capabilities", {}).get(capability)
     if not isinstance(declaration, dict):
         raise ResolutionError(f"unknown capability evidence producer: {tool}.{capability}")

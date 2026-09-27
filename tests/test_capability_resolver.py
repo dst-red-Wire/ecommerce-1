@@ -3,6 +3,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
@@ -192,6 +193,49 @@ class CapabilityResolverTests(unittest.TestCase):
                 source_sha=SHA,
                 observed_at_epoch=True,
             )
+
+    def test_gate_evidence_rejects_dirty_producer_input_outside_discovery_set(self):
+        for relative in (
+            "config/contracts/roadmap-policy.yaml",
+            "config/contracts/qualification-execution-policy.yaml",
+        ):
+            destination = self.root / relative
+            destination.write_bytes((ROOT / relative).read_bytes())
+        (self.root / ".gitignore").write_text(".context/\n", encoding="utf-8")
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "add", "."],
+            ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+             "-c", "commit.gpgsign=false", "commit", "-q", "-m", "fixture"],
+        ):
+            subprocess.run(command, cwd=self.root, capture_output=True, check=True)
+        head = RESOLVER._head(self.root)
+        index = RESOLVER.write_gate_evidence(
+            self.root,
+            tool="qce",
+            capability="verification",
+            requirement_results={"referenced_runtime_evidence": "PASS"},
+            observations={"traceability_validated": True},
+            source_sha=head,
+        )
+        self.assertTrue(index.is_file())
+        roadmap = self.root / "config/contracts/roadmap-policy.yaml"
+        roadmap.write_bytes(roadmap.read_bytes() + b"\n# uncommitted QCE input\n")
+        with self.assertRaisesRegex(
+            RESOLVER.ResolutionError, "resolver inputs differ from the claimed exact commit"
+        ):
+            RESOLVER.write_gate_evidence(
+                self.root,
+                tool="qce",
+                capability="verification",
+                requirement_results={"referenced_runtime_evidence": "PASS"},
+                observations={"traceability_validated": True},
+                source_sha=head,
+            )
+        with self.assertRaisesRegex(
+            RESOLVER.ResolutionError, "resolver inputs differ from the claimed exact commit"
+        ):
+            RESOLVER.resolve(self.root, source_sha=head, evidence_path=index.parent)
 
     def test_foreign_sha_fails_closed(self):
         record = self.evidence("cosign", "integrity", self.requirements("cosign", "integrity"), signature_verified=True)
