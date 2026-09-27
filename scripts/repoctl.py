@@ -7525,11 +7525,25 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                     "refetch_before_merge": "required",
                 },
                 "chatgpt_handoff": {
-                    "trigger": "event-handoff",
+                    "trigger": "canonical-bounded-handoff",
                     "state": "CHATGPT_REVIEW_REQUIRED",
                     "event": "CHATGPT_REVIEW_REQUIRED",
                     "review_kinds": ["CODE", "SECURITY"],
-                    "helper": "scripts/pr_monitor.py",
+                    "helper": "scripts/pr_monitor.py#chatgpt_review_handoff",
+                    "payload": "required",
+                    "payload_budget_bytes": 16384,
+                    "payload_fields": [
+                        "pr",
+                        "review_kind",
+                        "previous_validated_verdict",
+                        "delta",
+                        "previous_head",
+                        "current_head",
+                        "changed_files",
+                        "exact_head_verified",
+                    ],
+                    "payload_digest": "sha256",
+                    "fail_if_payload_unavailable": True,
                     "consumer": "external-automatic",
                     "invocation_binding": "exact-pr-and-head-sha",
                     "rerun_after_valid_marker": "required",
@@ -8991,6 +9005,104 @@ def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
     }
 
 
+def _pr_loop_chatgpt_handoff(
+    snapshot: dict,
+    qualification: dict,
+    code_review: dict,
+    security_review: dict,
+    review_kind: str,
+) -> str:
+    """Build the canonical bounded handoff without creating review authority."""
+    import pr_monitor
+
+    base_sha = str(snapshot.get("base_sha") or "")
+    head_sha = str(snapshot.get("head_sha") or "")
+    if review_kind not in {"CODE", "SECURITY"}:
+        raise RuntimeError(f"unsupported pr-loop review kind: {review_kind!r}")
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError("cannot build ChatGPT handoff without an exact base SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError("cannot build ChatGPT handoff without an exact head SHA")
+    changed = run(
+        ["git", "diff", "--name-only", "-z", f"{base_sha}..{head_sha}"],
+        check=False,
+        capture=True,
+    )
+    if changed.returncode:
+        detail = (changed.stderr or changed.stdout or "").strip()
+        raise RuntimeError(detail or "cannot derive exact-SHA changed files for ChatGPT handoff")
+    files = sorted({path for path in (changed.stdout or "").split("\0") if path})
+
+    empty_state = {
+        "checks": {},
+        "review_decision": None,
+        "reviews": {},
+        "open_findings_count": 0,
+        "open_findings": {},
+        "chatgpt_review": {},
+        "mergeable": None,
+        "merge_state_status": None,
+        "is_draft": False,
+        "state": "OPEN",
+        "merged": False,
+    }
+    previous = {**empty_state, "head_sha": base_sha, "validated_verdict": ""}
+    if review_kind == "SECURITY":
+        previous.update(
+            {
+                "head_sha": head_sha,
+                "reviews": {"chatgpt-code": code_review},
+                "chatgpt_review": {"code": code_review},
+                "validated_verdict": "CODE_PASS",
+            }
+        )
+    reviews = {
+        "chatgpt-code": code_review,
+        "chatgpt-security": security_review,
+    }
+    blocking_findings = sum(
+        value
+        for value in (
+            code_review.get("blocking_findings"),
+            security_review.get("blocking_findings"),
+        )
+        if type(value) is int and value > 0
+    )
+    current = {
+        **empty_state,
+        "head_sha": head_sha,
+        "checks": {"qualification": qualification},
+        "reviews": reviews,
+        "open_findings_count": blocking_findings,
+        "chatgpt_review": {
+            "code": code_review,
+            "security": security_review,
+        },
+        "is_draft": bool(snapshot.get("draft")),
+        "state": str(snapshot.get("state") or ""),
+        "merged": bool(snapshot.get("merged")),
+        "exact_head_verified": True,
+    }
+    changes = pr_monitor.delta(previous, current)
+    handoff = pr_monitor.chatgpt_review_handoff(
+        int(snapshot["number"]),
+        previous,
+        current,
+        changes,
+        files,
+        review_kind=review_kind,
+    )
+    if not isinstance(handoff, str) or not handoff.strip():
+        raise RuntimeError("canonical ChatGPT handoff is empty")
+    if len(handoff.encode()) > pr_monitor.PROMPT_BUDGET_BYTES:
+        raise RuntimeError("canonical ChatGPT handoff exceeds its prompt budget")
+    if f'"current_head":"{head_sha}"' not in handoff:
+        raise RuntimeError("canonical ChatGPT handoff lost the exact head SHA")
+    if f'"review_kind":"{review_kind}"' not in handoff:
+        raise RuntimeError("canonical ChatGPT handoff lost the requested review kind")
+    return handoff
+
+
 def _pr_loop_open_pr_errors(pr: dict, name_with_owner: str) -> list[str]:
     errors: list[str] = []
     if pr.get("state") != "OPEN":
@@ -9119,6 +9231,9 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
             f"CHATGPT_REVIEW_REQUIRED review_kind={review_request['review_kind']} "
             f"pr={review_request['pr']} head_sha={review_request['head_sha']}"
         )
+        handoff = str(review_request.get("handoff") or "")
+        if handoff:
+            print("CHATGPT_REVIEW_HANDOFF " + handoff)
     next_action = str(result.get("next_action") or "NONE")
     if next_action == "OWNER_AUTHORIZATION":
         print()
@@ -9380,7 +9495,7 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
         result["state"] = state
         result["next_action"] = next_action
         result["review_trigger"] = (
-            "scripts/pr_monitor.py:event-handoff"
+            "scripts/pr_monitor.py:chatgpt_review_handoff"
             if state == "CHATGPT_REVIEW_REQUIRED"
             else "none"
         )
@@ -9392,6 +9507,21 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
             )
             marker_kind = review_kind.lower()
             result["review_kind"] = review_kind
+            try:
+                handoff = _pr_loop_chatgpt_handoff(
+                    initial,
+                    result["qualification"],
+                    result["code_review"],
+                    result["security_review"],
+                    review_kind,
+                )
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                result["state"] = "BLOCKED"
+                result["next_action"] = "FIX_CHATGPT_REVIEW_HANDOFF"
+                result["review_trigger"] = "unavailable"
+                result["blockers"].append(str(exc))
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
             result["review_request"] = {
                 "event": "CHATGPT_REVIEW_REQUIRED",
                 "state": "CHATGPT_REVIEW_REQUIRED",
@@ -9399,6 +9529,9 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
                 "review_kind": review_kind,
                 "pr": result["pr"],
                 "head_sha": result["head_sha"],
+                "handoff": handoff,
+                "handoff_bytes": len(handoff.encode()),
+                "handoff_sha256": hashlib.sha256(handoff.encode()).hexdigest(),
                 "expected_marker": {
                     "provider": "ChatGPT",
                     "kind": marker_kind,

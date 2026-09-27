@@ -26,6 +26,15 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
         self.assertEqual(["CODE", "SECURITY"], handoff["review_kinds"])
+        self.assertEqual("canonical-bounded-handoff", handoff["trigger"])
+        self.assertEqual(
+            "scripts/pr_monitor.py#chatgpt_review_handoff",
+            handoff["helper"],
+        )
+        self.assertEqual("required", handoff["payload"])
+        self.assertEqual(16 * 1024, handoff["payload_budget_bytes"])
+        self.assertEqual("sha256", handoff["payload_digest"])
+        self.assertTrue(handoff["fail_if_payload_unavailable"])
         self.assertEqual("exact-pr-and-head-sha", handoff["invocation_binding"])
         self.assertEqual("required", handoff["rerun_after_valid_marker"])
         self.assertEqual(

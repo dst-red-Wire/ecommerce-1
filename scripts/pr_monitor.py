@@ -326,14 +326,15 @@ def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTE
 
     summary = {
         "pr": reduced.get("pr"),
+        "review_kind": reduced.get("review_kind"),
         "previous_validated_verdict": _truncate(
             reduced.get("previous_validated_verdict") or "",
             string_limit=800,
         ),
+        "previous_head": reduced.get("previous_head"),
         "current_head": reduced.get("current_head"),
         "changed_files": list(reduced.get("changed_files") or [])[:20],
-        "delta_keys": sorted((reduced.get("delta") or {}).keys()),
-        "delta_summary": {
+        "delta": {
             key: {
                 kind: len(items) if isinstance(items, dict) else 0
                 for kind, items in value.items()
@@ -341,6 +342,7 @@ def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTE
             for key, value in (reduced.get("delta") or {}).items()
             if key in COLLECTION_KEYS and isinstance(value, dict)
         },
+        "exact_head_verified": bool(reduced.get("exact_head_verified")),
         "truncated": True,
     }
     encoded = _encode_payload(summary)
@@ -355,24 +357,37 @@ def chatgpt_review_handoff(
     current: dict[str, Any],
     changes: dict[str, Any],
     files: list[str],
+    *,
+    review_kind: str = "COMBINED",
 ) -> str:
+    if review_kind not in {"CODE", "SECURITY", "COMBINED"}:
+        raise ValueError(f"unsupported ChatGPT review kind: {review_kind!r}")
     prior_verdict = str(previous.get("validated_verdict") or "")
     reuse = (
         "Reuse the previous validated ChatGPT verdict and adjust only what this delta invalidates."
         if prior_verdict
         else "No previous validated ChatGPT verdict is available; review only this bounded delta."
     )
+    review_instruction = (
+        "Perform only the requested CODE review. "
+        if review_kind == "CODE"
+        else "Perform only the requested SECURITY review; exact-SHA CODE is already PASS. "
+        if review_kind == "SECURITY"
+        else "Perform the requested CODE/SECURITY review. "
+    )
     instruction = (
         "ChatGPT incremental exact-SHA PR review handoff. "
         "Do not reload PR history or repeat proven gates. "
         f"{reuse} "
-        "Read only changed_files plus finding paths in delta and issue CODE/SECURITY findings "
+        f"{review_instruction}"
+        "Read only changed_files plus finding paths in delta and issue findings "
         "bound to current_head. Return the compact UX summary as five lines: "
         "PR #<number>; HEAD : <old> → <new or unchanged>; CHANGEMENT : <delta>; "
         "VERDICT : READY | BLOCKED | WAITING; ACTION : <one next action>.\n"
     )
     payload = {
         "pr": number,
+        "review_kind": review_kind,
         "previous_validated_verdict": prior_verdict,
         "delta": changes,
         "previous_head": previous.get("head_sha"),

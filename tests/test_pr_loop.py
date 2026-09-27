@@ -344,6 +344,72 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         self.assertFalse(protected)
 
 
+class PRLoopHandoffTests(unittest.TestCase):
+    BASE = "b" * 40
+    HEAD = "a" * 40
+
+    def test_canonical_handoff_contains_bounded_exact_sha_delta_and_files(self):
+        snapshot = {
+            "number": 161,
+            "base_sha": self.BASE,
+            "head_sha": self.HEAD,
+            "draft": False,
+            "state": "OPEN",
+            "merged": False,
+        }
+        completed = subprocess.CompletedProcess(
+            [],
+            0,
+            "z.py\0a.py\0a.py\0",
+            "",
+        )
+        with mock.patch.object(REPOCTL, "run", return_value=completed) as run:
+            handoff = REPOCTL._pr_loop_chatgpt_handoff(
+                snapshot,
+                {"status": "PASS", "source": "reused", "head_sha": self.HEAD},
+                {"status": "MISSING", "head_sha": self.HEAD},
+                {"status": "MISSING", "head_sha": self.HEAD},
+                "CODE",
+            )
+        self.assertIn("ChatGPT incremental exact-SHA PR review handoff", handoff)
+        self.assertIn(f'"current_head":"{self.HEAD}"', handoff)
+        self.assertIn('"review_kind":"CODE"', handoff)
+        self.assertIn('"changed_files":["a.py","z.py"]', handoff)
+        self.assertLessEqual(len(handoff.encode()), 16 * 1024)
+        self.assertEqual(
+            ["git", "diff", "--name-only", "-z", f"{self.BASE}..{self.HEAD}"],
+            run.call_args.args[0],
+        )
+
+    def test_security_handoff_carries_code_pass_without_reasking_code(self):
+        snapshot = {
+            "number": 161,
+            "base_sha": self.BASE,
+            "head_sha": self.HEAD,
+            "draft": False,
+            "state": "OPEN",
+            "merged": False,
+        }
+        completed = subprocess.CompletedProcess([], 0, "a.py\0", "")
+        with mock.patch.object(REPOCTL, "run", return_value=completed):
+            handoff = REPOCTL._pr_loop_chatgpt_handoff(
+                snapshot,
+                {"status": "PASS", "source": "reused", "head_sha": self.HEAD},
+                {
+                    "provider": "ChatGPT",
+                    "kind": "code",
+                    "status": "PASS",
+                    "blocking_findings": 0,
+                    "head_sha": self.HEAD,
+                },
+                {"status": "MISSING", "head_sha": self.HEAD},
+                "SECURITY",
+            )
+        self.assertIn('"review_kind":"SECURITY"', handoff)
+        self.assertIn('"previous_validated_verdict":"CODE_PASS"', handoff)
+        self.assertIn("exact-SHA CODE is already PASS", handoff)
+
+
 class PRLoopOrchestrationTests(unittest.TestCase):
     SHA_A = "a" * 40
     SHA_B = "b" * 40
@@ -414,7 +480,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             return_value={"status": "PASS", "source": "reused"},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
-        ), mock.patch.object(REPOCTL, "run") as run:
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_chatgpt_handoff", return_value="bounded-code-handoff"
+        ) as handoff, mock.patch.object(REPOCTL, "run") as run:
             rc, payload = self.run_json(dry_run=True)
         self.assertEqual(0, rc)
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
@@ -425,6 +493,8 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("CODE", payload["review_request"]["review_kind"])
         self.assertEqual(161, payload["review_request"]["pr"])
         self.assertEqual(self.SHA_A, payload["review_request"]["head_sha"])
+        self.assertEqual("bounded-code-handoff", payload["review_request"]["handoff"])
+        self.assertEqual(len("bounded-code-handoff"), payload["review_request"]["handoff_bytes"])
         self.assertEqual(
             {
                 "provider": "ChatGPT",
@@ -435,6 +505,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             },
             payload["review_request"]["expected_marker"],
         )
+        handoff.assert_called_once()
         run.assert_not_called()
 
     def test_security_handoff_is_emitted_only_after_exact_sha_code_pass(self):
@@ -465,7 +536,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             return_value={"status": "PASS", "source": "reused"},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=authorities
-        ), mock.patch.object(REPOCTL, "run") as run:
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_chatgpt_handoff", return_value="bounded-security-handoff"
+        ) as handoff, mock.patch.object(REPOCTL, "run") as run:
             rc, payload = self.run_json(dry_run=True)
         self.assertEqual(0, rc)
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
@@ -473,6 +546,30 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("CHATGPT_SECURITY_REVIEW", payload["next_action"])
         self.assertEqual("security", payload["review_request"]["expected_marker"]["kind"])
         self.assertEqual(self.SHA_A, payload["review_request"]["head_sha"])
+        self.assertEqual("bounded-security-handoff", payload["review_request"]["handoff"])
+        self.assertEqual("SECURITY", handoff.call_args.args[-1])
+        run.assert_not_called()
+
+    def test_missing_canonical_handoff_blocks_instead_of_emitting_minimal_event(self):
+        patches = self.common()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_qualification",
+            return_value={"status": "PASS", "source": "reused"},
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
+        ), mock.patch.object(
+            REPOCTL,
+            "_pr_loop_chatgpt_handoff",
+            side_effect=RuntimeError("bounded handoff unavailable"),
+        ), mock.patch.object(REPOCTL, "run") as run:
+            rc, payload = self.run_json(dry_run=True)
+        self.assertEqual(1, rc)
+        self.assertEqual("BLOCKED", payload["state"])
+        self.assertEqual("FIX_CHATGPT_REVIEW_HANDOFF", payload["next_action"])
+        self.assertNotIn("review_request", payload)
         run.assert_not_called()
 
     def test_valid_exact_sha_qualification_is_reused_without_rerun(self):

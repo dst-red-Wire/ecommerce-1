@@ -1509,6 +1509,25 @@ def validate(root):
             or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
             or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
             or pr_loop.get("chatgpt_handoff", {}).get("state") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("trigger")
+            != "canonical-bounded-handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("helper")
+            != "scripts/pr_monitor.py#chatgpt_review_handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload") != "required"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_budget_bytes") != 16384
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_fields")
+            != [
+                "pr",
+                "review_kind",
+                "previous_validated_verdict",
+                "delta",
+                "previous_head",
+                "current_head",
+                "changed_files",
+                "exact_head_verified",
+            ]
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_digest") != "sha256"
+            or pr_loop.get("chatgpt_handoff", {}).get("fail_if_payload_unavailable") is not True
             or pr_loop.get("chatgpt_handoff", {}).get("review_kinds") != ["CODE", "SECURITY"]
             or pr_loop.get("chatgpt_handoff", {}).get("consumer") != "external-automatic"
             or pr_loop.get("chatgpt_handoff", {}).get("invocation_binding")

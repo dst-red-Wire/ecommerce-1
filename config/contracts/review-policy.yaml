@@ -150,11 +150,24 @@ repository_delivery:
       refetch_before_qualification: required
       refetch_before_merge: required
     chatgpt_handoff:
-      trigger: event-handoff
+      trigger: canonical-bounded-handoff
       state: CHATGPT_REVIEW_REQUIRED
       event: CHATGPT_REVIEW_REQUIRED
       review_kinds: [CODE, SECURITY]
-      helper: scripts/pr_monitor.py
+      helper: scripts/pr_monitor.py#chatgpt_review_handoff
+      payload: required
+      payload_budget_bytes: 16384
+      payload_fields:
+        - pr
+        - review_kind
+        - previous_validated_verdict
+        - delta
+        - previous_head
+        - current_head
+        - changed_files
+        - exact_head_verified
+      payload_digest: sha256
+      fail_if_payload_unavailable: true
       consumer: external-automatic
       invocation_binding: exact-pr-and-head-sha
       rerun_after_valid_marker: required
