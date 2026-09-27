@@ -176,7 +176,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver pr-loop finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -219,6 +219,9 @@ publish-change: ## Canonical alias: qualify, commit and push the current feature
 
 deliver: signing-rotation-check ## Exact-SHA validate, publish and create/update GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
+
+pr-loop: ## Derive and perform the next exact-SHA PR delivery transition; PR required, DRY_RUN=1 is read-only
+	@$(PYTHON) scripts/repoctl.py pr-loop --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
 
 finish-pr: signing-rotation-check ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
 	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"

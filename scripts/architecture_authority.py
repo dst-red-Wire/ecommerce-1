@@ -1489,6 +1489,86 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        pr_loop = review_policy.get("repository_delivery", {}).get("pr_loop", {})
+        if (
+            pr_loop.get("schema_version") != 1
+            or pr_loop.get("controller") != "scripts/repoctl.py"
+            or pr_loop.get("state_persistence") != "forbidden"
+            or pr_loop.get("transition_order")
+            != [
+                "qualification",
+                "chatgpt-code",
+                "chatgpt-security",
+                "owner-authorization",
+                "finish-pr",
+                "post-merge-cleanup",
+            ]
+            or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
+            or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_head_change")
+            != "abandon-and-restart"
+            or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
+            or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("state") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("trigger")
+            != "canonical-bounded-handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("helper")
+            != "scripts/pr_monitor.py#chatgpt_review_handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload") != "required"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_budget_bytes") != 16384
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_fields")
+            != [
+                "pr",
+                "review_kind",
+                "previous_validated_verdict",
+                "delta",
+                "previous_head",
+                "current_head",
+                "changed_files",
+                "exact_head_verified",
+            ]
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_digest") != "sha256"
+            or pr_loop.get("chatgpt_handoff", {}).get("fail_if_payload_unavailable") is not True
+            or pr_loop.get("chatgpt_handoff", {}).get("review_kinds") != ["CODE", "SECURITY"]
+            or pr_loop.get("chatgpt_handoff", {}).get("consumer") != "external-automatic"
+            or pr_loop.get("chatgpt_handoff", {}).get("invocation_binding")
+            != "exact-pr-and-head-sha"
+            or pr_loop.get("chatgpt_handoff", {}).get("rerun_after_valid_marker") != "required"
+            or pr_loop.get("chatgpt_handoff", {}).get("controller_may_emit_verdict") is not False
+            or pr_loop.get("chatgpt_handoff", {}).get("security_requires_code_marker")
+            != {
+                "provider": "ChatGPT",
+                "kind": "code",
+                "status": "PASS",
+                "blocking_findings": 0,
+                "exact_head_sha": "required",
+            }
+            or pr_loop.get("comment_evidence")
+            != {
+                "ordering": "immutable-created-at-then-id",
+                "updated_at_authority": "forbidden",
+                "owner_authorization_match": "whole-trimmed-comment",
+            }
+            or pr_loop.get("owner_boundary", {}).get("automatic_generation") != "forbidden"
+            or pr_loop.get("owner_boundary", {}).get("unique_human_interruption") is not True
+            or pr_loop.get("owner_boundary", {}).get("automatic_rerun_after_authorization")
+            != "required"
+            or pr_loop.get("owner_boundary", {}).get("revocation")
+            != "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>"
+            or pr_loop.get("merge_delegation", {}).get("state") != "MERGE_READY"
+            or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
+            or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
+            or pr_loop.get("merge_delegation", {}).get("nonzero_exit")
+            != "reread-github-before-result"
+            or pr_loop.get("merge_delegation", {}).get("post_exit_merge_authority")
+            != "github-current-pr-exact-head"
+            or pr_loop.get("post_merge_cleanup", {}).get("command") != "branch-cleanup"
+            or pr_loop.get("post_merge_cleanup", {}).get("automatic_after_merge") != "required"
+            or pr_loop.get("post_merge_cleanup", {}).get("separate_result") != "required"
+        ):
+            errors.append(
+                "review policy must define the stateless exact-SHA pr-loop and preserve authority boundaries"
+            )
+
         active_review_automation = {
             "Makefile": ("CODEX_COMMAND", "--codex-command"),
             "scripts/pr_monitor.py": (

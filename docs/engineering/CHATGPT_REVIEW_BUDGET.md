@@ -6,6 +6,22 @@ This repository applies `.agents/skills/chatgpt-exact-sha-review/SKILL.md` throu
 
 Reduce repeated ChatGPT CODE/SECURITY analysis without weakening exact-SHA review or qualification. The controller itself never invokes a model. It decides whether an AI review is justified and keeps ephemeral state under `.context/review-budget/`.
 
+## Central delivery loop
+
+Run `make pr-loop PR=<number>` after a PR is published. The command derives its state from the current GitHub PR, current exact head SHA, merge-authoritative qualification evidence, owner-authored ChatGPT markers, exact owner authorization, and current merge controls. It performs only the next authorized transition and does not persist a second delivery state.
+
+Valid qualification and review proofs for the current SHA are reused. A head change makes every qualification, CODE, SECURITY, and owner-authorization proof for the earlier SHA historical, abandons the in-flight transition, and restarts at qualification. Missing CODE or SECURITY emits `state=CHATGPT_REVIEW_REQUIRED` with `review_kind=CODE|SECURITY`, the PR number, exact head SHA, expected marker, and the actual bounded `chatgpt_review_handoff()` payload. That payload contains the exact-head delta, sorted changed files, prior validated verdict, byte count, and SHA-256 digest and never exceeds 16 KiB; inability to build it blocks the event. The external automatic consumer invokes ChatGPT for exactly that PR/SHA and reruns `pr-loop` after a valid marker; the controller itself never invokes a model or creates a verdict. SECURITY is impossible before an exact-SHA CODE PASS with zero blocking findings.
+
+After exact-SHA qualification, CODE, and SECURITY all pass, missing owner authorization emits `OWNER_AUTH_REQUIRED` with the exact command the repository owner must explicitly approve. This is the only human interruption. The caller reruns `pr-loop` automatically after authorization; `MERGE_READY` then delegates exclusively to `finish-pr`.
+
+After all exact-SHA authorities pass, `pr-loop` re-reads GitHub, checks unresolved conversations, branch protection, required checks, and commit provenance, then delegates merge exclusively to `finish-pr`. Post-merge synchronization and canonical `branch-cleanup` are reported separately so cleanup failure cannot be hidden by a successful merge.
+
+Use `make pr-loop PR=<number> DRY_RUN=1` for a read-only state/next-action report, or `python3 scripts/repoctl.py pr-loop --pr <number> --json` for the versioned machine result.
+
+The automatic consumer must treat GitHub or marker ambiguity as blocking. It must never infer a review from local state, trigger SECURITY before CODE, reuse a marker from another SHA, or synthesize owner authorization.
+
+Comment precedence uses immutable GitHub creation time and comment ID. Editing an older comment cannot make it the latest verdict because `updated_at` is ignored. Owner authorization and revocation require the entire trimmed comment to be the exact command, so documentation, quotations, and fenced examples carry no authority. After `finish-pr`, GitHub is always re-read before assigning the merge result; a non-zero process exit with an exact-head merged PR is a successful merge, while an unavailable re-read yields an unknown result and blocks cleanup until verification.
+
 ## The 10 enforced rules
 
 1. Polling is deterministic; elapsed time alone never triggers AI.

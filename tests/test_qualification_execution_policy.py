@@ -657,6 +657,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         for name, comments, expected_ready in cases:
             with self.subTest(case=name):
+                authoritative_comments = [
+                    {
+                        **comment,
+                        "id": index,
+                        "created_at": f"2026-09-27T10:{index:02d}:00Z",
+                    }
+                    for index, comment in enumerate(comments, start=1)
+                ]
                 owner = MOD.subprocess.CompletedProcess(
                     [],
                     0,
@@ -666,7 +674,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     "",
                 )
                 history = MOD.subprocess.CompletedProcess(
-                    [], 0, __import__("json").dumps([comments]), ""
+                    [], 0, __import__("json").dumps([authoritative_comments]), ""
                 )
 
                 def fake_run(command, **kwargs):

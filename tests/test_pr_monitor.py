@@ -190,8 +190,48 @@ class PRMonitorTest(unittest.TestCase):
         self.assertIn("ChatGPT incremental exact-SHA PR review handoff", handoff)
         self.assertIn("Return the compact UX summary as five lines", handoff)
         self.assertIn('"current_head":"new"', handoff)
+        self.assertIn('"review_kind":"COMBINED"', handoff)
         self.assertIn('"previous_validated_verdict":"READY"', handoff)
         self.assertLessEqual(len(handoff.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
+
+        code_handoff = pr_monitor.chatgpt_review_handoff(
+            7,
+            previous,
+            current,
+            {"head_sha": {"before": "old", "after": "new"}},
+            ["x.py"],
+            review_kind="CODE",
+        )
+        self.assertIn('"review_kind":"CODE"', code_handoff)
+        self.assertIn("Perform only the requested CODE review", code_handoff)
+
+        minimal = pr_monitor.bounded_payload(
+            {
+                "pr": 7,
+                "review_kind": "CODE",
+                "previous_validated_verdict": "READY",
+                "delta": {
+                    "checks": {
+                        "modified": {
+                            f"check-{index}": {"before": "x" * 400, "after": "y" * 400}
+                            for index in range(100)
+                        }
+                    }
+                },
+                "previous_head": "old",
+                "current_head": "new",
+                "changed_files": [f"path/{index}.py" for index in range(100)],
+                "exact_head_verified": True,
+            },
+            budget=1024,
+        )
+        decoded = json.loads(minimal)
+        self.assertEqual("old", decoded["previous_head"])
+        self.assertEqual("new", decoded["current_head"])
+        self.assertEqual("CODE", decoded["review_kind"])
+        self.assertIn("delta", decoded)
+        self.assertTrue(decoded["exact_head_verified"])
+        self.assertTrue(decoded["truncated"])
 
         with mock.patch.object(pr_monitor, "_supports_color", return_value=False):
             lines = pr_monitor.compact_status_lines(

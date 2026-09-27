@@ -122,6 +122,90 @@ repository_delivery:
     draft_merge: forbidden
     record_after_merge: retained-by-forge
 
+  pr_loop:
+    schema_version: 1
+    controller: scripts/repoctl.py
+    command: pr-loop
+    state_persistence: forbidden
+    state_sources:
+      - github-current-pull-request
+      - github-current-exact-head-sha
+      - exact-sha-qualification-evidence
+      - chatgpt-exact-sha-review-comments
+      - owner-authorization-comment
+      - github-merge-and-protection-state
+      - finish-pr-and-branch-cleanup-contracts
+    transition_order:
+      - qualification
+      - chatgpt-code
+      - chatgpt-security
+      - owner-authorization
+      - finish-pr
+      - post-merge-cleanup
+    exact_sha:
+      binding: required
+      prior_sha_evidence: historical-only
+      head_change: restart-at-qualification
+      in_flight_transition_on_head_change: abandon-and-restart
+      refetch_before_qualification: required
+      refetch_before_merge: required
+    chatgpt_handoff:
+      trigger: canonical-bounded-handoff
+      state: CHATGPT_REVIEW_REQUIRED
+      event: CHATGPT_REVIEW_REQUIRED
+      review_kinds: [CODE, SECURITY]
+      helper: scripts/pr_monitor.py#chatgpt_review_handoff
+      payload: required
+      payload_budget_bytes: 16384
+      payload_fields:
+        - pr
+        - review_kind
+        - previous_validated_verdict
+        - delta
+        - previous_head
+        - current_head
+        - changed_files
+        - exact_head_verified
+      payload_digest: sha256
+      fail_if_payload_unavailable: true
+      consumer: external-automatic
+      invocation_binding: exact-pr-and-head-sha
+      rerun_after_valid_marker: required
+      verdict_authority: ChatGPT-only
+      controller_may_emit_verdict: false
+      code_before_security: required
+      security_requires_code_marker:
+        provider: ChatGPT
+        kind: code
+        status: PASS
+        blocking_findings: 0
+        exact_head_sha: required
+    comment_evidence:
+      ordering: immutable-created-at-then-id
+      updated_at_authority: forbidden
+      owner_authorization_match: whole-trimmed-comment
+    owner_boundary:
+      authority_source: architecture.lock.yaml#repository_governance.owner_authorization
+      scope: pr-<number>
+      source: github-pr-comment-by-repository-owner
+      latest_scope_authorization_wins: true
+      revocation: /owner-authorization revoke scope=<scope> sha=<exact-head-sha>
+      automatic_generation: forbidden
+      unique_human_interruption: true
+      automatic_rerun_after_authorization: required
+    merge_delegation:
+      state: MERGE_READY
+      command: finish-pr
+      direct_merge: forbidden
+      exact_head_match: required
+      nonzero_exit: reread-github-before-result
+      post_exit_merge_authority: github-current-pr-exact-head
+    post_merge_cleanup:
+      command: branch-cleanup
+      automatic_after_merge: required
+      separate_result: required
+      merge_success_may_not_mask_cleanup_failure: true
+
   merge:
     method: merge
     match_head_commit: required
