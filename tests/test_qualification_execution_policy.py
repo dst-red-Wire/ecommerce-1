@@ -29,6 +29,23 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def test_unit_subprocess_does_not_inherit_trusted_delivery_identity(self):
+        env = dict(os.environ, REPOCTL_TRUSTED_CONTROLLER="/invalid/controller.py")
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "unittest",
+                "tests.test_commit_provenance.CommitProvenanceTests.test_placeholder_author_email_is_rejected",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
     def test_workstation_aggregate_tag_is_blocked_outside_wsl_before_mutation(self):
         detected = types.SimpleNamespace(name="linux_container")
         with (
