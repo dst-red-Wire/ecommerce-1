@@ -14,6 +14,8 @@ The policy lives in `architecture.lock.yaml#repository_governance.canonical_work
 
 The only normal branch-publication entrypoint is `make deliver TITLE="..."` (optionally `MSG="..."`). It qualifies the exact commit, checks its signature, pushes without force only when needed, and creates or refreshes one GitHub PR whose base and head match the local and remote refs. `repoctl publish` and `publish-change` are not public commands. Direct `git push` may be used for manual diagnostics or recovery, but it does not prove canonical delivery. If the PR step fails after a push, delivery reports `PARTIAL_DELIVERY`; rerunning `make deliver` resumes without a duplicate commit or PR. The trusted `bundle-deliver` path remains the specialized `isolated-delivery` exception.
 
+The governance publication gate inventories tracked and untracked deliverable source across the repository: Python at every lexical scope, YAML automation (including Tekton and Ansible command/argument vectors), Makefiles, and common script/IaC sources. Only mutation sites declared in `config/contracts/review-policy.yaml#repository_delivery.publication.mutation_sites` may publish; malformed executable YAML and additional mutations at an allowed Python site fail closed. Helm templates and intentionally invalid YAML test fixtures receive conservative source-text scanning because they cannot be parsed as ordinary YAML.
+
 | Entrypoint | Mutation | Push | PR create/update | Public API | Status |
 | --- | --- | --- | --- | --- | --- |
 | `make deliver` | Qualified signed commit if dirty | Normal, only if needed | Required | Yes | Canonical |

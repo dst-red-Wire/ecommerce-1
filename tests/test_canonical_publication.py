@@ -93,6 +93,105 @@ class PublicationAuthorityTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "mutation sites"):
                 REPOCTL.publication_mutation_site_check(source_root=root)
 
+    def test_publication_mutation_in_python_method_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "worker.py").write_text(
+                'class Publisher:\n    def publish(self):\n        run(["git", "push", "origin", "HEAD"])\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, r"worker.py#Publisher.publish"):
+                REPOCTL.publication_mutation_site_check(source_root=root)
+
+    def test_publication_mutation_in_nested_and_module_python_is_rejected(self):
+        for source, expected_site in (
+            ('def outer():\n    def inner():\n        run(["git", "push", "origin", "HEAD"])\n', "worker.py#outer.inner"),
+            ('run(["git", "push", "origin", "HEAD"])\n', "worker.py#<module>"),
+        ):
+            with self.subTest(expected_site=expected_site), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "worker.py").write_text(source, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, expected_site):
+                    REPOCTL.publication_mutation_site_check(source_root=root)
+
+    def test_python_definition_time_mutations_are_module_sites(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.py"
+            path.write_text(
+                '@execute(["git", "push", "origin", "HEAD"])\n'
+                'def publish(value=execute(["gh", "pr", "create"])):\n    pass\n',
+                encoding="utf-8",
+            )
+            found = REPOCTL._publication_python_sites(path, "worker.py")
+            self.assertEqual({"worker.py#<module>"}, found["git_push"])
+            self.assertEqual({"worker.py#<module>"}, found["github_pr_create"])
+
+    def test_force_push_cannot_hide_at_an_allowlisted_python_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.py"
+            path.write_text('def publish():\n    run(["git", "push", "--force-with-lease", "origin", "HEAD"])\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "force-push is forbidden"):
+                REPOCTL._publication_python_sites(path, "worker.py")
+
+    def test_second_push_cannot_hide_at_an_allowlisted_python_site(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "worker.py"
+            path.write_text(
+                'def publish():\n'
+                '    run(["git", "push", "origin", "HEAD"])\n'
+                '    run(["git", "push", "other", "HEAD"])\n',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "multiple git_push mutations at worker.py#publish"):
+                REPOCTL._publication_python_sites(path, "worker.py")
+
+    def test_python_shell_wrapper_and_gh_api_pr_creation_are_rejected(self):
+        for source, category in (
+            ('def rogue():\n    run(["bash", "-c", "git push origin HEAD"])\n', "git_push"),
+            ('def rogue():\n    run(["gh", "api", "--method", "POST", "repos/o/r/pulls"])\n', "github_pr_create"),
+        ):
+            with self.subTest(category=category), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "worker.py"
+                path.write_text(source, encoding="utf-8")
+                self.assertEqual({"worker.py#rogue"}, REPOCTL._publication_python_sites(path, "worker.py")[category])
+
+    def test_publication_mutation_in_tekton_yaml_is_rejected(self):
+        for step in (
+            'script: |\n      git push origin HEAD\n',
+            'command: [git]\n    args: [push, origin, HEAD]\n',
+            'command: [gh]\n    args: [pr, create, --title, release]\n',
+            'script: |\n      gh pr create --title release\n',
+        ):
+            with self.subTest(step=step), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                task = root / "platform/tekton/tasks/rogue.yaml"
+                task.parent.mkdir(parents=True)
+                task.write_text('apiVersion: tekton.dev/v1\nkind: Task\nspec:\n  steps:\n  - name: rogue\n    ' + step, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, "platform/tekton/tasks/rogue.yaml"):
+                    REPOCTL.publication_mutation_site_check(source_root=root)
+
+    def test_publication_mutation_in_ansible_yaml_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task = root / "platform/ansible/roles/rogue/tasks/main.yml"
+            task.parent.mkdir(parents=True)
+            task.write_text('- name: Rogue publication\n  ansible.builtin.command:\n    argv: [git, push, origin, HEAD]\n', encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "platform/ansible/roles/rogue/tasks/main.yml"):
+                REPOCTL.publication_mutation_site_check(source_root=root)
+
+    def test_publication_mutation_in_other_automation_is_rejected(self):
+        for relative, content in (
+            ("tools/publish.sh", "#!/bin/sh\ngit push origin HEAD\n"),
+            ("frontend/Makefile", "rogue:\n\tgh pr create --title release\n"),
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / relative
+                path.parent.mkdir(parents=True)
+                path.write_text(content, encoding="utf-8")
+                with self.assertRaisesRegex(RuntimeError, relative):
+                    REPOCTL.publication_mutation_site_check(source_root=root)
+
     def test_unsigned_commit_is_rejected_locally(self):
         sha = "a" * 40
         failed = subprocess.CompletedProcess(["git"], 1, "", "invalid signature")

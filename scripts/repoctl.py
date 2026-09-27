@@ -7969,36 +7969,117 @@ def repository_delivery_policy() -> dict:
     return _validate_repository_delivery_policy(review_policy.get("repository_delivery") or {})
 
 
-def publication_mutation_site_check(*, source_root: Path = ROOT, policy: dict | None = None) -> None:
-    """AST-check repository publication mutations against the sole review-policy allowlist."""
-    publication = (policy or repository_delivery_policy())["publication"]
-    expected = {
-        kind: set(sites)
-        for kind, sites in publication["mutation_sites"].items()
-    }
-    found: dict[str, set[str]] = {kind: set() for kind in expected}
-    for path in sorted((source_root / "scripts").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        relative = path.relative_to(source_root).as_posix()
-        for function in (node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))):
-            site = f"{relative}#{function.name}"
-            command_bindings = {
-                node.targets[0].id: node.value
-                for node in ast.walk(function)
-                if isinstance(node, ast.Assign)
-                and len(node.targets) == 1
-                and isinstance(node.targets[0], ast.Name)
-                and isinstance(node.value, (ast.List, ast.Tuple))
-            }
-            for call in (node for node in ast.walk(function) if isinstance(node, ast.Call) and node.args):
-                argv = call.args[0]
+_PUBLICATION_TEXT_COMMANDS = {
+    "git_push": re.compile(r"(?<![\w.-])git\s+push\b"),
+    "github_pr_create": re.compile(
+        r"(?<![\w.-])gh\s+pr\s+create\b|\b(?:gh\s+api|curl\b)[^\n]{0,300}(?:-X|--method)\s+POST[^\n]{0,300}/pulls\b"
+    ),
+    "github_pr_update": re.compile(r"(?<![\w.-])gh\s+pr\s+edit\b"),
+}
+_PUBLICATION_AUTOMATION_SUFFIXES = {
+    ".bash", ".go", ".gradle", ".groovy", ".j2", ".js", ".json",
+    ".kts", ".lua", ".mk", ".ps1", ".rb", ".sh", ".tf",
+    ".tmpl", ".toml", ".tpl", ".ts", ".zsh",
+}
+_PUBLICATION_AUTOMATION_FILENAMES = {"Dockerfile", "Jenkinsfile", "Justfile", "Makefile", "Taskfile", "Vagrantfile"}
+
+
+def _publication_source_files(source_root: Path) -> list[Path]:
+    """Inventory deliverable files, including untracked additions before a commit."""
+    result = subprocess.run(
+        ["git", "-C", str(source_root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return sorted({source_root / os.fsdecode(name) for name in result.stdout.split(b"\0") if name})
+    # Synthetic policy fixtures are not Git repositories.
+    return sorted(path for path in source_root.rglob("*") if path.is_file())
+
+
+def _publication_command_categories(words: set[str], prefixes: set[str]) -> set[str]:
+    categories: set[str] = set()
+    if {"git", "push"} <= words:
+        delete = any(value.startswith("--force-with-lease=") for value in prefixes) and ":" in prefixes
+        force_options = any(value == "-f" or value.startswith(("--force", "+")) for value in words | prefixes)
+        if not delete and force_options:
+            raise RuntimeError("force-push is forbidden")
+        categories.add("git_push_delete" if delete else "git_push")
+    if {"pr", "create"} <= words:
+        categories.add("github_pr_create")
+    if "POST" in words and any("/pulls" in value for value in words | prefixes):
+        categories.add("github_pr_create")
+    if {"pr", "edit"} <= words or {"api", "PATCH", "--raw-field"} <= words:
+        categories.add("github_pr_update")
+    return categories
+
+
+def _publication_python_sites(path: Path, relative: str) -> dict[str, set[str]]:
+    found: dict[str, set[str]] = {}
+    occurrences: dict[tuple[str, str], int] = {}
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.scopes: list[str] = []
+            self.bindings: list[dict[str, ast.AST]] = [{}]
+
+        @property
+        def site(self) -> str:
+            return f"{relative}#{'.'.join(self.scopes) if self.scopes else '<module>'}"
+
+        def record(self, category: str) -> None:
+            found.setdefault(category, set()).add(self.site)
+            key = category, self.site
+            occurrences[key] = occurrences.get(key, 0) + 1
+            if occurrences[key] > 1:
+                raise RuntimeError(f"multiple {category} mutations at {self.site}")
+
+        def _visit_scope(self, body: list[ast.stmt], name: str) -> None:
+            self.scopes.append(name)
+            self.bindings.append({})
+            for statement in body:
+                self.visit(statement)
+            self.bindings.pop()
+            self.scopes.pop()
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            for expression in [*node.decorator_list, *node.bases, *(keyword.value for keyword in node.keywords)]:
+                self.visit(expression)
+            self._visit_scope(node.body, node.name)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            for expression in [*node.decorator_list, *node.args.defaults, *(value for value in node.args.kw_defaults if value)]:
+                self.visit(expression)
+            if node.returns:
+                self.visit(node.returns)
+            self._visit_scope(node.body, node.name)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            self.visit_FunctionDef(node)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            for expression in [*node.args.defaults, *(value for value in node.args.kw_defaults if value)]:
+                self.visit(expression)
+            self.scopes.append("<lambda>")
+            self.bindings.append({})
+            self.visit(node.body)
+            self.bindings.pop()
+            self.scopes.pop()
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                self.bindings[-1][node.targets[0].id] = node.value
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            if node.args:
+                name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+                argv = node.args[0]
                 if isinstance(argv, ast.Name):
-                    argv = command_bindings.get(argv.id)
-                if not isinstance(argv, (ast.List, ast.Tuple)):
-                    continue
-                words = {item.value for item in argv.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)}
-                if {"git", "push"} <= words:
-                    joined_prefixes = {
+                    argv = next((scope[argv.id] for scope in reversed(self.bindings) if argv.id in scope), argv)
+                if isinstance(argv, (ast.List, ast.Tuple)) and not name.startswith("assert"):
+                    words = {item.value for item in argv.elts if isinstance(item, ast.Constant) and isinstance(item.value, str)}
+                    prefixes = {
                         item.values[0].value
                         for item in argv.elts
                         if isinstance(item, ast.JoinedStr)
@@ -8006,27 +8087,99 @@ def publication_mutation_site_check(*, source_root: Path = ROOT, policy: dict | 
                         and isinstance(item.values[0], ast.Constant)
                         and isinstance(item.values[0].value, str)
                     }
-                    category = (
-                        "git_push_delete"
-                        if any(value.startswith("--force-with-lease=") for value in joined_prefixes)
-                        and ":" in joined_prefixes
-                        else "git_push"
-                    )
-                    if category == "git_push" and (
-                        {"--force", "-f", "+HEAD"} & words
-                        or any(value.startswith("--force") for value in joined_prefixes)
-                    ):
-                        raise RuntimeError(f"force-push is forbidden at {site}")
-                    found[category].add(site)
-                if {"pr", "create"} <= words:
-                    found["github_pr_create"].add(site)
-                if {"pr", "edit"} <= words or {"api", "PATCH", "--raw-field"} <= words:
-                    found["github_pr_update"].add(site)
-    makefile = (source_root / "Makefile").read_text(encoding="utf-8")
-    if re.search(r"(?m)^\s*(?:publish|publish-change)\s*:", makefile):
-        raise RuntimeError("direct public publish Make targets are forbidden; use make deliver")
-    if any(re.search(r"\b(?:git\s+push|gh\s+pr\s+(?:create|edit))\b", line) for line in makefile.splitlines() if line.startswith("\t")):
-        raise RuntimeError("Makefile contains a direct publication mutation outside make deliver")
+                    try:
+                        categories = _publication_command_categories(words, prefixes)
+                    except RuntimeError as exc:
+                        raise RuntimeError(f"{exc} at {self.site}:{node.lineno}") from exc
+                    for word in words:
+                        categories.update(category for category, pattern in _PUBLICATION_TEXT_COMMANDS.items() if pattern.search(word))
+                    for category in categories:
+                        self.record(category)
+                elif isinstance(argv, (ast.Constant, ast.JoinedStr)):
+                    if name in {"run", "Popen", "call", "check_call", "check_output", "system", "exec", "execute"}:
+                        chunks = [argv.value] if isinstance(argv, ast.Constant) and isinstance(argv.value, str) else [
+                            item.value for item in argv.values if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                        ] if isinstance(argv, ast.JoinedStr) else []
+                        categories = {
+                            category for chunk in chunks for category, pattern in _PUBLICATION_TEXT_COMMANDS.items()
+                            if pattern.search(chunk)
+                        }
+                        for category in categories:
+                            self.record(category)
+            self.generic_visit(node)
+
+    Visitor().visit(ast.parse(path.read_text(encoding="utf-8"), filename=str(path)))
+    return found
+
+
+def _publication_yaml_sites(path: Path, relative: str) -> dict[str, set[str]]:
+    import yaml
+
+    found: dict[str, set[str]] = {}
+    content = path.read_text(encoding="utf-8")
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            command = value.get("command")
+            args = value.get("args")
+            argv = value.get("argv")
+            for candidate in (argv, command + args if isinstance(command, list) and isinstance(args, list) else command):
+                if isinstance(candidate, list):
+                    words = {word for word in candidate if isinstance(word, str)}
+                    for category in _publication_command_categories(words, set()):
+                        found.setdefault(category, set()).add(relative)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+        elif isinstance(value, str):
+            for category, pattern in _PUBLICATION_TEXT_COMMANDS.items():
+                if pattern.search(value):
+                    found.setdefault(category, set()).add(relative)
+
+    try:
+        for document in yaml.safe_load_all(content):
+            visit(document)
+    except yaml.YAMLError as exc:
+        template = "/templates/" in f"/{relative}" and "{{" in content
+        invalid_test_fixture = relative.startswith("tests/fixtures/")
+        if not (template or invalid_test_fixture):
+            raise RuntimeError(f"cannot inspect publication mutations in {relative}: invalid YAML") from exc
+        # Helm templates and intentional invalid-YAML fixtures cannot be parsed; scan their source conservatively.
+        for category, pattern in _PUBLICATION_TEXT_COMMANDS.items():
+            if pattern.search(content):
+                found.setdefault(category, set()).add(relative)
+        if re.search(r"(?s)\bcommand:\s*\[\s*git\s*\].{0,300}\bargs:\s*\[\s*push\b", content):
+            found.setdefault("git_push", set()).add(relative)
+        if re.search(r"(?s)\bcommand:\s*\[\s*gh\s*\].{0,300}\bargs:\s*\[\s*pr\s*,\s*create\b", content):
+            found.setdefault("github_pr_create", set()).add(relative)
+    return found
+
+
+def publication_mutation_site_check(*, source_root: Path = ROOT, policy: dict | None = None) -> None:
+    """Fail closed on publication mutations in deliverable code and automation files."""
+    publication = (policy or repository_delivery_policy())["publication"]
+    expected = {kind: set(sites) for kind, sites in publication["mutation_sites"].items()}
+    found: dict[str, set[str]] = {kind: set() for kind in expected}
+    for path in _publication_source_files(source_root):
+        relative = path.relative_to(source_root).as_posix()
+        if path.suffix == ".py":
+            discovered = _publication_python_sites(path, relative)
+        elif path.suffix in {".yaml", ".yml"}:
+            discovered = _publication_yaml_sites(path, relative)
+        elif path.name in _PUBLICATION_AUTOMATION_FILENAMES or path.suffix in _PUBLICATION_AUTOMATION_SUFFIXES:
+            content = path.read_text(encoding="utf-8")
+            if path.name == "Makefile" and re.search(r"(?m)^\s*(?:publish|publish-change)\s*:", content):
+                raise RuntimeError("direct public publish Make targets are forbidden; use make deliver")
+            discovered = {
+                category: {f"{relative}:{number}" for number, line in enumerate(content.splitlines(), 1) if pattern.search(line)}
+                for category, pattern in _PUBLICATION_TEXT_COMMANDS.items()
+            }
+        else:
+            continue
+        for category, sites in discovered.items():
+            found[category].update(sites)
     if found != expected:
         raise RuntimeError(f"publication mutation sites differ from review-policy allowlist: {found!r}")
 
