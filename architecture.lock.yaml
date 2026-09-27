@@ -73,8 +73,6 @@ repository_governance:
         - bazel-verify
         - resource-candidate
         - tekton-proof
-        - publish
-        - publish-change
         - deliver
         - pr-loop
         - finish-pr

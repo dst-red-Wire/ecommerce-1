@@ -51,11 +51,16 @@ class GoToolchainDeliveryTests(unittest.TestCase):
         ]
         self.assertTrue(
             any(
-                all(isinstance(item, ast.Constant) and isinstance(item.value, str) for item in call.args[0].elts)
-                and [item.value for item in call.args[0].elts] == ["git", "push", "-u", "origin", "HEAD"]
+                len(call.args[0].elts) == 5
+                and all(isinstance(item, ast.Constant) for item in call.args[0].elts[:4])
+                and [item.value for item in call.args[0].elts[:4]] == ["git", "push", "-u", "origin"]
+                and isinstance(call.args[0].elts[4], ast.JoinedStr)
+                and isinstance(call.args[0].elts[4].values[0], ast.Constant)
+                and call.args[0].elts[4].values[0].value == "HEAD:refs/heads/"
                 for call in push_calls
             )
         )
+        self.assertIn("_remote_branch_head(branch)", ast.unparse(publish))
 
 
 if __name__ == "__main__":
