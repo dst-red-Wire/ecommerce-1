@@ -109,6 +109,13 @@ class WindowsPackerPipelineTest(unittest.TestCase):
                 cwd=ROOT, capture_output=True, text=True, timeout=90,
             )
             self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        cycle = subprocess.run(
+            [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "scripts/windows/native-vtx-cycle.ps1",
+             "-Action", "SelfTest"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, cycle.returncode, cycle.stdout + cycle.stderr)
 
     def test_native_storage_gc_contract(self):
         policy = yaml.safe_load((ROOT / "config/contracts/vm-lifecycle-policy.yaml").read_text())
@@ -184,7 +191,8 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         launcher = self.native_launcher
         self.assertIn("BLOCKED_PRIVILEGE", launcher)
         self.assertIn("GitHub PR #148 HEAD differs", launcher)
-        self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("-Action Cycle"))
+        self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("image-rocky-windows-native-prepare"))
+        self.assertLess(launcher.index("image-rocky-windows-native-prepare"), launcher.index("-Action Reboot"))
         self.assertIn("BCD remains unchanged", launcher)
 
     def test_native_probe_reads_live_virtualbox_log_with_bounded_retry(self):

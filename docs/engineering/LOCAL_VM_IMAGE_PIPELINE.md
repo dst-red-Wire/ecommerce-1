@@ -542,3 +542,12 @@ are recorded in `C:\ecommerce-lab\evidence\current\storage-gc.json`.
 If verified generations cannot restore the required free space, the preflight
 ends `BLOCKED_RUNTIME`. No unrelated Windows, WSL, VirtualBox or user data is
 included in the collection scope.
+
+After a successful normal-boot import, the startup state and `prepared.json`
+both reach `COMPLETE`. The next governed preflight checks the exact-SHA import
+proof, normal Windows boot, absence of native tasks and registered VirtualBox
+VMs, and the staging manifest before retiring `staging/current`. Preparation
+then reuses that single slot for the new SHA. A failed or incomplete cycle
+keeps its staging and requires recovery; it is never treated as a completed
+generation. The canonical launcher runs preflight and preparation under the
+same virtualization serialization capability before authorizing reboot.

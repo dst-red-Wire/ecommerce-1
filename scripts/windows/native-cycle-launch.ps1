@@ -45,5 +45,9 @@ foreach ($name in @('Ecommerce-System-WSL-Probe','Ecommerce-S4U-WSL-Probe')) {
 }
 $published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'PR head advanced after startup dry-run; BCD remains unchanged' }
-& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cycleScript -Action Cycle -RepoRoot $RepoRoot -WslDistribution $WslDistribution -WslRepoRoot $WslRepoRoot -LabRoot $LabRoot -Offline
-if ($LASTEXITCODE -ne 0) { throw 'Native cycle preparation failed; inspect persistent Windows evidence and host state' }
+& $wsl -d $WslDistribution --cd $WslRepoRoot -- python3 scripts/repoctl.py image-rocky-windows-native-prepare --offline
+if ($LASTEXITCODE -ne 0) { throw 'Native cycle preparation failed under the global virtualization lock; inspect persistent Windows evidence and host state' }
+$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'PR head advanced after preparation; refusing reboot' }
+& $powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $cycleScript -Action Reboot -LabRoot $LabRoot
+if ($LASTEXITCODE -ne 0) { throw 'Native reboot authorization failed; inspect persistent Windows evidence and host state' }

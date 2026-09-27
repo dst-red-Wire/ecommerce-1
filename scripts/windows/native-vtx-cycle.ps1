@@ -50,7 +50,15 @@ function Get-NativeStatePath {
 function Initialize-NativeState {
     param([string]$SourceSha, [string]$SourceTree, [string]$ManifestSha256, [string]$NormalBootId)
     $path = Get-NativeStatePath -SourceSha $SourceSha
-    if (Test-Path -LiteralPath $path) { throw 'Existing native startup state requires explicit recovery' }
+    if (Test-Path -LiteralPath $path) {
+        $previous = Read-JsonFile $path
+        $previousPrepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
+        if ($previous.phase -ne 'COMPLETE' -or $previousPrepared.status -ne 'COMPLETE' -or
+            $previous.source_sha -ne $previousPrepared.source_git_sha) {
+            throw 'Existing native startup state requires explicit recovery'
+        }
+        Assert-NativeCompletedCycleProof -Root $script:LabRootResolved -Prepared $previousPrepared
+    }
     $normal = Assert-Guid -Value $NormalBootId
     $state = [ordered]@{
         schema=1; mode='REAL'; source_sha=$SourceSha; source_tree=$SourceTree
@@ -137,19 +145,9 @@ function New-NativeRuntimeIdentity {
     return $destination
 }
 
-function Test-NativeStorageGcRuntimeClear {
+function Test-NativeHostIdle {
     $hostState = Get-NormalHostState
     if (-not $hostState.hypervisor_present -or $hostState.hypervisorlaunchtype -eq 'off') { return $false }
-    $preparedPath = Join-Path $script:LabRootResolved 'prepared.json'
-    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
-        $prepared = Read-JsonFile $preparedPath
-        if ($prepared.status -eq 'PREPARED') { return $false }
-    }
-    $startupStatePath = Join-Path $script:LabRootResolved 'startup-real\state.json'
-    if (Test-Path -LiteralPath $startupStatePath -PathType Leaf) {
-        $startupState = Read-JsonFile $startupStatePath
-        if ($startupState.phase -notin @('COMPLETE','FAILED')) { return $false }
-    }
     $normalStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
     if (Test-Path -LiteralPath $normalStatePath -PathType Leaf) {
         $normalState = Read-JsonFile $normalStatePath
@@ -162,6 +160,104 @@ function Test-NativeStorageGcRuntimeClear {
     $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))
     $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $env:SystemRoot
     return $machines.Count -eq 0
+}
+
+function Test-NativeCycleStateActive {
+    param([string]$Root)
+    $preparedPath = Join-Path $Root 'prepared.json'
+    if (Test-Path -LiteralPath $preparedPath -PathType Leaf) {
+        $prepared = Read-JsonFile $preparedPath
+        if ($prepared.status -ne 'COMPLETE') { return $true }
+    }
+    $startupStatePath = Join-Path $Root 'startup-real\state.json'
+    if (Test-Path -LiteralPath $startupStatePath -PathType Leaf) {
+        $startupState = Read-JsonFile $startupStatePath
+        if ($startupState.phase -notin @('COMPLETE','FAILED')) { return $true }
+    }
+    return $false
+}
+
+function Test-NativeStorageGcRuntimeClear {
+    if (Test-NativeCycleStateActive -Root $script:LabRootResolved) { return $false }
+    return (Test-NativeHostIdle)
+}
+
+function Assert-NativeCompletedCycleProof {
+    param([string]$Root, $Prepared)
+    $state = Read-JsonFile (Join-Path $Root 'startup-real\state.json')
+    $import = Read-JsonFile (Join-Path $Root 'evidence\current\native-import.json')
+    if ($Prepared.schema -ne 1 -or $Prepared.status -notin @('PREPARED','COMPLETE') -or
+        $Prepared.source_git_sha -notmatch '^[0-9a-f]{40}$' -or
+        $Prepared.source_tree_sha -notmatch '^[0-9a-f]{40}$' -or
+        $Prepared.staging_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        $state.schema -ne 1 -or $state.mode -ne 'REAL' -or $state.phase -ne 'COMPLETE' -or
+        $state.source_sha -ne $Prepared.source_git_sha -or
+        $state.source_tree -ne $Prepared.source_tree_sha -or
+        $state.staging_manifest_sha256 -ne $Prepared.staging_manifest_sha256 -or
+        $import.schema -ne 1 -or $import.status -ne 'PASS' -or
+        $import.source_git_sha -ne $Prepared.source_git_sha -or
+        $import.source_tree_sha -ne $Prepared.source_tree_sha -or
+        $import.staging_manifest_sha256 -ne $Prepared.staging_manifest_sha256 -or
+        $import.wsl2_restored -ne 'PASS' -or $import.bcd_restored -ne 'PASS') {
+        throw 'Completed native cycle proof is inconsistent; refusing staging retirement'
+    }
+}
+
+function Complete-NativePreparedState {
+    param([string]$Root)
+    $path = Join-Path $Root 'prepared.json'
+    $prepared = Read-JsonFile $path
+    Assert-NativeCompletedCycleProof -Root $Root -Prepared $prepared
+    if ($prepared.status -eq 'COMPLETE') { return }
+    $prepared.status = 'COMPLETE'
+    $prepared | Add-Member -NotePropertyName completed_at -NotePropertyValue (Get-UtcTimestamp) -Force
+    Write-Utf8Json -InputObject $prepared -Path $path
+}
+
+function Invoke-CompletedCycleCleanup {
+    param([string]$Root, [scriptblock]$HostIdleProbe = $null)
+    $preparedPath = Join-Path $Root 'prepared.json'
+    if (-not (Test-Path -LiteralPath $preparedPath -PathType Leaf)) { return }
+    $prepared = Read-JsonFile $preparedPath
+    if ($prepared.status -eq 'PREPARED') {
+        $statePath = Join-Path $Root 'startup-real\state.json'
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or
+            (Read-JsonFile $statePath).phase -ne 'COMPLETE') { return }
+    }
+    if ($prepared.status -ne 'COMPLETE' -and $prepared.status -ne 'PREPARED') {
+        throw 'Unknown native preparation status; refusing staging retirement'
+    }
+    Assert-NativeCompletedCycleProof -Root $Root -Prepared $prepared
+    $stage = Join-Path $Root 'staging\current'
+    if ([IO.Path]::GetFullPath([string]$prepared.stage_root).TrimEnd('\') -ine
+        [IO.Path]::GetFullPath($stage).TrimEnd('\')) {
+        throw 'Completed native staging path differs from the single current slot'
+    }
+    if ($prepared.status -eq 'COMPLETE' -and -not (Test-Path -LiteralPath $stage -PathType Container)) { return }
+    $production = [IO.Path]::GetFullPath($Root).TrimEnd('\') -ieq 'C:\ecommerce-lab'
+    if ($production -and $env:ECOMMERCE_RUNTIME_ORCHESTRATED -ne '1') {
+        throw 'BLOCKED_RUNTIME completed staging retirement requires local-virtualization-serialization'
+    }
+    if ($production) { $HostIdleProbe = { Test-NativeHostIdle } }
+    if ($null -eq $HostIdleProbe -or -not (& $HostIdleProbe)) {
+        throw 'BLOCKED_RUNTIME completed staging retirement requires normal boot and no active VM or task'
+    }
+    Complete-NativePreparedState -Root $Root
+    if (-not (Test-Path -LiteralPath $stage -PathType Container)) { return }
+    $staged = Read-JsonFile (Join-Path $stage '.prepared.json')
+    if ($staged.source_git_sha -ne $prepared.source_git_sha -or
+        $staged.source_tree_sha -ne $prepared.source_tree_sha -or
+        -not (Test-StagingManifest -Root $stage) -or
+        (Get-FileSha256 -Path (Join-Path $stage 'SHA256SUMS')) -ne $prepared.staging_manifest_sha256) {
+        throw 'Completed staging differs from the imported exact-SHA manifest'
+    }
+    Remove-SafeTree -BasePath $Root -CandidatePath $stage
+    if (Test-Path -LiteralPath $stage) { throw 'Completed staging remains after retirement' }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1; status='PASS'; source_sha=$prepared.source_git_sha
+        staging_manifest_sha256=$prepared.staging_manifest_sha256
+        completed_at=Get-UtcTimestamp
+    }) -Path (Join-Path $Root 'evidence\current\staging-retirement.json')
 }
 
 function Assert-NativeFreeSpace {
@@ -177,6 +273,31 @@ function Assert-NativeFreeSpace {
     if ($drive.AvailableFreeSpace -lt $minimum) {
         $available = [math]::Round($drive.AvailableFreeSpace / 1GB, 2)
         throw "BLOCKED_RUNTIME $Operation`: $available GiB free on $root; $MinimumGiB GiB required"
+    }
+}
+
+function Get-ValidatedNativeReuseBox {
+    if (-not $ReuseBoxPath) { return $null }
+    $reuseRoot = [IO.Path]::GetFullPath((Join-Path $script:LabRootResolved 'artifacts')).TrimEnd('\') + '\'
+    $candidate = [IO.Path]::GetFullPath($ReuseBoxPath)
+    if (-not $candidate.StartsWith($reuseRoot, [StringComparison]::OrdinalIgnoreCase) -or
+        $ReuseBoxSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $ReuseBoxInputsDigest -notmatch '^[0-9a-f]{64}$' -or
+        $ReuseBoxInputsDigest -ne $PackerInputsDigest -or
+        (Get-FileSha256 -Path $candidate) -ne $ReuseBoxSha256) {
+        throw 'Requested Packer box reuse path, digest or provenance is invalid'
+    }
+    $manifest = Read-JsonFile (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
+    if ($manifest.box_sha256 -ne $ReuseBoxSha256 -or $manifest.inputs_digest -ne $ReuseBoxInputsDigest -or
+        $manifest.box_filename -ne [IO.Path]::GetFileName($candidate) -or
+        $manifest.box_size_bytes -ne (Get-Item -LiteralPath $candidate).Length -or
+        $manifest.packer_log_sha256 -ne (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'packer.log'))) {
+        throw 'Requested Packer box reuse manifest or retained build log differs'
+    }
+    return [ordered]@{
+        path = $candidate; sha256 = $ReuseBoxSha256; inputs_digest = $ReuseBoxInputsDigest
+        manifest_sha256 = Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
+        source_sha = [string]$manifest.source_sha
     }
 }
 
@@ -1718,29 +1839,8 @@ function Invoke-Prepare {
         throw 'Persistent laboratory SSH identity fingerprint is absent'
     }
     $labSshFingerprint = $Matches[1]
-    $reuseBox = $null
-    if ($ReuseBoxPath) {
-        $reuseRoot = [IO.Path]::GetFullPath((Join-Path $script:LabRootResolved 'artifacts')).TrimEnd('\') + '\'
-        $candidate = [IO.Path]::GetFullPath($ReuseBoxPath)
-        if (-not $candidate.StartsWith($reuseRoot, [StringComparison]::OrdinalIgnoreCase) -or
-            $ReuseBoxSha256 -notmatch '^[0-9a-f]{64}$' -or
-            $ReuseBoxInputsDigest -notmatch '^[0-9a-f]{64}$' -or
-            (Get-FileSha256 -Path $candidate) -ne $ReuseBoxSha256) {
-            throw 'Requested Packer box reuse path, digest or provenance is invalid'
-        }
-        $manifest = Read-JsonFile (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
-        if ($manifest.box_sha256 -ne $ReuseBoxSha256 -or $manifest.inputs_digest -ne $ReuseBoxInputsDigest -or
-            $manifest.box_filename -ne [IO.Path]::GetFileName($candidate) -or
-            $manifest.box_size_bytes -ne (Get-Item -LiteralPath $candidate).Length -or
-            $manifest.packer_log_sha256 -ne (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'packer.log'))) {
-            throw 'Requested Packer box reuse manifest or retained build log differs'
-        }
-        $reuseBox = [ordered]@{
-            path = $candidate; sha256 = $ReuseBoxSha256; inputs_digest = $ReuseBoxInputsDigest
-            manifest_sha256 = Get-FileSha256 -Path (Join-Path (Split-Path -Parent $candidate) 'manifest.json')
-            source_sha = [string]$manifest.source_sha
-        }
-    }
+    $reuseBox = Get-ValidatedNativeReuseBox
+    Invoke-CompletedCycleCleanup -Root $script:LabRootResolved
     [void](Invoke-NativeStorageGc -LabRoot $script:LabRootResolved -RequiredFreeGiB $minimumStageGiB -TargetFreeGiB $targetStageGiB -ReuseBoxPath $ReuseBoxPath -RuntimeClearProbe { Test-NativeStorageGcRuntimeClear })
     Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB $minimumStageGiB -Operation 'native cycle preparation'
     [void](Assert-StartupDryRunProof -SourceSha $sourceSha)
@@ -2076,7 +2176,9 @@ function Invoke-CyclePreflight {
     if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
         throw 'Native cycle preflight must target the exact WSL source worktree'
     }
-    [void](Invoke-NativeStorageGc -LabRoot $script:LabRootResolved -RequiredFreeGiB 40 -TargetFreeGiB 48 -RuntimeClearProbe { Test-NativeStorageGcRuntimeClear })
+    [void](Get-ValidatedNativeReuseBox)
+    Invoke-CompletedCycleCleanup -Root $script:LabRootResolved
+    [void](Invoke-NativeStorageGc -LabRoot $script:LabRootResolved -RequiredFreeGiB 40 -TargetFreeGiB 48 -ReuseBoxPath $ReuseBoxPath -RuntimeClearProbe { Test-NativeStorageGcRuntimeClear })
     Assert-NativeFreeSpace -Path $script:LabRootResolved -MinimumGiB 40 -Operation 'native cycle preflight'
     Assert-LocalHostOnlyNetwork
     $vbox = Resolve-WindowsTool -Name 'VBoxManage.exe' -FallbackPaths @((Join-Path $env:ProgramFiles 'Oracle\VirtualBox\VBoxManage.exe'))
@@ -2162,6 +2264,7 @@ function Invoke-Resume {
         Invoke-Import
         Move-NativePhase -SourceSha $sourceSha -Expected 'RESTORE_PENDING' -Next 'RESTORED'
         Move-NativePhase -SourceSha $sourceSha -Expected 'RESTORED' -Next 'COMPLETE'
+        Complete-NativePreparedState -Root $script:LabRootResolved
     }
     catch {
         $failure = $_.Exception.Message
@@ -2228,7 +2331,15 @@ description             $NativeEntryName
         try {
             $script:LabRootResolved = $temporary
             $sha = 'a' * 40
-            Initialize-NativeState -SourceSha $sha -SourceTree ('b' * 40) -ManifestSha256 ('c' * 64) -NormalBootId $normal
+            $stage = Join-Path $temporary 'staging\current'
+            [void](New-Item -ItemType Directory -Path $stage -Force)
+            foreach ($name in 1..8) { [IO.File]::WriteAllText((Join-Path $stage "$name.txt"), "stage-$name") }
+            $stageManifest = Write-StagingManifest -Root $stage
+            $stageDigest = Get-FileSha256 -Path $stageManifest
+            Write-Utf8Json -Path (Join-Path $stage '.prepared.json') -InputObject ([ordered]@{
+                schema=1; source_git_sha=$sha; source_tree_sha=('b' * 40)
+            })
+            Initialize-NativeState -SourceSha $sha -SourceTree ('b' * 40) -ManifestSha256 $stageDigest -NormalBootId $normal
             Move-NativePhase -SourceSha $sha -Expected 'PREPARED' -Next 'BOOT_RESUME_ARMED' -NativeBootId $native
             foreach ($phase in $NativePhases[2..($NativePhases.Count - 2)]) {
                 $state = Read-JsonFile (Get-NativeStatePath -SourceSha $sha)
@@ -2242,6 +2353,38 @@ description             $NativeEntryName
             try { Move-NativePhase -SourceSha $sha -Expected 'COMPLETE' -Next 'NATIVE_BOOT_PENDING' }
             catch { $rejected = $true }
             if (-not $rejected) { throw 'Completed native startup state accepted a replay' }
+            Write-Utf8Json -Path (Join-Path $temporary 'prepared.json') -InputObject ([ordered]@{
+                schema=1; status='PREPARED'; source_git_sha=$sha; source_tree_sha=('b' * 40)
+                staging_manifest_sha256=$stageDigest; stage_root=$stage
+            })
+            $rejected = $false
+            try { Complete-NativePreparedState -Root $temporary }
+            catch { $rejected = $true }
+            if (-not $rejected -or -not (Test-Path -LiteralPath $stage)) {
+                throw 'Incomplete import proof was allowed to retire staging'
+            }
+            if (-not (Test-NativeCycleStateActive -Root $temporary)) {
+                throw 'PREPARED staging was not considered active'
+            }
+            Write-Utf8Json -Path (Join-Path $temporary 'evidence\current\native-import.json') -InputObject ([ordered]@{
+                schema=1; status='PASS'; source_git_sha=$sha; source_tree_sha=('b' * 40)
+                staging_manifest_sha256=$stageDigest; wsl2_restored='PASS'; bcd_restored='PASS'
+            })
+            Complete-NativePreparedState -Root $temporary
+            if ((Read-JsonFile (Join-Path $temporary 'prepared.json')).status -ne 'COMPLETE') {
+                throw 'Successful normal-boot import did not complete prepared state'
+            }
+            if (Test-NativeCycleStateActive -Root $temporary) {
+                throw 'Completed native cycle was incorrectly considered active'
+            }
+            Invoke-CompletedCycleCleanup -Root $temporary -HostIdleProbe { $true }
+            Invoke-CompletedCycleCleanup -Root $temporary -HostIdleProbe { $true }
+            if (Test-Path -LiteralPath $stage) { throw 'Completed staging remained after idempotent retirement' }
+            $nextSha = 'd' * 40
+            Initialize-NativeState -SourceSha $nextSha -SourceTree ('e' * 40) -ManifestSha256 ('f' * 64) -NormalBootId $normal
+            if ((Read-JsonFile (Get-NativeStatePath -SourceSha $nextSha)).source_sha -ne $nextSha) {
+                throw 'Completed cycle did not converge into the next exact-SHA state'
+            }
         }
         finally { $script:LabRootResolved = $previousRoot }
         Write-Utf8Json -Path (Join-Path $temporary 'runtime-contract.json') -InputObject ([ordered]@{

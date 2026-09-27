@@ -9558,6 +9558,15 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
             if "found 0" not in str(exc):
                 return fail(f"ambiguous Packer box reuse decision: {exc}")
             print(f"PACKER_REBUILD_DECISION=BUILD reason={exc}")
+    if action == "prepare":
+        preflight_command = command.copy()
+        preflight_command[preflight_command.index("Prepare")] = "Preflight"
+        preflight_result = run(
+            preflight_command, cwd=windows_working_directory,
+            env=_windows_powershell_environment(), check=False,
+        )
+        if preflight_result.returncode:
+            return preflight_result.returncode
     return run(
         command,
         cwd=windows_working_directory,
