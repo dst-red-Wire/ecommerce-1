@@ -44,6 +44,19 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         self.assertEqual("exact-pr-base-sha", policy["pr_loop"]["controller_source"])
         self.assertEqual("trusted-pr-transition", policy["pr_loop"]["command"])
         self.assertEqual("forbidden", policy["pr_loop"]["direct_head_controller"])
+        self.assertEqual(
+            ["exact-pr-head", "sync-pr-base-if-required", "qualification"],
+            policy["pr_loop"]["transition_order"][:3],
+        )
+        self.assertEqual(
+            "abandon-and-restart-from-current-exact-base",
+            policy["pr_loop"]["exact_sha"]["in_flight_transition_on_base_change"],
+        )
+        self.assertEqual("BASE_CHANGED", policy["pr_loop"]["base_change"]["state"])
+        self.assertEqual(
+            ["sync-pr-base", "qualification", "git-push", "finish-pr"],
+            policy["pr_loop"]["base_change"]["stop_before"],
+        )
         handoff = policy["pr_loop"]["chatgpt_handoff"]
         self.assertEqual("ChatGPT-only", handoff["verdict_authority"])
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", handoff["state"])
@@ -160,6 +173,10 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
         mutations = (
             lambda value: value["pr_loop"]["merge_delegation"].__setitem__("direct_merge", "allowed"),
             lambda value: value["pr_loop"].__setitem__("controller_source", "pull-request-head"),
+            lambda value: value["pr_loop"]["transition_order"].remove("sync-pr-base-if-required"),
+            lambda value: value["pr_loop"]["base_change"].__setitem__(
+                "next_action", "SYNC_PR_BASE"
+            ),
             lambda value: value["pr_loop"].__setitem__("direct_head_controller", "allowed"),
             lambda value: value["pr_loop"]["risk_classification"].__setitem__("llm_decision", "allowed"),
             lambda value: value["pr_loop"]["risk_classification"].__setitem__(

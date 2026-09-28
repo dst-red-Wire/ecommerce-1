@@ -119,6 +119,30 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("REMOTE_HEAD_CHANGED", result["error"])
         self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
 
+    def test_base_change_after_merge_abandons_old_controller_before_qualification(self):
+        self.main_is_ancestor = False
+        changed = REPOCTL.PRBaseChanged(self.MAIN, "d" * 40, "d" * 40)
+        with mock.patch.object(
+            REPOCTL, "_pr_loop_current_base", side_effect=[self.pr, self.pr, changed]
+        ):
+            with self.assertRaises(REPOCTL.PRBaseChanged):
+                REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertEqual(self.OLD, self.remote)
+        self.assertFalse(any(c[:2] == ["repoctl", "qualification-proof"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+
+    def test_base_change_after_qualification_blocks_publication(self):
+        self.main_is_ancestor = False
+        changed = REPOCTL.PRBaseChanged(self.MAIN, "d" * 40, "d" * 40)
+        with mock.patch.object(
+            REPOCTL, "_pr_loop_current_base",
+            side_effect=[self.pr, self.pr, self.pr, changed],
+        ):
+            with self.assertRaises(REPOCTL.PRBaseChanged):
+                REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertTrue(any(c[:2] == ["repoctl", "qualification-proof"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+
     def test_qualification_failure_blocks_push(self):
         self.main_is_ancestor = False
         with mock.patch.object(REPOCTL, "_pr_loop_qualification", return_value={"status": "MISSING"}):

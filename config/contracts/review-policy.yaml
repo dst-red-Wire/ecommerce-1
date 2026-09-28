@@ -160,6 +160,7 @@ repository_delivery:
       - finish-pr-and-branch-cleanup-contracts
     transition_order:
       - exact-pr-head
+      - sync-pr-base-if-required
       - qualification
       - chatgpt-code
       - chatgpt-security
@@ -174,8 +175,15 @@ repository_delivery:
       prior_sha_evidence: historical-only
       head_change: restart-at-qualification
       in_flight_transition_on_head_change: abandon-and-restart
+      in_flight_transition_on_base_change: abandon-and-restart-from-current-exact-base
       refetch_before_qualification: required
       refetch_before_merge: required
+    base_change:
+      detection: github-rest-base-sha-or-origin-main-differs-from-trusted-base-sha
+      state: BASE_CHANGED
+      next_action: RESTART_EXACT_BASE_CONTROLLER
+      stop_before: [sync-pr-base, qualification, git-push, finish-pr]
+      restart_controller: fresh-checkout-at-current-exact-base-sha
     chatgpt_handoff:
       trigger: canonical-bounded-handoff
       state: CHATGPT_REVIEW_REQUIRED

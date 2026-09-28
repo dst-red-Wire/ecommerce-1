@@ -1546,6 +1546,7 @@ def validate(root):
             or pr_loop.get("transition_order")
             != [
                 "exact-pr-head",
+                "sync-pr-base-if-required",
                 "qualification",
                 "chatgpt-code",
                 "chatgpt-security",
@@ -1559,6 +1560,16 @@ def validate(root):
             or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
             or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_head_change")
             != "abandon-and-restart"
+            or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_base_change")
+            != "abandon-and-restart-from-current-exact-base"
+            or pr_loop.get("base_change")
+            != {
+                "detection": "github-rest-base-sha-or-origin-main-differs-from-trusted-base-sha",
+                "state": "BASE_CHANGED",
+                "next_action": "RESTART_EXACT_BASE_CONTROLLER",
+                "stop_before": ["sync-pr-base", "qualification", "git-push", "finish-pr"],
+                "restart_controller": "fresh-checkout-at-current-exact-base-sha",
+            }
             or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
             or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
             or pr_loop.get("chatgpt_handoff", {}).get("state") != "CHATGPT_REVIEW_REQUIRED"

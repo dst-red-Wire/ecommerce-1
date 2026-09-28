@@ -814,7 +814,11 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 _pr_loop_checkout_errors=mock.Mock(return_value=[]),
                 _remote_ref_sha=mock.Mock(return_value="c" * 40),
                 _require_trusted_pr_execution=mock.Mock(
-                    return_value={"trusted_root": Path("/trusted/base"), "target_root": ROOT}
+                    return_value={
+                        "trusted_root": Path("/trusted/base"),
+                        "target_root": ROOT,
+                        "base_sha": "c" * 40,
+                    }
                 ),
             ),
         )
@@ -858,6 +862,66 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertFalse(payload["merge_ready"])
         transition.assert_called_once()
         authorities.assert_not_called()
+
+    def test_base_change_before_qualification_requires_fresh_controller(self):
+        patches = self.common()
+        changed = REPOCTL.PRBaseChanged("c" * 40, "d" * 40, "d" * 40)
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_pr_loop_current_base", side_effect=[self.snapshot(), changed]
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_qualification",
+            return_value={"status": "MISSING", "head_sha": self.SHA_A}
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
+        ), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed()
+        ) as run, mock.patch.object(
+            REPOCTL, "sync_pr_base"
+        ) as sync:
+            rc, payload = self.run_json(dry_run=False)
+        self.assertEqual(1, rc)
+        self.assertEqual("BASE_CHANGED", payload["state"])
+        self.assertEqual("RESTART_EXACT_BASE_CONTROLLER", payload["next_action"])
+        self.assertEqual("d" * 40, payload["current_base_sha"])
+        self.assertEqual("MISSING", payload["qualification"]["status"])
+        self.assertFalse(any("qualification-proof" in call.args[0] for call in run.call_args_list))
+        sync.assert_not_called()
+
+    def test_base_change_at_merge_requirements_never_syncs_with_old_controller(self):
+        patches = self.common()
+        reviews = {
+            kind: {"provider": "ChatGPT", "kind": kind, "status": "PASS",
+                   "blocking_findings": 0, "head_sha": self.SHA_A}
+            for kind in ("code", "security")
+        }
+        risk = {
+            "classification": "SENSITIVE", "authority": "repository-policy",
+            "pr": 161, "base_sha": "c" * 40, "head_sha": self.SHA_A,
+            "changed_files": ["scripts/repoctl.py"], "reasons": ["governance"],
+            "matched_capabilities": ["governance"], "analysis_complete": True,
+        }
+        changed = REPOCTL.PRBaseChanged("c" * 40, "d" * 40, "d" * 40)
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_pr_loop_current_base", side_effect=[self.snapshot(), changed]
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_qualification",
+            return_value={"status": "PASS", "head_sha": self.SHA_A}
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence",
+            return_value=(reviews, {"status": "PASS", "head_sha": self.SHA_A})
+        ), mock.patch.object(
+            REPOCTL, "classify_merge_risk", return_value=risk
+        ), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed()
+        ), mock.patch.object(
+            REPOCTL, "sync_pr_base"
+        ) as sync:
+            rc, payload = self.run_json(dry_run=False)
+        self.assertEqual(1, rc)
+        self.assertEqual("BASE_CHANGED", payload["state"])
+        self.assertEqual("RESTART_EXACT_BASE_CONTROLLER", payload["next_action"])
+        self.assertEqual("NOT_ATTEMPTED", payload["merge_result"])
+        sync.assert_not_called()
 
     def test_main_advance_at_merge_requirements_restarts_sync(self):
         patches = self.common()
@@ -1119,7 +1183,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL,
             "_github_pr_snapshot",
-            side_effect=[self.snapshot(), self.snapshot(), merged],
+            side_effect=[self.snapshot(), self.snapshot(), self.snapshot(), merged],
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
@@ -1194,7 +1258,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL", payload["merge_result"])
         self.assertEqual("BLOCKED", payload["state"])
         self.assertTrue(any("finish-pr" in command for command in calls))
-        self.assertEqual(3, snapshot.call_count)
+        self.assertEqual(4, snapshot.call_count)
         self.assertIn("GitHub confirms", payload["blockers"][0])
 
     def test_finish_pr_nonzero_rechecks_github_and_accepts_exact_merge(self):
@@ -1220,7 +1284,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL,
             "_github_pr_snapshot",
-            side_effect=[self.snapshot(), self.snapshot(), merged],
+            side_effect=[self.snapshot(), self.snapshot(), self.snapshot(), merged],
         ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
@@ -1239,7 +1303,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ) as post_merge:
             rc = REPOCTL.pr_loop(161, json_output=False)
         self.assertEqual(0, rc)
-        self.assertEqual(3, snapshot.call_count)
+        self.assertEqual(4, snapshot.call_count)
         post_merge.assert_called_once()
         self.assertEqual("PASS", post_merge.call_args.args[3]["merge_result"])
 
@@ -1262,6 +1326,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL,
             "_github_pr_snapshot",
             side_effect=[
+                self.snapshot(),
                 self.snapshot(),
                 self.snapshot(),
                 RuntimeError("GitHub unavailable after finish-pr"),
@@ -1558,6 +1623,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             {"status": "PASS", "head_sha": self.SHA_A},
         )
         snapshots = [
+            self.snapshot(self.SHA_A),
             self.snapshot(self.SHA_A),
             self.snapshot(self.SHA_A),
             self.snapshot(self.SHA_B, state="MERGED", merged=True, merge_commit_sha="d" * 40),
