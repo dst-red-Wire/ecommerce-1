@@ -42,9 +42,8 @@ class PRLoopStateTests(unittest.TestCase):
         value.update(overrides)
         return value
 
-    @staticmethod
-    def qualification(status="PASS"):
-        return {"status": status, "source": "reused"}
+    def qualification(self, status="PASS"):
+        return {"status": status, "source": "reused", "head_sha": self.SHA}
 
     def review(self, status="PASS", blockers=0, sha=None):
         return {
@@ -95,6 +94,40 @@ class PRLoopStateTests(unittest.TestCase):
             self.owner(owner),
             merge,
             risk=self.risk(risk),
+        )
+
+    def test_prior_sha_fail_and_deferred_require_new_qualification_and_reviews(self):
+        previous, current = "a" * 40, "b" * 40
+        pr = self.pr(head_sha=current)
+        old_qualification = {"status": "PASS", "head_sha": previous}
+        current_qualification = {"status": "PASS", "head_sha": current}
+        old_code = self.review("FAIL", 1, previous)
+        old_security = self.review("DEFERRED", 0, previous)
+        self.assertEqual(
+            ("QUALIFICATION_REQUIRED", "QUALIFICATION"),
+            REPOCTL.derive_pr_loop_state(
+                pr, old_qualification, old_code, old_security, self.owner()
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, old_code, old_security, self.owner()
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, self.review(sha=current), old_security,
+                self.owner(),
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, self.review(sha=previous),
+                self.review(sha=previous), self.owner(),
+            ),
         )
 
     def test_transition_order_and_failure_states(self):
@@ -382,7 +415,7 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
         self.assertIn("delivery-authority", result["matched_capabilities"], result)
         state = REPOCTL.derive_pr_loop_state(
             PRLoopStateTests().pr(base_sha=base_sha, head_sha=head_sha),
-            {"status": "PASS"},
+            {"status": "PASS", "head_sha": head_sha},
             {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
             {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
             {"status": "MISSING"},
@@ -396,9 +429,9 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
         pr = PRLoopStateTests().pr(head_sha=self.HEAD_B)
         state = REPOCTL.derive_pr_loop_state(
             pr,
-            {"status": "PASS"},
-            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
-            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+            {"status": "PASS", "head_sha": self.HEAD_B},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_B},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_B},
             {"status": "NOT_REQUIRED_BY_POLICY"},
             {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
             risk=prior,
@@ -422,9 +455,9 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
                         "base_sha": self.BASE,
                         "head_sha": self.HEAD_A,
                     },
-                    {"status": "PASS"},
-                    {"status": "PASS", "blocking_findings": 0},
-                    {"status": "PASS", "blocking_findings": 0},
+                    {"status": "PASS", "head_sha": self.HEAD_A},
+                    {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+                    {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
                     {"status": "MISSING"},
                     risk=result,
                 )
@@ -742,7 +775,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         stream = io.StringIO()
         with contextlib.redirect_stdout(stream):
             rc = REPOCTL.pr_loop(161, json_output=True, **kwargs)
-        return rc, json.loads(stream.getvalue().strip().splitlines()[-1])
+        return rc, json.loads(stream.getvalue())
 
     def common(self):
         return (
@@ -773,7 +806,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(
@@ -838,7 +871,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=authorities
         ), mock.patch.object(
@@ -862,7 +895,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(
@@ -884,7 +917,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(REPOCTL, "run", return_value=self.completed()) as run:
@@ -917,7 +950,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         patches = self.common()
         qualification_results = [
             {"status": "MISSING", "source": "none"},
-            {"status": "PASS", "source": "reused"},
+            {"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ]
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
@@ -984,7 +1017,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL,
             "pull_request_authority_evidence",
@@ -1032,7 +1065,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1085,7 +1118,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1130,7 +1163,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1175,9 +1208,139 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 )
         payload = json.loads(stream.getvalue().strip().splitlines()[-1])
         self.assertEqual(1, rc)
-        self.assertEqual("POST_MERGE_CLEANUP", payload["state"])
+        self.assertEqual("MERGED", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("FAIL", payload["cleanup_result"])
+
+    def test_already_merged_noisy_cleanup_emits_only_one_json_document(self):
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        def noisy_cleanup(**_kwargs):
+            print("PRESERVE local protected | current-branch")
+            print("DELETE remote stale | merged")
+            print("PASS branch-cleanup candidates=1 deleted=1 kept=1 failures=0")
+            raise RuntimeError("cleanup reporting failed")
+
+        patches = self.common()
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=merged
+        ), mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(REPOCTL, "branch_cleanup", side_effect=noisy_cleanup):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL.pr_loop(161, json_output=True)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("PRESERVE", stderr.getvalue())
+        self.assertIn("DELETE", stderr.getvalue())
+        self.assertIn("PASS branch-cleanup", stderr.getvalue())
+
+    def test_finish_pr_json_preserves_confirmed_merge_after_reporting_failure(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {
+            "state": "MERGED",
+            "mergedAt": "2026-09-27T10:00:00Z",
+            "headRefOid": self.SHA_A,
+            "mergeCommit": {"oid": "d" * 40},
+        }
+
+        def noisy_finish(_base):
+            cleanup_rc, roadmap_rc = REPOCTL._finish_pr_post_merge_tasks()
+            return 1 if cleanup_rc or roadmap_rc else 0
+
+        def noisy_cleanup(**_kwargs):
+            print("DELETE remote stale | merged")
+            print("FAIL branch-cleanup candidates=1 deleted=0 kept=0 failures=1")
+            return 1
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), mock.patch.object(
+            REPOCTL, "git", return_value=self.SHA_A + "\n"
+        ), mock.patch.object(
+            REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
+        ), mock.patch.object(REPOCTL, "finish_pr", side_effect=noisy_finish), mock.patch.object(
+            REPOCTL, "branch_cleanup", side_effect=noisy_cleanup
+        ), mock.patch.object(REPOCTL, "_roadmap_followup_after_merge", return_value=0):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["roadmap_result"])
+        self.assertEqual("POST_MERGE_CLEANUP", payload["next_action"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("DELETE", stderr.getvalue())
+        self.assertIn("FAIL branch-cleanup", stderr.getvalue())
+
+    def test_finish_pr_json_keeps_cleanup_pass_when_roadmap_fails(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {
+            "state": "MERGED",
+            "mergedAt": "2026-09-27T10:00:00Z",
+            "headRefOid": self.SHA_A,
+            "mergeCommit": {"oid": "d" * 40},
+        }
+
+        def finish_with_roadmap_failure(_base):
+            cleanup_rc, roadmap_rc = REPOCTL._finish_pr_post_merge_tasks()
+            return 1 if cleanup_rc or roadmap_rc else 0
+
+        stdout = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), mock.patch.object(
+            REPOCTL, "git", return_value=self.SHA_A + "\n"
+        ), mock.patch.object(
+            REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
+        ), mock.patch.object(
+            REPOCTL, "finish_pr", side_effect=finish_with_roadmap_failure
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=0
+        ) as cleanup, mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=1
+        ) as roadmap:
+            with contextlib.redirect_stdout(stdout):
+                rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        cleanup.assert_called_once_with(dry_run=False, fetch_remote=False)
+        roadmap.assert_called_once_with()
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertNotIn("POST_MERGE_CLEANUP", stdout.getvalue())
+
+    def test_json_serialization_fallback_keeps_merge_verdict(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({"state": "MERGED", "merge_result": "PASS", "cleanup_result": "FAIL"})
+        result["unexpected"] = object()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            REPOCTL._emit_pr_loop_result(result, json_output=True)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("FAIL", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["output_contract"])
 
     def test_cleanup_success_reaches_done(self):
         result = REPOCTL._pr_loop_empty_result(161)
@@ -1199,7 +1362,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL, "run", return_value=self.completed(0)
         ), mock.patch.object(
             REPOCTL, "branch_cleanup", return_value=0
-        ):
+        ), mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=0
+        ) as roadmap:
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 rc = REPOCTL._pr_loop_post_merge(
@@ -1210,6 +1375,73 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("DONE", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["roadmap_result"])
+        roadmap.assert_called_once_with()
+
+    def test_cleanup_recovery_cannot_finish_without_roadmap(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({"head_sha": self.SHA_A, "merge_result": "PASS"})
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=0
+        ), mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=1
+        ) as roadmap:
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL._pr_loop_post_merge(
+                    "gh", "owner/repo", merged, result, dry_run=False, json_output=True
+                )
+        payload = json.loads(stream.getvalue())
+        roadmap.assert_called_once_with()
+        self.assertEqual(1, rc)
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
+
+    def test_pr_loop_cleanup_pass_does_not_hide_roadmap_failure(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({
+            "head_sha": self.SHA_A,
+            "merge_result": "PASS",
+            "roadmap_result": "FAIL",
+        })
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(REPOCTL, "branch_cleanup", return_value=0):
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL._pr_loop_post_merge(
+                    "gh", "owner/repo", merged, result, dry_run=False, json_output=True
+                )
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
 
     def test_head_change_during_finish_pr_is_never_reported_as_merged(self):
         pass_authorities = (
@@ -1230,7 +1462,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1249,6 +1481,90 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_github_snapshot_rejects_malformed_full_sha(self):
+        payload = {
+            "number": 164,
+            "head": {"sha": "z" * 40},
+            "base": {"sha": "b" * 40},
+        }
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with mock.patch.object(REPOCTL, "run", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "invalid full head SHA"):
+                REPOCTL._github_pr_snapshot("gh", "owner/repo", 164)
+        payload["head"]["sha"] = "a" * 40
+        payload["base"]["sha"] = "short"
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with mock.patch.object(REPOCTL, "run", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "invalid full base SHA"):
+                REPOCTL._github_pr_snapshot("gh", "owner/repo", 164)
+
+    def test_json_head_change_rejects_old_sha_conclusions(self):
+        old_sha, current_sha = "a" * 40, "b" * 40
+        result = REPOCTL._pr_loop_empty_result(164)
+        result.update({
+            "head_sha": old_sha,
+            "current_head_sha": current_sha,
+            "state": "HEAD_CHANGED",
+            "qualification": {"status": "PASS", "head_sha": old_sha},
+            "code_review": {"status": "FAIL", "head_sha": old_sha},
+            "security_review": {"status": "DEFERRED", "head_sha": old_sha},
+            "risk": {"classification": "LOW_RISK", "head_sha": old_sha},
+            "risk_classification": "LOW_RISK",
+            "owner_authorization": {"status": "PASS", "head_sha": old_sha},
+            "merge_requirements": {"required_checks": True},
+        })
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            REPOCTL._emit_pr_loop_result(result, json_output=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(current_sha, payload["head_sha"])
+        for kind in ("qualification", "code_review", "security_review"):
+            self.assertEqual(current_sha, payload[kind]["head_sha"])
+            self.assertEqual("MISSING", payload[kind]["status"])
+        self.assertEqual("HEAD_CHANGED", payload["state"])
+        self.assertEqual("UNKNOWN", payload["risk_classification"])
+        self.assertEqual(current_sha, payload["risk"]["head_sha"])
+        self.assertEqual("MISSING", payload["owner_authorization"]["status"])
+        self.assertNotIn("merge_requirements", payload)
+
+    def test_json_cannot_report_old_review_as_current_fail_or_pass(self):
+        current_sha, old_sha = "b" * 40, "a" * 40
+        for old_status in ("PASS", "FAIL"):
+            with self.subTest(old_status=old_status):
+                result = REPOCTL._pr_loop_empty_result(164)
+                result.update({
+                    "head_sha": current_sha,
+                    "state": "CODE_FAILED" if old_status == "FAIL" else "MERGE_READY",
+                    "qualification": {"status": "PASS", "head_sha": current_sha},
+                    "code_review": {"status": old_status, "head_sha": old_sha},
+                    "security_review": {"status": "MISSING", "head_sha": current_sha},
+                })
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    REPOCTL._emit_pr_loop_result(result, json_output=True)
+                payload = json.loads(output.getvalue())
+                self.assertEqual("MISSING", payload["code_review"]["status"])
+                self.assertEqual(current_sha, payload["code_review"]["head_sha"])
+                self.assertEqual("BLOCKED", payload["state"])
+                self.assertFalse(payload["merge_ready"])
+
+    def test_json_cli_preflight_failure_still_emits_one_document(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            REPOCTL.sys, "argv", ["repoctl.py", "pr-loop", "--pr", "162", "--json"]
+        ), mock.patch(
+            "canonical_workspace.check", return_value={"status": "FAIL", "reason": "test workspace"}
+        ):
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                rc = REPOCTL.main()
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual(1, stdout.getvalue().count("\n"))
+        self.assertEqual("BLOCKED", payload["state"])
+        self.assertEqual("PASS", payload["output_contract"])
+        self.assertIn("test workspace", payload["blockers"][0])
+
     def test_direct_pr_loop_requires_the_exact_base_wrapper(self):
         with (
             mock.patch.dict(REPOCTL.os.environ, {}, clear=True),
@@ -1291,6 +1607,7 @@ class PRLoopSourceContractTests(unittest.TestCase):
         self.assertIn('sub.add_parser("pr-loop")', source)
         self.assertIn('loop.add_argument("--json"', source)
         self.assertIn('loop.add_argument("--dry-run"', source)
+        self.assertIn('fin.add_argument("--json"', source)
 
     def test_pr_loop_delegates_merge_and_never_calls_github_merge_directly(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
@@ -1298,7 +1615,8 @@ class PRLoopSourceContractTests(unittest.TestCase):
             source.index("def _pr_loop_post_merge(") : source.index("def pr_loop(")
         ]
         loop = source[source.index("def pr_loop(") : source.index("def precommit(")]
-        self.assertIn('_controller_command("finish-pr"', loop)
+        self.assertIn('finish_args = ["finish-pr", "--base", "main"]', loop)
+        self.assertIn('_controller_command(*finish_args)', loop)
         self.assertIn("branch_cleanup(dry_run=False, fetch_remote=False)", post_merge)
         self.assertNotIn('_controller_command("branch-cleanup"', post_merge)
         self.assertNotIn('"pr", "merge"', loop)
