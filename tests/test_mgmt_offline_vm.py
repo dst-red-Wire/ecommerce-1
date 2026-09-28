@@ -25,6 +25,17 @@ RESTAGE = load("restage_cleanup")
 
 
 class MgmtOfflineVmMutationTests(unittest.TestCase):
+    def test_active_fixture_requires_verified_local_rocky_10_box(self):
+        contract = (FIXTURE / "contract.yml").read_text(encoding="utf-8")
+        main = (FIXTURE / "main.yml").read_text(encoding="utf-8")
+        vagrant = (FIXTURE / "Vagrantfile").read_text(encoding="utf-8")
+        self.assertIn("active-rocky-10.2-exact-local-box", contract)
+        self.assertIn("scripts/rocky_box_catalog.py#find_matching_box", contract)
+        self.assertNotIn("rocky-9", (contract + main + vagrant).lower())
+        self.assertNotIn("ecommerce/rocky-9.8", (contract + main + vagrant).lower())
+        self.assertNotIn("https://", contract)
+        self.assertIn("^file:///", main)
+
     def nft_document(self, output_policy="drop", forward_policy="drop"):
         return {"nftables": [
             {"chain": {"family": "inet", "table": RKE2.EGRESS_TABLE,

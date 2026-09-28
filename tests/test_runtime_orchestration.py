@@ -63,6 +63,48 @@ class WindowsInteropOutputTests(unittest.TestCase):
         self.assertEqual(0, result.returncode)
         self.assertEqual("\ufffd", result.stdout)
 
+    def test_windows_host_cpu_capacity_uses_windows_probe(self):
+        item = planned("windows-host-cpu-capacity", "windows-host-cpu")
+        item = PlannedCapability(item.spec, {"minimum_count": 4})
+        driver = BuiltinCapabilityDriver()
+        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess([], 0, "8\r\n", "")) as probe:
+            state = driver.capture(item)
+        self.assertEqual({"available_count": 8, "readable": True}, state)
+        self.assertEqual("[Environment]::ProcessorCount", probe.call_args.args[0][-1])
+        self.assertEqual("PASS", driver.preflight(item, state)["status"])
+        with self.assertRaisesRegex(RuntimeBlocked, "required=4 available=2"):
+            driver.preflight(item, {"available_count": 2, "readable": True})
+
+    def test_windows_host_cpu_probe_fails_closed_on_invalid_output(self):
+        item = planned("windows-host-cpu-capacity", "windows-host-cpu")
+        item = PlannedCapability(item.spec, {"minimum_count": 4})
+        driver = BuiltinCapabilityDriver()
+        for result in (subprocess.CompletedProcess([], 0, "eight", ""),
+                       subprocess.CompletedProcess([], 0, "8\n9", ""),
+                       subprocess.CompletedProcess([], 1, "8", "failed")):
+            with self.subTest(output=result.stdout), mock.patch.object(driver, "_run", return_value=result):
+                state = driver.capture(item)
+                self.assertFalse(state["readable"])
+                with self.assertRaises(RuntimeBlocked):
+                    driver.preflight(item, state)
+
+    def test_linux_cpu_capacity_still_uses_local_cpu_count(self):
+        item = planned("cpu-capacity", "cpu")
+        item = PlannedCapability(item.spec, {"minimum_count": 2})
+        driver = BuiltinCapabilityDriver()
+        with mock.patch("scripts.runtime_orchestration.os.cpu_count", return_value=2):
+            state = driver.capture(item)
+        self.assertEqual(2, state["available_count"])
+        self.assertEqual("PASS", driver.preflight(item, state)["status"])
+
+    def test_rke2_policy_requires_windows_host_cpu_and_interop(self):
+        policy = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        names = [item["name"] for item in policy["workflows"]["rke2_local_virtualbox"]["runtime_capabilities"]]
+        self.assertIn("windows-host-cpu-capacity", names)
+        self.assertNotIn("cpu-capacity", names)
+        self.assertEqual(["wsl-windows-interop"],
+                         policy["runtime_orchestration"]["capabilities"]["windows-host-cpu-capacity"]["requires"])
+
 
 def capability(
     *,

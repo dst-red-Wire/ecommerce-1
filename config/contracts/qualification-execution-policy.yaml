@@ -65,6 +65,7 @@ qualification_profiles:
       vagrant-runtime: out_of_scope
       memory-capacity: out_of_scope
       cpu-capacity: out_of_scope
+      windows-host-cpu-capacity: out_of_scope
       disk-capacity: out_of_scope
       ansible-runtime: out_of_scope
       opentofu-runtime: out_of_scope
@@ -311,6 +312,21 @@ runtime_orchestration:
         restore: none
         verify_restore: none
       evidence_fields: [available_count]
+    windows-host-cpu-capacity:
+      handler: windows-host-cpu
+      requires: [wsl-windows-interop]
+      mutation_class: none
+      timeout_seconds: 10
+      privilege: none
+      global_lock: false
+      operations:
+        detector: powershell-processor-count
+        preflight: minimum-cpu-count
+        prepare: none
+        verify: none
+        restore: none
+        verify_restore: none
+      evidence_fields: [available_count, readable]
     disk-capacity:
       handler: disk
       requires: []
@@ -1011,7 +1027,7 @@ workflows:
         parameters:
           minimum_mib:
             context: vm_memory
-      - name: cpu-capacity
+      - name: windows-host-cpu-capacity
         parameters:
           minimum_count:
             context: vm_cpus
@@ -1019,7 +1035,7 @@ workflows:
         parameters:
           expected_stdout:
             context: vagrant_expected_stdout
-    superseded_completion:
+    historical_completion:
       superseded_by: rocky-10.2-packer-image-migration
       status: complete
       criteria_status: PASS

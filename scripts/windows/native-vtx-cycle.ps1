@@ -1339,6 +1339,7 @@ function Invoke-NativeRun {
             packer_template_digest = [string]$prepared.packer_template_digest
             inputs_digest = [string]$prepared.packer_inputs_digest
             rocky_version = '10.2'; virtualbox_version = [string]$prepared.tools.virtualbox.actual_version
+            native_vtx = 'PASS'; nem_detected = $false; packer_build = 'PASS'
             build_timestamp = [string]$result.milestones.T13_ARTIFACT_EXPORT_COMPLETE
             box_sha256 = $artifactSha256; box_size_bytes = [int64]$result.artifact_size_bytes
             box_filename = [IO.Path]::GetFileName($artifact)

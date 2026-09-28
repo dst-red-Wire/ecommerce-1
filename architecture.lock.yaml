@@ -69,6 +69,7 @@ repository_governance:
         - product-benchmark
         - branch-cleanup
         - roadmap-check
+        - m25-runtime-evidence
         - roadmap-sync
         - qce-status
         - qce-trace

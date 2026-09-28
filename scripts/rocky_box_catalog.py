@@ -58,6 +58,24 @@ def source_file(source_sha: str, relative: str) -> bytes:
     ).stdout
 
 
+def source_tree(source_sha: str) -> str:
+    if not GIT_SHA.fullmatch(source_sha):
+        raise ValueError("source SHA must be a full Git SHA")
+    return subprocess.run(
+        ["git", "rev-parse", f"{source_sha}^{{tree}}"],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def image_identity(source_sha: str) -> tuple[str, str, str]:
+    image = yaml.safe_load(source_file(source_sha, "config/contracts/machine-image-lock.yaml"))["packer_image"]
+    return (
+        str(image["os"]["version"]),
+        str(image["outputs"]["rke2"]["virtualbox"]),
+        str(image["build"]["virtualbox"]["version"]),
+    )
+
+
 def build_inputs(source_sha: str) -> dict[str, str]:
     files = {path: hashlib.sha256(source_file(source_sha, path)).hexdigest() for path in BUILD_FILES}
     contract = yaml.safe_load(source_file(source_sha, "config/contracts/machine-image-lock.yaml"))
@@ -103,8 +121,17 @@ def adopt(result_path: Path, stage: Path, box: Path) -> dict[str, object]:
     source_sha = result.get("source_git_sha")
     if not isinstance(source_sha, str) or not GIT_SHA.fullmatch(source_sha):
         raise ValueError("native result lacks an exact source SHA")
-    if result.get("packer", {}).get("build") != "PASS" or result.get("native_vtx") != "PASS":
+    if (result.get("status") != "PASS"
+        or result.get("precheck") != "PASS"
+        or result.get("packer", {}).get("build") != "PASS"
+        or result.get("native_vtx") != "PASS"
+        or result.get("nem_detected") is not False
+        or result.get("virtualbox_backend") != "NATIVE_VTX"):
         raise ValueError("native Packer build and VT-x evidence are not PASS")
+    rocky_version, box_filename, virtualbox_version = image_identity(source_sha)
+    if (rocky_version != "10.2" or box.name != box_filename
+        or result.get("source_tree_sha") != source_tree(source_sha)):
+        raise ValueError("native result has the wrong Rocky image or source tree")
     if result.get("artifact_sha256") != digest_file(box) or result.get("artifact_size_bytes") != box.stat().st_size:
         raise ValueError("box bytes differ from the native result")
     if PureWindowsPath(str(result.get("artifact", ""))).name != box.name:
@@ -126,8 +153,11 @@ def adopt(result_path: Path, stage: Path, box: Path) -> dict[str, object]:
         "source_tree_sha": result["source_tree_sha"],
         "packer_template_digest": bindings["packer_template_digest"],
         "inputs_digest": bindings["inputs_digest"],
-        "rocky_version": "10.2",
-        "virtualbox_version": "7.2.18",
+        "rocky_version": rocky_version,
+        "virtualbox_version": virtualbox_version,
+        "native_vtx": "PASS",
+        "nem_detected": False,
+        "packer_build": "PASS",
         "build_timestamp": result["milestones"]["T13_ARTIFACT_EXPORT_COMPLETE"],
         "box_sha256": result["artifact_sha256"],
         "box_size_bytes": result["artifact_size_bytes"],
@@ -146,13 +176,19 @@ def adopt(result_path: Path, stage: Path, box: Path) -> dict[str, object]:
 def verify(box: Path, source_sha: str) -> dict[str, object]:
     manifest_path = box.parent / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("schema") != 1 or manifest.get("box_filename") != box.name:
+    rocky_version, box_filename, virtualbox_version = image_identity(source_sha)
+    if (rocky_version != "10.2" or manifest.get("schema") != 1
+        or manifest.get("box_filename") != box.name or box.name != box_filename):
         raise ValueError("box manifest schema or name is invalid")
     if (
         not GIT_SHA.fullmatch(str(manifest.get("source_sha", "")))
         or not GIT_SHA.fullmatch(str(manifest.get("source_tree_sha", "")))
-        or manifest.get("rocky_version") != "10.2"
-        or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", str(manifest.get("virtualbox_version", "")))
+        or manifest.get("source_tree_sha") != source_tree(str(manifest.get("source_sha", "")))
+        or manifest.get("rocky_version") != rocky_version
+        or manifest.get("virtualbox_version") != virtualbox_version
+        or manifest.get("native_vtx") != "PASS"
+        or manifest.get("nem_detected") is not False
+        or manifest.get("packer_build") != "PASS"
         or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", str(manifest.get("build_timestamp", "")))
         or not SHA256.fullmatch(str(manifest.get("staging_manifest_sha256", "")))
         or not SHA256.fullmatch(str(manifest.get("packer_log_sha256", "")))
@@ -188,7 +224,7 @@ def find_matching_box(source_sha: str, artifact_root: Path = Path("/mnt/c/ecomme
             box = manifest_path.parent / filename
             verify(box, source_sha)
             matches.append(box)
-        except (OSError, KeyError, ValueError, json.JSONDecodeError):
+        except (OSError, KeyError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError):
             continue
     if len(matches) != 1:
         raise ValueError(f"expected exactly one verified matching box; found {len(matches)}")

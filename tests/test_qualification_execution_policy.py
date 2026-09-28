@@ -29,6 +29,17 @@ PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def setUp(self):
+        box = {
+            "vm_box_name": "rocky-10.2-rke2-virtualbox",
+            "vm_box_url": "file:///C:/ecommerce-lab/artifacts/verified/rocky-10.2-rke2-virtualbox.box",
+            "vm_box_sha256": "a" * 64,
+            "vm_vagrant_version": "2.4.9",
+        }
+        patcher = mock.patch.object(MOD, "_rke2_verified_box", return_value=box)
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_unit_subprocess_does_not_inherit_trusted_delivery_identity(self):
         env = dict(os.environ, REPOCTL_TRUSTED_CONTROLLER="/invalid/controller.py")
         completed = subprocess.run(
@@ -640,7 +651,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
         self.assertNotIn("completion", rke2)
-        superseded = rke2["superseded_completion"]
+        self.assertNotIn("superseded_completion", rke2)
+        superseded = rke2["historical_completion"]
         self.assertEqual("rocky-10.2-packer-image-migration", superseded["superseded_by"])
         self.assertEqual("84cf01601aa336f0cdd2d1899d764437294fbfe6", superseded["qualified_source_sha"])
         self.assertEqual("complete", superseded["status"])
@@ -1015,7 +1027,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             frozen_inputs = __import__("json").dumps(
-                input_values,
+                {**input_values, **MOD._rke2_verified_box("c" * 40)},
                 sort_keys=True,
                 separators=(",", ":"),
             )
@@ -1035,8 +1047,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     return ""
                 if args == ("rev-parse", "HEAD"):
                     return head + "\n"
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "b" * 40 + "\n"
                 raise AssertionError(args)
 
+            server_attempts = []
             def fake_run(command, **kwargs):
                 if command[-1] == "vm_action=create":
                     inputs.write_text(
@@ -1050,11 +1065,25 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                 if command[-1] == "vm_action=server":
+                    server_attempts.append(True)
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "server-source.json").write_text(
                         __import__("json").dumps({"git_sha": head}) + "\n",
                         encoding="utf-8",
                     )
+                    (state / "server-invocation.json").write_text(json.dumps({
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "install_required": len(server_attempts) != 2,
+                    }))
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                    }))
+                    (state / "rke2-result.json").write_text(json.dumps({
+                        "node_ready": True, "cilium_ready": 1,
+                    }))
+                    (state / "tamper-result.json").write_text(json.dumps({
+                        "blocked_task": "Revalidate every staged byte immediately before privileged installation",
+                    }))
                 return completed
 
             with (

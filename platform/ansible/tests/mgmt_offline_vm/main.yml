@@ -10,10 +10,6 @@
     vm_memory: "{{ mgmt_local_vm_contract.resources.artifact_default.memory_mib }}"
     vm_cpus: "{{ mgmt_local_vm_contract.resources.artifact_default.cpus }}"
     vm_resume_owned_creation: false
-    vm_box_name: "{{ mgmt_local_vm_contract.rocky_box.name }}"
-    vm_box_url: "{{ mgmt_local_vm_contract.rocky_box.url }}"
-    vm_box_sha256: "{{ mgmt_local_vm_contract.rocky_box.sha256 }}"
-    vm_vagrant_version: "{{ mgmt_local_vm_contract.vagrant.version }}"
     vm_vbox: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
     vm_vagrant_windows: C:\Program Files\Vagrant\bin\vagrant.exe
     vm_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
@@ -30,6 +26,9 @@
           - vm_resume_owned_creation | bool in [true, false]
           - vm_name is match('^ecommerce-mgmt-test-[a-z0-9-]+$')
           - vm_vagrant_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - vm_box_name is match('^rocky-10[.]2-rke2-virtualbox$')
+          - vm_box_url is match('^file:///[^ ]+/rocky-10[.]2-rke2-virtualbox[.]box$')
+          - vm_box_sha256 is match('^[0-9a-f]{64}$')
           - vm_cpus | string is match('^[0-9]+$')
           - vm_memory | string is match('^[0-9]+$')
           - vm_cpus | int >= mgmt_local_vm_contract.resources.cpu_minimum

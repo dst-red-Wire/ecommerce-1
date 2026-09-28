@@ -22,7 +22,7 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import signal
@@ -9510,15 +9510,31 @@ def _approved_rke2_manifest_sha256() -> str:
 
 
 def _canonical_rke2_vagrant_version() -> str:
-    contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
-    version = (
-        contract.get("mgmt_local_vm_contract", {})
-        .get("vagrant", {})
-        .get("version")
-    )
+    version = json.loads(
+        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+    )["versions"]["VAGRANT_VERSION"]
     if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         raise RuntimeError("canonical RKE2 Vagrant version is invalid")
     return version
+
+
+def _rke2_verified_box(source_sha: str) -> dict[str, str]:
+    import rocky_box_catalog
+
+    box = rocky_box_catalog.find_matching_box(source_sha)
+    manifest = rocky_box_catalog.verify(box, source_sha)
+    windows_path = subprocess.run(
+        ["wslpath", "-w", str(box.resolve())],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not windows_path or not re.fullmatch(r"[A-Za-z]:\\.+", windows_path):
+        raise ValueError("verified Rocky box is not on a Windows-accessible drive")
+    return {
+        "vm_box_name": box.stem,
+        "vm_box_url": PureWindowsPath(windows_path).as_uri(),
+        "vm_box_sha256": str(manifest["box_sha256"]),
+        "vm_vagrant_version": _canonical_rke2_vagrant_version(),
+    }
 
 
 def _canonical_rke2_vagrant_ready() -> bool:
@@ -10298,7 +10314,13 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             "RKE2 local qualification inputs must use the canonical approved manifest digest"
         )
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
-    frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
+    try:
+        verified_box = _rke2_verified_box(head_sha)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
+        return fail(f"RKE2 local qualification requires a verified native Rocky box: {exc}")
+    frozen_inputs = json.dumps(
+        {**input_values, **verified_box}, sort_keys=True, separators=(",", ":")
+    )
 
     def source_is_frozen() -> bool:
         return (
@@ -10339,16 +10361,62 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server",
         "destroy",
     ]
+    observed_actions: list[dict[str, object]] = []
+    observed_vm_uuid = ""
+    server_count = 0
     for action in actions:
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed after freeze")
+        started = time.monotonic()
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
             return result.returncode
         if action == "server" and not source_evidence_matches():
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
+        observation: dict[str, object] = {
+            "action": action, "status": "PASS",
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+        if action == "server":
+            try:
+                invocation = json.loads((vm_state / "server-invocation.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 server replay decision is missing: {exc}")
+            expected_install = (True, False, True)[server_count]
+            uuid = invocation.get("vm_uuid")
+            if (invocation.get("install_required") is not expected_install
+                or not isinstance(uuid, str)
+                or re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", uuid) is None
+                or (observed_vm_uuid and uuid != observed_vm_uuid)):
+                return fail("RKE2 server replay or owned VM identity differs from the observed sequence")
+            observed_vm_uuid = uuid
+            observation["install_required"] = expected_install
+            observation["vm_uuid"] = uuid
+            server_count += 1
+        observed_actions.append(observation)
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed during execution")
+    try:
+        role = json.loads((vm_state / "role-result.json").read_text(encoding="utf-8"))
+        rke2 = json.loads((vm_state / "rke2-result.json").read_text(encoding="utf-8"))
+        tamper = json.loads((vm_state / "tamper-result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 campaign source result is missing: {exc}")
+    if (role.get("exit_code") != 0 or role.get("vm_uuid") != observed_vm_uuid
+        or rke2.get("node_ready") is not True or rke2.get("cilium_ready") != 1
+        or tamper.get("blocked_task") != "Revalidate every staged byte immediately before privileged installation"):
+        return fail("RKE2 campaign lacks coherent role, server, or tamper results")
+    head_tree = git("rev-parse", "HEAD^{tree}").strip()
+    campaign = {
+        "schema_version": 1, "status": "PASS", "head_sha": head_sha,
+        "head_tree_sha": head_tree, "vm_uuid": observed_vm_uuid,
+        "box_sha256": verified_box["vm_box_sha256"],
+        "manifest_sha256": approved_manifest,
+        "created_at_epoch": int(time.time()), "actions": observed_actions,
+    }
+    (vm_state / "campaign-result.json").write_text(
+        json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return 0
 
 
@@ -12319,6 +12387,8 @@ def main() -> int:
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
+    m25 = sub.add_parser("m25-runtime-evidence")
+    m25.add_argument("--vm-name", required=True)
     sub.add_parser("roadmap-sync")
     qce = sub.add_parser("qce-status")
     qce.add_argument("--json", action="store_true")
@@ -12742,7 +12812,7 @@ def main() -> int:
                 capability_context = {
                     "vm_memory": input_values.get("vm_memory", defaults["memory_mib"]),
                     "vm_cpus": input_values.get("vm_cpus", defaults["cpus"]),
-                    "vagrant_expected_stdout": f"Vagrant {contract['mgmt_local_vm_contract']['vagrant']['version']}",
+                    "vagrant_expected_stdout": f"Vagrant {_canonical_rke2_vagrant_version()}",
                 }
                 return _execute_workflow_with_runtime(
                     "rke2_local_virtualbox",
@@ -12804,6 +12874,15 @@ def main() -> int:
             return branch_cleanup(dry_run=args.dry_run)
         if args.cmd == "roadmap-check":
             return roadmap_check()
+        if args.cmd == "m25-runtime-evidence":
+            import m25_runtime_evidence
+            if git("status", "--porcelain", "--untracked-files=all").strip():
+                return fail("M2.5 evidence requires a clean exact-SHA worktree")
+            head = git("rev-parse", "HEAD").strip()
+            tree = git("rev-parse", "HEAD^{tree}").strip()
+            destination = m25_runtime_evidence.create(ROOT, head, tree, args.vm_name)
+            print(f"PASS M2.5 runtime evidence {destination.relative_to(ROOT)}")
+            return 0
         if args.cmd == "roadmap-sync":
             return roadmap_sync()
         if args.cmd == "qce-status":

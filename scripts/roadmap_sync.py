@@ -21,6 +21,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+import m25_runtime_evidence
 
 
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -189,8 +190,12 @@ def policy() -> dict[str, Any]:
                     or not all(isinstance(environment, str) and environment for environment in environments)
                 ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} runtime evidence is unsafe")
-            if milestone_id in {"M3", "M4", "M5", "M6", "M7", "M8", "M9"} and not runtime:
+            if milestone_id in {"M2.5", "M3", "M4", "M5", "M6", "M7", "M8", "M9"} and not runtime:
                 raise RuntimeError(f"roadmap milestone {milestone_id} requires runtime evidence")
+            if milestone_id == "M2.5" and runtime != [{
+                "path": m25_runtime_evidence.OUTPUT.as_posix(), "environments": ["lab"]
+            }]:
+                raise RuntimeError("M2.5 requires the canonical lab runtime evidence")
         elif milestone_id != "M0" or item.get("fixed_status") != "DONE":
             raise RuntimeError("only completed architecture sync may use a fixed roadmap status")
     return value
@@ -353,6 +358,11 @@ def _runtime_evidence_result(
     age = now.timestamp() - float(created)
     if age < 0 or age > maximum_age:
         return False, f"runtime evidence is stale or future-dated: {relative}"
+    if milestone_id == "M2.5":
+        try:
+            m25_runtime_evidence.validate(root, evidence, head, tree)
+        except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
+            return False, f"M2.5 runtime sources are invalid: {exc}"
     return True, relative
 
 

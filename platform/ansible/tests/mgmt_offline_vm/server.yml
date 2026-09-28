@@ -51,6 +51,15 @@
   ansible.builtin.set_fact:
     vm_server_install_required: "{{ vm_server_active_probe.stdout | trim != 'active' }}"
 
+- name: Preserve observed server replay decision
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server-invocation.json"
+    mode: '0600'
+    content: >-
+      {{ {'vm_uuid': vm_server_id.content | b64decode | trim,
+          'active_before': vm_server_active_probe.stdout | trim,
+          'install_required': vm_server_install_required | bool} | to_nice_json }}
+
 - name: Revalidate every staged byte immediately before privileged installation
   ansible.builtin.command:
     argv:
