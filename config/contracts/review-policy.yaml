@@ -78,7 +78,7 @@ repository_delivery:
     qualification_before_push: {required: true}
     signed_commit: {required: true}
     mutation_sites:
-      git_push: [scripts/repoctl.py#publish]
+      git_push: [scripts/repoctl.py#publish, scripts/repoctl.py#sync_pr_base]
       git_push_delete: [scripts/repoctl.py#_delete_branch_ref]
       github_pr_create: [scripts/repoctl.py#deliver]
       github_pr_update: [scripts/repoctl.py#deliver]

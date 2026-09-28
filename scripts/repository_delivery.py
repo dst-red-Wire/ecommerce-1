@@ -398,13 +398,8 @@ def trusted_pr_transition(
         raise RuntimeError(
             f"target repository mismatch: expected {trusted_repository}, got {target_repository}"
         )
-    if _run(
-        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-        cwd=target_root,
-        check=False,
-        capture=True,
-    ).returncode:
-        raise RuntimeError("target PR head is not descended from its exact GitHub base")
+    # A stale PR head is a state for the trusted controller to reconcile. The
+    # exact checkout and GitHub binding above remain mandatory before mutation.
 
     environment = os.environ.copy()
     for name in (
