@@ -6207,23 +6207,48 @@ def global_check(base: str, head: str) -> int:
     print(f"PASS global-check gates={len(records)}")
     return 0
 
+def _codex_token_budget_contract() -> dict:
+    path = ROOT / "config/contracts/codex-token-budget.json"
+    try:
+        contract = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid Codex token budget contract: {exc}") from exc
+    if contract.get("status") != "enforced":
+        raise RuntimeError("Codex token budget contract must be enforced")
+    return contract
+
+
+def _bounded_utf8(text: str, max_bytes: int, marker: str) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    suffix = ("\n" + marker + "\n").encode("utf-8")
+    cut = raw[: max(0, max_bytes - len(suffix))].decode("utf-8", errors="ignore")
+    return cut + suffix.decode("utf-8")
+
+
 def diff_context(base: str) -> int:
     CONTEXT.mkdir(exist_ok=True)
+    budget = _codex_token_budget_contract()
+    max_bytes = int(budget["diff_context_max_bytes"])
     paths = changed_paths(base, "WORKTREE")
-    stat = git("diff", "--stat", base)
-    diff = git("diff", "--unified=2", base, "--")
-    out = CONTEXT / "diff.md"
-    out.write_text(
+    stat = git("diff", "--stat", base, "--")
+    diff = git("diff", "--no-ext-diff", "--unified=1", base, "--", *paths) if paths else ""
+    listed = paths[:80]
+    body = (
         "# Diff context\n\n## Files\n"
-        + "\n".join(f"- `{p}`" for p in paths)
-        + "\n\n## Stat\n```text\n"
-        + stat[:12000]
-        + "\n```\n\n## Diff\n```diff\n"
-        + diff[:28000]
-        + "\n```\n",
-        encoding="utf-8",
+        + "\n".join(f"- {p}" for p in listed)
+        + (f"\n- ... {len(paths) - len(listed)} more paths omitted ..." if len(paths) > len(listed) else "")
+        + "\n\n## Stat\n~~~text\n"
+        + stat[:2048]
+        + "\n~~~\n\n## Diff\n~~~diff\n"
+        + diff
+        + "\n~~~\n"
     )
-    print(out.relative_to(ROOT))
+    body = _bounded_utf8(body, max_bytes, "[DIFF CONTEXT TRUNCATED TO BYTE BUDGET]")
+    out = CONTEXT / "diff.md"
+    out.write_text(body, encoding="utf-8")
+    print(f"{out.relative_to(ROOT)} bytes={len(body.encode('utf-8'))}/{max_bytes}")
     return 0
 
 
@@ -6257,26 +6282,35 @@ def failure_context(gate: str, component: str) -> int:
             return fail(f"unsupported GATE: {gate}")
         cmd = [sys.executable, "scripts/repoctl.py", gate]
         name = gate
+
     p = run(cmd, check=False, capture=True)
     text = (p.stdout or "") + (p.stderr or "")
     lines = text.splitlines()
-    keywords = re.compile(r"FAIL|FAILED|ERROR|error:|fatal:|panic:|cannot use|undefined|make: \*\*\*", re.I)
+    keywords = re.compile(
+        r"FAIL|FAILED|ERROR|error:|fatal:|panic:|cannot use|undefined|make: \\*\\*\\*",
+        re.I,
+    )
     hits = [i for i, line in enumerate(lines) if keywords.search(line)]
     chosen: set[int] = set()
     for i in hits:
-        chosen.update(range(max(0, i - 3), min(len(lines), i + 4)))
-    relevant = [lines[i] for i in sorted(chosen)] if chosen else lines[-120:]
-    CONTEXT.mkdir(exist_ok=True)
-    path = CONTEXT / f"failure-{name}.md"
-    path.write_text(
-        f"# Failure context\nGATE: {name}\nSTATUS: {'PASS' if p.returncode == 0 else 'FAIL'}\nEXIT_CODE: {p.returncode}\n\n## Relevant output\n```text\n"
-        + "\n".join(relevant[:220])
-        + "\n```\n",
-        encoding="utf-8",
-    )
-    print(path.relative_to(ROOT))
-    return p.returncode
+        chosen.update(range(max(0, i - 2), min(len(lines), i + 3)))
 
+    budget = _codex_token_budget_contract()
+    max_lines = int(budget["failure_context_max_lines"])
+    max_bytes = int(budget["failure_context_max_bytes"])
+    relevant = [lines[i] for i in sorted(chosen)] if chosen else lines[-max_lines:]
+    relevant = relevant[:max_lines]
+    body = (
+        f"# Failure context\nGATE: {name}\nSTATUS: {'PASS' if p.returncode == 0 else 'FAIL'}\n"
+        f"EXIT_CODE: {p.returncode}\n\n## Causal output\n~~~text\n"
+        + "\n".join(relevant)
+        + "\n~~~\n"
+    )
+    body = _bounded_utf8(body, max_bytes, "[FAILURE CONTEXT TRUNCATED TO BYTE BUDGET]")
+    path = CONTEXT / f"failure-{name}.md"
+    path.write_text(body, encoding="utf-8")
+    print(f"{path.relative_to(ROOT)} bytes={len(body.encode('utf-8'))}/{max_bytes} lines={len(relevant)}/{max_lines}")
+    return p.returncode
 
 def doctor() -> int:
     if toolchain_closure():

@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
-"""Build a small, contract-routed context pack for Work/Codex.
+"""Build a small task-delta context pack for Codex/Work.
 
-The pack is read-only. Task semantics and changed paths choose the smallest
-safe context level; AST outlines are preferred over broad file excerpts.
+The pack is read-only and non-authoritative. Task semantics plus the current
+task delta select the smallest safe context level. Canonical documents are
+pointers by default; their contents are included only when explicitly asked.
 """
 
 from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+from typing import Iterable
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 ROUTER = ROOT / "config/context/router.yaml"
+TOKEN_BUDGET = ROOT / "config/contracts/codex-token-budget.json"
 OWNERSHIP = ROOT / "config/contracts/service-ownership.yaml"
 DEPS = ROOT / "config/contracts/dependency-map.yaml"
 PUBLIC_API = ROOT / "config/contracts/public-api-contracts.yaml"
@@ -39,15 +44,21 @@ class MissingManagedYq(RuntimeError):
 
 
 def managed_yq() -> str:
-    """Resolve only the repository-provisioned yq, never an unpinned system copy."""
     candidate = Path.home() / ".local" / "bin" / "yq"
     if not candidate.is_file() or not os.access(candidate, os.X_OK):
         raise MissingManagedYq(f"managed yq missing: run `make context-tools` ({candidate})")
     return str(candidate)
 
 
-def run(*args: str, check: bool = True) -> str:
-    p = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def run(*args: str, check: bool = True, input_text: str | None = None) -> str:
+    p = subprocess.run(
+        args,
+        cwd=ROOT,
+        text=True,
+        input=input_text,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
     if check and p.returncode:
         raise RuntimeError(p.stderr.strip() or f"command failed: {' '.join(args)}")
     return p.stdout
@@ -57,23 +68,72 @@ def yq_json(expr: str, path: Path):
     return json.loads(run(managed_yq(), "-o=json", expr, str(path)))
 
 
-def changed_files(base: str) -> list[str]:
-    files: set[str] = set()
-    commands = (
-        ["git", "diff", "--name-only", base, "--"],
-        ["git", "ls-files", "--others", "--exclude-standard"],
-    )
-    for cmd in commands:
-        p = subprocess.run(cmd, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        if p.returncode == 0:
-            files.update(x.strip() for x in p.stdout.splitlines() if x.strip())
-    return sorted(files)
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _sha256_parts(values: Iterable[str]) -> str:
+    digest = hashlib.sha256()
+    for value in sorted(values):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def context_input(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise RuntimeError(f"context input must be repository-relative: {path}")
+    repository = ROOT.resolve()
+    target = (repository / candidate).resolve()
+    if target != repository and repository not in target.parents:
+        raise RuntimeError(f"context input escapes repository: {path}")
+    return target
 
 
 def matches(path: str, pattern: str) -> bool:
+    normalized = path.replace("\\", "/")
     if "**" in pattern:
-        return path.startswith(pattern.split("**", 1)[0])
-    return fnmatch.fnmatch(path, pattern)
+        prefix = pattern.split("**", 1)[0]
+        return normalized.startswith(prefix)
+    return fnmatch.fnmatch(normalized, pattern)
+
+
+def _historical(path: str, cfg: dict) -> bool:
+    normalized = path.replace("\\", "/")
+    patterns = cfg.get("agent_data_access", {}).get("historical_path_patterns", [])
+    return any(re.search(str(pattern), normalized) for pattern in patterns)
+
+
+def _git_name_only(args: list[str]) -> list[str]:
+    p = subprocess.run(
+        ["git", *args],
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if p.returncode:
+        return []
+    return [line.strip() for line in p.stdout.splitlines() if line.strip()]
+
+
+def changed_files(
+    *,
+    since: str = "",
+    staged: bool = False,
+    working_tree: bool = True,
+) -> list[str]:
+    files: set[str] = set()
+    if since:
+        files.update(_git_name_only(["diff", "--name-only", since, "--"]))
+    elif staged:
+        files.update(_git_name_only(["diff", "--cached", "--name-only", "--"]))
+    elif working_tree:
+        files.update(_git_name_only(["diff", "--name-only", "--"]))
+        files.update(_git_name_only(["diff", "--cached", "--name-only", "--"]))
+    files.update(_git_name_only(["ls-files", "--others", "--exclude-standard"]))
+    return sorted(files)
 
 
 def file_route(files: list[str], cfg: dict) -> str:
@@ -95,8 +155,8 @@ def task_route(task: str, cfg: dict) -> str:
     return "L0"
 
 
-def route(task: str, files: list[str]) -> str:
-    cfg = yq_json(".", ROUTER)
+def route(task: str, files: list[str], cfg: dict | None = None) -> str:
+    cfg = cfg or yq_json(".", ROUTER)
     ranks = {"L0": 0, "L1": 1, "L2": 2}
     candidates = [file_route(files, cfg), task_route(task, cfg)]
     return max(candidates, key=lambda item: ranks[item])
@@ -133,20 +193,9 @@ def service_contract(name: str) -> str:
             "direct_sync_consumers": consumers,
             "public_api": public,
         },
-        indent=2,
+        separators=(",", ":"),
         sort_keys=True,
     )
-
-
-def context_input(path: str) -> Path:
-    candidate = Path(path)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        raise RuntimeError(f"context input must be repository-relative: {path}")
-    repository = ROOT.resolve()
-    target = (repository / candidate).resolve()
-    if target != repository and repository not in target.parents:
-        raise RuntimeError(f"context input escapes repository: {path}")
-    return target
 
 
 def excerpt(path: str, max_lines: int) -> str:
@@ -159,18 +208,14 @@ def excerpt(path: str, max_lines: int) -> str:
     return "\n".join(lines)
 
 
-def ast_outline(path: str, max_lines: int = 40) -> str:
-    """Use ast-grep when supported, with a cheap textual fallback.
-
-    AST extraction is best-effort context reduction only; it must never make a
-    deterministic gate fail merely because a language pattern evolves.
-    """
+def ast_outline(path: str, max_lines: int = 32) -> str:
     target = context_input(path)
     if not target.is_file():
         return ""
     suffix = target.suffix.lower()
     specs = {
         ".go": ("go", ["func $F($$$A) $$$R { $$$B }", "type $T struct { $$$F }"]),
+        ".py": ("python", ["def $F($$$A): $$$B", "class $C: $$$B"]),
         ".ts": ("typescript", ["function $F($$$A) { $$$B }", "interface $T { $$$F }"]),
         ".tsx": ("tsx", ["function $F($$$A) { $$$B }", "const $F = ($$$A) => $B"]),
     }
@@ -200,9 +245,16 @@ def ast_outline(path: str, max_lines: int = 40) -> str:
             except (json.JSONDecodeError, AttributeError):
                 pass
     if not collected:
-        pattern = r"^(?:func|type|interface|export\s+(?:async\s+)?function|export\s+const|const\s+[A-Za-z0-9_]+\s*=)"
+        pattern = (
+            r"^(?:func|type|def|class|interface|export\s+(?:async\s+)?function|"
+            r"export\s+const|const\s+[A-Za-z0-9_]+\s*=)"
+        )
         p = subprocess.run(
-            ["rg", "-n", pattern, str(target)], cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            ["rg", "-n", pattern, str(target)],
+            cwd=ROOT,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
         )
         if p.returncode in (0, 1):
             collected.extend(p.stdout.splitlines())
@@ -219,7 +271,6 @@ def bounded(text: str, max_bytes: int) -> str:
 
 
 def validate_router_contract(cfg: dict, lock: dict | None = None) -> None:
-    """Validate the agent-data boundary before reading repository content."""
     access = cfg.get("agent_data_access")
     if not isinstance(access, dict):
         raise RuntimeError("context router is missing agent_data_access policy")
@@ -270,12 +321,7 @@ def redact_sensitive(text: str, cfg: dict) -> str:
     if incomplete:
         redacted = redacted[: incomplete.start()] + "[REDACTED INCOMPLETE PRIVATE KEY BY CONTEXT POLICY]"
     for pattern in cfg["agent_data_access"].get("redaction_patterns", []):
-        redacted = re.sub(
-            str(pattern),
-            "[REDACTED BY CONTEXT POLICY]",
-            redacted,
-            flags=re.MULTILINE,
-        )
+        redacted = re.sub(str(pattern), "[REDACTED BY CONTEXT POLICY]", redacted, flags=re.MULTILINE)
     return redacted
 
 
@@ -300,84 +346,249 @@ def resolve_byte_budget(level_budget: int, override: str | None) -> int:
     return requested
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task", required=True)
-    parser.add_argument("--base", default="origin/main")
-    parser.add_argument("--output", default=".context/codex-context.md")
-    args = parser.parse_args()
+def _load_budget_contract() -> dict:
+    return json.loads(TOKEN_BUDGET.read_text(encoding="utf-8"))
 
-    cfg = yq_json(".", ROUTER)
-    validate_router_contract(cfg)
-    files = changed_files(args.base)
-    guard_context_paths(files, cfg)
-    level = route(args.task, files)
+
+def _policy_version(cfg: dict, budget: dict) -> str:
+    canonical = json.dumps({"router": cfg, "token_budget": budget}, sort_keys=True, separators=(",", ":"))
+    return _sha256_text(canonical)
+
+
+def _contract_digest(level: str, cfg: dict, services: list[str]) -> str:
+    candidates = list(cfg.get("canonical", {}).get(level, []))
+    for _service in services:
+        candidates.extend([
+            str(OWNERSHIP.relative_to(ROOT)),
+            str(DEPS.relative_to(ROOT)),
+            str(PUBLIC_API.relative_to(ROOT)),
+        ])
+    values: list[str] = []
+    for path in sorted(set(candidates)):
+        target = context_input(path)
+        if target.is_file():
+            values.append(path + ":" + hashlib.sha256(target.read_bytes()).hexdigest())
+    return _sha256_parts(values)
+
+
+def _cache_key(
+    *,
+    task_digest: str,
+    head_sha: str,
+    relevant_paths_digest: str,
+    applicable_contract_digest: str,
+    context_policy_version: str,
+) -> str:
+    return _sha256_parts([
+        task_digest,
+        head_sha,
+        relevant_paths_digest,
+        applicable_contract_digest,
+        context_policy_version,
+    ])
+
+
+def _diff_for_scope(*, since: str, staged: bool, files: list[str]) -> str:
+    if not files:
+        return ""
+    if since:
+        args = ["git", "diff", "--no-ext-diff", "--unified=1", since, "--", *files]
+    elif staged:
+        args = ["git", "diff", "--cached", "--no-ext-diff", "--unified=1", "--", *files]
+    else:
+        args = ["git", "diff", "--no-ext-diff", "--unified=1", "--", *files]
+    p = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return p.stdout if p.returncode == 0 else ""
+
+
+def _stat_for_scope(*, since: str, staged: bool, files: list[str]) -> str:
+    if not files:
+        return ""
+    if since:
+        args = ["git", "diff", "--stat", since, "--", *files]
+    elif staged:
+        args = ["git", "diff", "--cached", "--stat", "--", *files]
+    else:
+        args = ["git", "diff", "--stat", "--", *files]
+    p = subprocess.run(args, cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+def build_pack(
+    *,
+    task: str,
+    since: str,
+    staged: bool,
+    working_tree: bool,
+    explicit_paths: list[str],
+    include_excerpts: bool,
+    cfg: dict,
+) -> tuple[str, dict]:
+    raw_files = explicit_paths or changed_files(since=since, staged=staged, working_tree=working_tree)
+    guard_context_paths(raw_files, cfg)
+    historical = [path for path in raw_files if _historical(path, cfg)]
+    files = [path for path in raw_files if path not in historical]
+    level = route(task, files, cfg)
     level_cfg = cfg["levels"][level]
-    level_budget = int(level_cfg["max_bytes"])
-    max_bytes = resolve_byte_budget(level_budget, os.environ.get("CONTEXT_MAX_BYTES"))
+    max_bytes = resolve_byte_budget(int(level_cfg["max_bytes"]), os.environ.get("CONTEXT_MAX_BYTES"))
     max_diff_lines = int(level_cfg["max_diff_lines"])
     max_excerpt_lines = int(level_cfg["max_excerpt_lines"])
-    services = detect_services(args.task, files)
-    sha = run("git", "rev-parse", "HEAD").strip()
+    services = detect_services(task, files)
+    head_sha = run("git", "rev-parse", "HEAD").strip()
     branch = run("git", "branch", "--show-current").strip() or "DETACHED"
 
+    budget = _load_budget_contract()
+    task_digest = _sha256_text(task)
+    relevant_paths_digest = _sha256_parts(files)
+    applicable_contract_digest = _contract_digest(level, cfg, services)
+    context_policy_version = _policy_version(cfg, budget)
+    cache_key = _cache_key(
+        task_digest=task_digest,
+        head_sha=head_sha,
+        relevant_paths_digest=relevant_paths_digest,
+        applicable_contract_digest=applicable_contract_digest,
+        context_policy_version=context_policy_version,
+    )
+
     parts = [
-        "# Codex context pack v2",
-        f"TASK: {args.task}",
+        "# Codex context pack v3",
+        f"TASK: {task}",
         f"ROUTE: {level}",
         f"BRANCH: {branch}",
-        f"HEAD: {sha}",
-        f"BASE: {args.base}",
+        f"HEAD: {head_sha}",
+        f"SCOPE: {'since=' + since if since else 'staged' if staged else 'working-tree'}",
+        f"CACHE_KEY: {cache_key}",
         "",
-        "## Changed files",
-        *(files or ["(none detected)"]),
+        "## Relevant paths",
+        *(files[:80] or ["(none detected)"]),
     ]
+    if len(files) > 80:
+        parts.append(f"... {len(files) - 80} additional paths omitted ...")
+    if historical:
+        parts += ["", f"HISTORICAL_PATHS_EXCLUDED: {len(historical)}"]
 
     canonical = cfg.get("canonical", {}).get(level, [])
     guard_context_paths(canonical, cfg)
     if canonical:
-        parts += ["", "## Canonical pointers", *[f"- {path}" for path in canonical]]
+        parts += ["", "## Canonical pointers (read only if needed)", *[f"- {path}" for path in canonical]]
 
     if services:
         parts += ["", "## Routed service contracts"]
         for service in services:
-            parts += [f"### {service}", "```json", service_contract(service), "```"]
+            parts += [f"### {service}", "~~~json", service_contract(service), "~~~"]
 
-    outlines = []
-    for path in files[:20]:
+    outlines: list[str] = []
+    for path in files[:16]:
         outline = ast_outline(path)
         if outline:
-            outlines += [f"### {path}", "```text", outline, "```"]
+            outlines += [f"### {path}", "~~~text", outline, "~~~"]
     if outlines:
-        parts += ["", "## AST symbol outline", *outlines]
+        parts += ["", "## Symbol outline", *outlines]
 
-    if level == "L2":
+    if include_excerpts:
         for path in canonical:
             text = excerpt(path, max_excerpt_lines)
             if text:
-                parts += ["", f"## {path} (bounded)", "```yaml", text, "```"]
-    elif level == "L1" and not services:
-        for path in canonical:
-            text = excerpt(path, max_excerpt_lines)
-            if text:
-                parts += ["", f"## {path} (bounded)", "```yaml", text, "```"]
+                parts += ["", f"## {path} (explicit bounded excerpt)", "~~~text", text, "~~~"]
 
-    stat = run("git", "diff", "--stat", args.base, "--", check=False).strip()
+    stat = _stat_for_scope(since=since, staged=staged, files=files)
     if stat:
-        parts += ["", "## Diff stat", "```text", stat, "```"]
-    diff = run("git", "diff", "--no-ext-diff", "--unified=3", args.base, "--", *files, check=False)
+        parts += ["", "## Diff stat", "~~~text", stat[:2048], "~~~"]
+
+    diff = _diff_for_scope(since=since, staged=staged, files=files)
     if diff:
-        lines = diff.splitlines()
-        if len(lines) > max_diff_lines:
-            lines = lines[:max_diff_lines] + [f"... diff truncated after {max_diff_lines} lines ..."]
-        parts += ["", "## Focused diff", "```diff", "\n".join(lines), "```"]
+        diff_lines = diff.splitlines()
+        if len(diff_lines) > max_diff_lines:
+            diff_lines = diff_lines[:max_diff_lines] + [f"... diff truncated after {max_diff_lines} lines ..."]
+        parts += ["", "## Focused diff", "~~~diff", "\n".join(diff_lines), "~~~"]
 
     output = bounded(redact_sensitive("\n".join(parts) + "\n", cfg), max_bytes)
+    actual_bytes = len(output.encode("utf-8"))
+    manifest = {
+        "schema_version": 1,
+        "route": level,
+        "head_sha": head_sha,
+        "task_digest": task_digest,
+        "relevant_paths": files,
+        "historical_paths_excluded": historical,
+        "relevant_paths_digest": relevant_paths_digest,
+        "applicable_contract_digest": applicable_contract_digest,
+        "context_policy_version": context_policy_version,
+        "cache_key": cache_key,
+        "max_bytes": max_bytes,
+        "actual_bytes": actual_bytes,
+        "estimated_input_tokens": math.ceil(actual_bytes / 4),
+        "token_estimate_authoritative": False,
+        "scope": {"since": since, "staged": staged, "working_tree": working_tree},
+    }
+    return output, manifest
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    task = parser.add_mutually_exclusive_group(required=False)
+    task.add_argument("--task", default="")
+    task.add_argument("--task-stdin", action="store_true")
+    parser.add_argument("--since", default="")
+    parser.add_argument("--base", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--paths", nargs="*", default=[])
+    parser.add_argument("--staged", action="store_true")
+    parser.add_argument("--working-tree", action="store_true")
+    parser.add_argument("--include-excerpts", action="store_true")
+    parser.add_argument("--output", default=".context/codex-context.md")
+    parser.add_argument("--manifest", default=".context/codex-context.json")
+    parser.add_argument("--print", dest="print_pack", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    task = sys.stdin.read() if args.task_stdin else args.task
+    task = task.strip()
+    if not task:
+        raise RuntimeError("task is required")
+    since = (args.since or args.base).strip()
+    cfg = yq_json(".", ROUTER)
+    validate_router_contract(cfg)
+
     destination = output_path(args.output, cfg)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text(output, encoding="utf-8")
-    print(output, end="")
-    print(f"PACK: {destination.relative_to(ROOT)} ({len(output.encode('utf-8'))} bytes)", file=sys.stderr)
+    manifest_path = output_path(args.manifest, cfg)
+    output, manifest = build_pack(
+        task=task,
+        since=since,
+        staged=bool(args.staged),
+        working_tree=bool(args.working_tree or not args.staged),
+        explicit_paths=list(dict.fromkeys(args.paths)),
+        include_excerpts=bool(args.include_excerpts),
+        cfg=cfg,
+    )
+
+    old_manifest: dict = {}
+    if manifest_path.is_file():
+        try:
+            old_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            old_manifest = {}
+    reused = bool(
+        old_manifest.get("cache_key") == manifest["cache_key"]
+        and destination.is_file()
+        and len(destination.read_bytes()) <= int(manifest["max_bytes"])
+    )
+    manifest["pack_reused"] = reused
+    if not reused:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(output, encoding="utf-8")
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    if args.print_pack:
+        print(destination.read_text(encoding="utf-8"), end="")
+    print(
+        f"PACK {destination.relative_to(ROOT)} route={manifest['route']} "
+        f"bytes={manifest['actual_bytes']}/{manifest['max_bytes']} "
+        f"est_tokens={manifest['estimated_input_tokens']} cache={'HIT' if reused else 'MISS'}",
+        file=sys.stderr if args.print_pack else sys.stdout,
+    )
     return 0
 
 
@@ -387,6 +598,6 @@ if __name__ == "__main__":
     except MissingManagedYq as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         raise SystemExit(1) from None
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         print(f"BLOCKED {exc}", file=sys.stderr)
         raise SystemExit(1) from None

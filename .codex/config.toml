@@ -1,0 +1,13 @@
+# Project-local Codex context policy. Loaded only for trusted workspaces.
+project_doc_max_bytes = 4096
+
+[features]
+hooks = true
+
+[[hooks.UserPromptSubmit]]
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command = '/usr/bin/python3 "$(git rev-parse --show-toplevel)/.codex/hooks/user_prompt_submit.py"'
+timeout = 5
+statusMessage = "Preparing bounded repository context"
+additionalContextLimit = 768

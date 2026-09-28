@@ -217,5 +217,23 @@ class RoutingTests(unittest.TestCase):
                 MOD.resolve_byte_budget(1024, override)
 
 
+    def test_historical_prompt_paths_are_excluded_from_active_context(self):
+        cfg = {
+            "agent_data_access": {
+                "historical_path_patterns": [r"^archive/legacy-prompts/"],
+            }
+        }
+        self.assertTrue(MOD._historical("archive/legacy-prompts/dev/old.pdf", cfg))
+        self.assertFalse(MOD._historical("services/product/main.go", cfg))
+
+    def test_router_uses_drastically_reduced_level_budgets(self):
+        text = (ROOT / "config/context/router.yaml").read_text(encoding="utf-8")
+        self.assertIn("max_bytes: 4096", text)
+        self.assertIn("max_bytes: 8192", text)
+        self.assertIn("max_bytes: 12288", text)
+        canonical = text.split("canonical:", 1)[1].split("agent_data_access:", 1)[0]
+        self.assertNotIn("AGENTS.md", canonical)
+
+
 if __name__ == "__main__":
     unittest.main()

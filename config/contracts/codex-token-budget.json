@@ -1,0 +1,43 @@
+{
+  "authority": "architecture.lock.yaml#machine_contracts.codex_token_budget",
+  "context_cache": {
+    "changed_key": "invalidate",
+    "key_fields": [
+      "task_digest",
+      "head_sha",
+      "relevant_paths_digest",
+      "applicable_contract_digest",
+      "context_policy_version"
+    ],
+    "state_directory": ".context/codex-budget",
+    "unchanged_key": "reuse"
+  },
+  "context_level_max_bytes": {
+    "L0": 4096,
+    "L1": 8192,
+    "L2": 12288
+  },
+  "diff_context_max_bytes": 12288,
+  "failure_context_max_bytes": 12000,
+  "failure_context_max_lines": 80,
+  "historical_prompt_default_access": "excluded",
+  "historical_prompt_root": "archive/legacy-prompts",
+  "hook_additional_context_max_bytes": 768,
+  "mcp": {
+    "default_policy": "minimal",
+    "per_tool_output_token_limit_recommended": 2048,
+    "repo_owned_profiles": [
+      "ecommerce-minimal",
+      "ecommerce-openai"
+    ],
+    "unrelated_servers": "disabled-by-user-profile-when-known"
+  },
+  "project_doc_max_bytes": 4096,
+  "review_handoff_max_bytes": 8192,
+  "status": "enforced",
+  "token_estimate": {
+    "authoritative": false,
+    "method": "utf8-bytes-div-4-ceiling"
+  },
+  "version": 1
+}

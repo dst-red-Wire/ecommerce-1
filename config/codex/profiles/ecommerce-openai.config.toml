@@ -1,0 +1,9 @@
+# User profile installed by Ansible. Select only for OpenAI/Codex/API documentation work.
+project_doc_max_bytes = 4096
+
+[mcp_servers.openaiDeveloperDocs]
+url = "https://developers.openai.com/mcp"
+enabled = true
+required = false
+startup_timeout_sec = 3
+tool_timeout_sec = 20

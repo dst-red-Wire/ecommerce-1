@@ -11,6 +11,10 @@
     - "{{ local_cache }}"
   tags: [toolchain, agent_tools, artifact_transport, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
+- name: Reconcile repository-managed Codex profiles
+  ansible.builtin.import_tasks: codex_profiles.yml
+  tags: [toolchain, agent_tools, context_tools, codex]
+
 - name: Reconcile forbidden legacy IaC artifacts
   ansible.builtin.import_tasks: opentofu_cleanup.yml
   tags: [toolchain, opentofu]

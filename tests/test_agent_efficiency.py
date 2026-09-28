@@ -1,5 +1,6 @@
 import json
 import pathlib
+import tomllib
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -76,6 +77,84 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("Validate exact isolated Nx local version", tasks)
         self.assertNotIn("pnpm approve-builds", tasks)
         self.assertNotIn("dangerouslyAllowAllBuilds", tasks)
+
+
+    def test_codex_context_budgets_are_enforced_and_agents_is_small(self):
+        budget = json.loads(
+            (ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual("enforced", budget["status"])
+        self.assertEqual({"L0": 4096, "L1": 8192, "L2": 12288}, budget["context_level_max_bytes"])
+        self.assertLessEqual(
+            len((ROOT / "AGENTS.md").read_bytes()),
+            budget["project_doc_max_bytes"],
+        )
+        router = (ROOT / "config/context/router.yaml").read_text(encoding="utf-8")
+        for value in (4096, 8192, 12288):
+            self.assertIn(f"max_bytes: {value}", router)
+        canonical = router.split("canonical:", 1)[1].split("agent_data_access:", 1)[0]
+        self.assertNotIn("AGENTS.md", canonical)
+        self.assertIn("^archive/legacy-prompts/", router)
+
+    def test_project_codex_hook_is_bounded(self):
+        budget = json.loads(
+            (ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8")
+        )
+        config = tomllib.loads((ROOT / ".codex/config.toml").read_text(encoding="utf-8"))
+        self.assertEqual(budget["project_doc_max_bytes"], config["project_doc_max_bytes"])
+        self.assertTrue(config["features"]["hooks"])
+        hook = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
+        self.assertEqual("command", hook["type"])
+        self.assertLessEqual(
+            hook["additionalContextLimit"],
+            budget["hook_additional_context_max_bytes"],
+        )
+        self.assertIn("user_prompt_submit.py", hook["command"])
+
+    def test_agent_skills_use_progressive_disclosure(self):
+        roots = (
+            ROOT / ".agents/skills/chatgpt-exact-sha-review/SKILL.md",
+            ROOT / ".agents/skills/pr-recovery-guided/SKILL.md",
+        )
+        references = (
+            ROOT / ".agents/skills/chatgpt-exact-sha-review/references/review-runbook.md",
+            ROOT / ".agents/skills/pr-recovery-guided/references/recovery-runbook.md",
+        )
+        for path in roots:
+            self.assertLessEqual(len(path.read_bytes()), 2048)
+            self.assertIn("Progressive disclosure", path.read_text(encoding="utf-8"))
+        for path in references:
+            self.assertTrue(path.is_file())
+
+    def test_legacy_prompts_are_archived_outside_active_instruction_tree(self):
+        self.assertFalse((ROOT / "instruction/dev").exists())
+        self.assertFalse((ROOT / "instruction/ui").exists())
+        archive = ROOT / "archive/legacy-prompts"
+        self.assertTrue((archive / "README.md").is_file())
+        self.assertTrue((archive / "CODEX_HANDOFFS.md").is_file())
+        active_handoff = (ROOT / "docs/project/CODEX_HANDOFFS.md").read_text(encoding="utf-8")
+        self.assertIn("archived", active_handoff.lower())
+        self.assertLessEqual(len(active_handoff.encode("utf-8")), 2048)
+
+    def test_codex_profiles_are_installed_by_ansible_without_overwriting_base_config(self):
+        tasks = (
+            ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml"
+        ).read_text(encoding="utf-8")
+        profile_tasks = (
+            ROOT / "platform/ansible/roles/developer_toolchain/tasks/codex_profiles.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("import_tasks: codex_profiles.yml", tasks)
+        self.assertIn("ecommerce-minimal", profile_tasks)
+        self.assertIn("ecommerce-openai", profile_tasks)
+        self.assertNotIn('dest: "{{ ansible_env.HOME }}/.codex/config.toml"', profile_tasks)
+
+    def test_context_diagnostics_and_review_handoff_use_central_budget(self):
+        controller = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
+        monitor = (ROOT / "scripts/pr_monitor.py").read_text(encoding="utf-8")
+        self.assertIn('budget["diff_context_max_bytes"]', controller)
+        self.assertIn('budget["failure_context_max_lines"]', controller)
+        self.assertIn('budget["failure_context_max_bytes"]', controller)
+        self.assertIn('"review_handoff_max_bytes"', monitor)
 
 
 if __name__ == "__main__":
