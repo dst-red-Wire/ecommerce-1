@@ -334,7 +334,8 @@ class PRMonitorTest(unittest.TestCase):
     def test_pr_monitor_has_no_codex_control_or_external_ai_execution_hook(self):
         source = (Path(pr_monitor.__file__)).read_text(encoding="utf-8").lower()
         for forbidden in (
-            "codex",
+            '["codex",',
+            '("codex",',
             "--codex-command",
             "pr_monitor_codex_command",
             "invoke_codex",

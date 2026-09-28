@@ -1,0 +1,18 @@
+---
+- name: Create user Codex configuration directory
+  ansible.builtin.file:
+    path: "{{ ansible_env.HOME }}/.codex"
+    state: directory
+    mode: '0700'
+  tags: [toolchain, agent_tools, context_tools, codex]
+
+- name: Install repository-managed Codex profiles without replacing user config
+  ansible.builtin.copy:
+    src: "{{ repo_root }}/config/codex/profiles/{{ item }}.config.toml"
+    dest: "{{ ansible_env.HOME }}/.codex/{{ item }}.config.toml"
+    remote_src: true
+    mode: '0600'
+  loop:
+    - ecommerce-minimal
+    - ecommerce-openai
+  tags: [toolchain, agent_tools, context_tools, codex]

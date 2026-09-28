@@ -98,9 +98,9 @@ class RoutingTests(unittest.TestCase):
             "      - mlops",
             "      - aiops",
             "    - architecture.lock.yaml",
-            "    - docs/architecture/EXACT_TOPOLOGY_V5.md",
-            "    - config/infrastructure/deployment-waves.yaml",
-            "    - docs/architecture/MLOPS_TOPOLOGY_V1.md",
+            "      - docs/architecture/EXACT_TOPOLOGY_V5.md",
+            "      - config/infrastructure/deployment-waves.yaml",
+            "      - docs/architecture/MLOPS_TOPOLOGY_V1.md",
         ):
             self.assertIn(required, text)
 
@@ -215,6 +215,102 @@ class RoutingTests(unittest.TestCase):
         for override in ("0", "1025", "unbounded"):
             with self.subTest(override=override), self.assertRaisesRegex(RuntimeError, "byte budget override"):
                 MOD.resolve_byte_budget(1024, override)
+
+
+    def test_historical_prompt_paths_are_excluded_from_active_context(self):
+        cfg = {
+            "agent_data_access": {
+                "historical_path_patterns": [r"^archive/legacy-prompts/"],
+            }
+        }
+        self.assertTrue(MOD._historical("archive/legacy-prompts/dev/old.pdf", cfg))
+        self.assertFalse(MOD._historical("services/product/main.go", cfg))
+
+    def test_router_uses_drastically_reduced_level_budgets(self):
+        text = (ROOT / "config/context/router.yaml").read_text(encoding="utf-8")
+        self.assertIn("max_bytes: 4096", text)
+        self.assertIn("max_bytes: 8192", text)
+        self.assertIn("max_bytes: 12288", text)
+        canonical = text.split("canonical:", 1)[1].split("\n\n# Section-level", 1)[0]
+        self.assertNotIn("AGENTS.md", canonical)
+
+
+    def test_targeted_section_router_prefers_exact_authority_sections(self):
+        cfg = {
+            "targeted_sections": [
+                {
+                    "task_keywords": ["finish-pr"],
+                    "patterns": ["scripts/repository_delivery.py"],
+                    "pointers": [
+                        "architecture.lock.yaml#repository_governance",
+                        "config/contracts/review-policy.yaml#repository_delivery",
+                    ],
+                }
+            ]
+        }
+        by_task = MOD.targeted_section_pointers("fix finish-pr transition", [], cfg)
+        self.assertIn("config/contracts/review-policy.yaml#repository_delivery", by_task)
+        by_path = MOD.targeted_section_pointers(
+            "small correction",
+            ["scripts/repository_delivery.py"],
+            cfg,
+        )
+        self.assertIn("architecture.lock.yaml#repository_governance", by_path)
+
+    def test_git_scopes_include_unicode_untracked_and_staged_without_silent_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            (root / "ancien.txt").write_text("old", encoding="utf-8")
+            (root / "index.txt").write_text("old", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            (root / "ancien.txt").rename(root / "renommé.txt")
+            (root / "index.txt").write_text("staged", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            (root / "index.txt").write_text("worktree", encoding="utf-8")
+            (root / "nouveau-é.txt").write_text("untracked", encoding="utf-8")
+            with mock.patch.object(MOD, "ROOT", root):
+                staged = MOD.changed_files(staged=True)
+                working = MOD.changed_files(working_tree=True)
+                self.assertIn("renommé.txt", staged)
+                self.assertIn("index.txt", staged)
+                self.assertNotIn("nouveau-é.txt", staged)
+                self.assertIn("nouveau-é.txt", working)
+                self.assertIn("index.txt", working)
+                self.assertIn("renommé.txt", working)
+                self.assertIn("staged", MOD._diff_for_scope(since="", staged=True, files=["index.txt"]))
+                self.assertIn("worktree", MOD._diff_for_scope(since="", staged=False, files=["index.txt"]))
+                self.assertNotIn("nouveau-é.txt", MOD.changed_files(since=base))
+                with self.assertRaisesRegex(RuntimeError, "unknown revision|bad revision|ambiguous"):
+                    MOD.changed_files(since="missing-ref")
+                first = MOD._relevant_state_digest(["index.txt"], since="", staged=True)
+                (root / "index.txt").write_text("worktree again", encoding="utf-8")
+                self.assertEqual(first, MOD._relevant_state_digest(["index.txt"], since="", staged=True))
+                subprocess.run(["git", "-C", str(root), "add", "index.txt"], check=True)
+                self.assertNotEqual(first, MOD._relevant_state_digest(["index.txt"], since="", staged=True))
+
+    def test_relevant_state_digest_changes_when_file_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            target = root / "services/product/main.go"
+            target.parent.mkdir(parents=True)
+            target.write_text("package product\n", encoding="utf-8")
+            with mock.patch.object(MOD, "ROOT", root), mock.patch.object(
+                MOD, "_diff_for_scope", return_value="diff"
+            ), mock.patch.object(MOD, "_git_text", return_value=""):
+                first = MOD._relevant_state_digest(
+                    ["services/product/main.go"], since="", staged=False
+                )
+                target.write_text("package product\n// changed\n", encoding="utf-8")
+                second = MOD._relevant_state_digest(
+                    ["services/product/main.go"], since="", staged=False
+                )
+            self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":

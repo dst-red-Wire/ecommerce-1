@@ -18,7 +18,12 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-PROMPT_BUDGET_BYTES = 16 * 1024
+ROOT = Path(__file__).resolve().parents[1]
+PROMPT_BUDGET_BYTES = int(
+    json.loads((ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8"))[
+        "review_handoff_max_bytes"
+    ]
+)
 GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){owner{login} pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid comments(last:100){nodes{id createdAt body author{login}}} reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
 THREADS_QUERY = """query PRMonitorThreads($owner:String!,$repo:String!,$number:Int!,$threadCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}}}}}"""
 

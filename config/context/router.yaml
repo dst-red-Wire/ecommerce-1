@@ -1,19 +1,23 @@
-version: 2
+version: 3
 status: exact
+
 levels:
   L2:
     description: architecture, security, infrastructure or control-plane change
-    max_bytes: 32768
-    max_diff_lines: 240
-    max_excerpt_lines: 100
+    max_bytes: 12288
+    max_diff_lines: 140
+    max_excerpt_lines: 60
     patterns:
       - architecture.lock.yaml
-      - AGENTS.md
       - docs/architecture/**
+      - .codex/**
+      - config/context/**
+      - config/codex/**
       - config/infrastructure/**
       - config/contracts/review-policy.yaml
       - config/contracts/ci-topology.yaml
       - config/contracts/resilience-governance.yaml
+      - config/contracts/qualification-execution-policy.yaml
       - config/contracts/security-trust-zones.yaml
       - config/contracts/security-scan-policy.yaml
       - config/contracts/service-slo.yaml
@@ -29,6 +33,7 @@ levels:
       - fleet
       - rancher
       - terraform
+      - opentofu
       - ansible
       - kubernetes
       - rke2
@@ -41,20 +46,28 @@ levels:
       - error budget
       - engineering metrics
       - context engineering
+      - codex
+      - mcp
       - kratix
       - kustomize
       - helm
       - tls
+      - pull request
+      - pr-loop
+      - finish-pr
+      - owner authorization
+      - review policy
+      - delivery governance
+      - mlops
+      - aiops
       - infrastructure
       - resilience
       - recovery
-      - mlops
-      - aiops
   L1:
     description: domain, API, service or frontend contract change
-    max_bytes: 24576
-    max_diff_lines: 180
-    max_excerpt_lines: 80
+    max_bytes: 8192
+    max_diff_lines: 100
+    max_excerpt_lines: 40
     patterns:
       - config/contracts/**
       - contracts/**
@@ -77,20 +90,23 @@ levels:
       - order
       - payment
   L0:
-    description: local implementation or developer-helper change
-    max_bytes: 12288
-    max_diff_lines: 100
-    max_excerpt_lines: 40
+    description: local implementation, test or developer-helper change
+    max_bytes: 4096
+    max_diff_lines: 60
+    max_excerpt_lines: 20
     patterns: []
     task_keywords: []
+
+# Pointers are cheap routing hints. Their contents are not copied into the pack
+# unless --include-excerpts is explicitly requested.
 canonical:
   L2:
-    - AGENTS.md
     - architecture.lock.yaml
     - docs/architecture/EXACT_TOPOLOGY_V5.md
     - config/contracts/review-policy.yaml
     - config/contracts/ci-topology.yaml
     - config/contracts/resilience-governance.yaml
+    - config/contracts/qualification-execution-policy.yaml
     - config/contracts/security-trust-zones.yaml
     - config/contracts/security-scan-policy.yaml
     - config/contracts/service-slo.yaml
@@ -105,6 +121,80 @@ canonical:
     - config/contracts/event-contracts.yaml
     - config/contracts/public-api-contracts.yaml
   L0: []
+
+
+# Section-level pointers are selected from task semantics and relevant paths.
+# They avoid copying whole canonical documents into the model context.
+targeted_sections:
+  - name: repository-delivery
+    task_keywords:
+      - pull request
+      - pr-loop
+      - finish-pr
+      - owner authorization
+      - review policy
+      - delivery governance
+    patterns:
+      - scripts/repository_delivery.py
+      - scripts/pr_monitor.py
+      - scripts/review_budget.py
+      - config/contracts/review-policy.yaml
+    pointers:
+      - architecture.lock.yaml#repository_governance
+      - config/contracts/review-policy.yaml#pull_request_review
+      - config/contracts/review-policy.yaml#repository_delivery
+
+  - name: codex-context
+    task_keywords:
+      - codex
+      - context engineering
+      - mcp
+      - token
+    patterns:
+      - AGENTS.md
+      - .codex/**
+      - config/context/**
+      - config/codex/**
+      - config/contracts/codex-token-budget.json
+      - scripts/context-pack.py
+      - scripts/codex_budget.py
+    pointers:
+      - architecture.lock.yaml#machine_contracts.context_router
+      - architecture.lock.yaml#machine_contracts.codex_token_budget
+      - config/context/router.yaml#levels
+      - config/context/router.yaml#agent_data_access
+      - config/contracts/codex-token-budget.json
+
+  - name: security
+    task_keywords:
+      - security
+      - cve
+      - secrets
+      - supply chain
+    patterns:
+      - security/**
+      - config/contracts/security-scan-policy.yaml
+      - config/contracts/security-trust-zones.yaml
+    pointers:
+      - architecture.lock.yaml#supply_chain
+      - architecture.lock.yaml#tooling.security
+      - config/contracts/security-scan-policy.yaml
+      - config/contracts/security-trust-zones.yaml
+
+  - name: mlops-aiops
+    task_keywords:
+      - mlops
+      - aiops
+    patterns:
+      - config/infrastructure/deployment-waves.yaml
+      - docs/architecture/MLOPS_TOPOLOGY_V1.md
+      - docs/architecture/AIOPS_TOPOLOGY_V1.md
+    pointers:
+      - architecture.lock.yaml#tooling
+      - config/infrastructure/deployment-waves.yaml
+      - docs/architecture/EXACT_TOPOLOGY_V5.md
+      - docs/architecture/MLOPS_TOPOLOGY_V1.md
+      - docs/architecture/AIOPS_TOPOLOGY_V1.md
 
 agent_data_access:
   authority: architecture.lock.yaml#machine_contracts.context_router
@@ -124,6 +214,8 @@ agent_data_access:
     - "(^|/)(id_rsa|id_ed25519|.*\\.key)$"
     - "(^|/)(kubeconfig|credentials)(\\.|$)"
     - "(^|/)terraform\\.tfstate(\\.|$)"
+  historical_path_patterns:
+    - "^archive/legacy-prompts/"
   redaction_patterns:
     - "(?is)-----BEGIN (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH |ENCRYPTED )?PRIVATE KEY-----"
     - "(?i)(password|secret|token|api[_-]?key)\\s*[:=]\\s*[^\\s]+"
@@ -131,8 +223,8 @@ agent_data_access:
     - architecture.lock.yaml#machine_contracts.context_router
     - architecture.lock.yaml#machine_contracts.ci_evidence
     - architecture.lock.yaml#machine_contracts.security_scan_policy
-    - architecture.lock.yaml#machine_contracts.service_slo
-    - architecture.lock.yaml#machine_contracts.engineering_metrics_policy
+    - architecture.lock.yaml#machine_contracts.review_budget
+    - architecture.lock.yaml#machine_contracts.codex_token_budget
   accessible_evidence:
     - architecture
     - contracts
@@ -141,9 +233,6 @@ agent_data_access:
     - relevant-tests
     - ci-evidence
     - qce-evidence
-    - slo-evidence
-    - engineering-metrics
-    - incident-evidence
     - dependency-graph
     - ownership
     - documentation

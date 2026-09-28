@@ -6210,27 +6210,80 @@ def global_check(base: str, head: str) -> int:
     print(f"PASS global-check gates={len(records)}")
     return 0
 
+def _codex_token_budget_contract() -> dict:
+    path = ROOT / "config/contracts/codex-token-budget.json"
+    try:
+        contract = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"invalid Codex token budget contract: {exc}") from exc
+    if contract.get("status") != "enforced":
+        raise RuntimeError("Codex token budget contract must be enforced")
+    return contract
+
+
+def _bounded_utf8(text: str, max_bytes: int, marker: str) -> str:
+    raw = text.encode("utf-8")
+    if len(raw) <= max_bytes:
+        return text
+    suffix = ("\n" + marker + "\n").encode("utf-8")
+    cut = raw[: max(0, max_bytes - len(suffix))].decode("utf-8", errors="ignore")
+    return cut + suffix.decode("utf-8")
+
+
+def _diagnostic_policy():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("context_pack", ROOT / "scripts/context-pack.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, module.yq_json(".", ROOT / "config/context/router.yaml")
+
+
+def _private_diagnostic(path: Path, body: str) -> None:
+    root = CONTEXT.resolve()
+    target = path.resolve()
+    if target != root and root not in target.parents:
+        raise RuntimeError("diagnostic output escapes .context")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as stream:
+        stream.write(body)
+    path.chmod(0o600)
+
+
 def diff_context(base: str) -> int:
     CONTEXT.mkdir(exist_ok=True)
+    budget = _codex_token_budget_contract()
+    max_bytes = int(budget["diff_context_max_bytes"])
+    policy, cfg = _diagnostic_policy()
     paths = changed_paths(base, "WORKTREE")
-    stat = git("diff", "--stat", base)
-    diff = git("diff", "--unified=2", base, "--")
-    out = CONTEXT / "diff.md"
-    out.write_text(
+    forbidden = cfg["agent_data_access"].get("forbidden_path_patterns", [])
+    safe_paths = [path for path in paths if not any(re.search(str(pattern), path) for pattern in forbidden)]
+    stat = git("diff", "--stat", base, "--", *safe_paths) if safe_paths else ""
+    diff = git("diff", "--no-ext-diff", "--unified=1", base, "--", *safe_paths) if safe_paths else ""
+    listed = paths[:80]
+    body = (
         "# Diff context\n\n## Files\n"
-        + "\n".join(f"- `{p}`" for p in paths)
-        + "\n\n## Stat\n```text\n"
-        + stat[:12000]
-        + "\n```\n\n## Diff\n```diff\n"
-        + diff[:28000]
-        + "\n```\n",
-        encoding="utf-8",
+        + "\n".join(f"- {p}" for p in listed)
+        + (f"\n- ... {len(paths) - len(listed)} paths omitted; run git diff {base} -- <path>"
+           if len(paths) > len(listed) else "")
+        + (f"\n- {len(paths) - len(safe_paths)} sensitive paths: contents omitted"
+           if len(paths) != len(safe_paths) else "")
+        + "\n\n## Stat\n~~~text\n"
+        + stat[:2048]
+        + "\n~~~\n\n## Diff\n~~~diff\n"
+        + diff
+        + "\n~~~\n"
     )
-    print(out.relative_to(ROOT))
+    body = policy.redact_sensitive(body, cfg)
+    full = CONTEXT / "diff-full.md"
+    _private_diagnostic(full, body)
+    body = _bounded_utf8(body, max_bytes, f"[DIFF CONTEXT TRUNCATED; read {full.relative_to(ROOT)} for omitted hunks]")
+    out = CONTEXT / "diff.md"
+    _private_diagnostic(out, body)
+    print(f"{out.relative_to(ROOT)} bytes={len(body.encode('utf-8'))}/{max_bytes}")
     return 0
 
 
-def failure_context(gate: str, component: str) -> int:
+def failure_context(gate: str, component: str, rerun: bool = False) -> int:
     if component:
         if component.startswith("service:"):
             cmd = [sys.executable, "scripts/repoctl.py", "service", component.split(":", 1)[1]]
@@ -6245,40 +6298,56 @@ def failure_context(gate: str, component: str) -> int:
         name = component.replace(":", "-")
     else:
         allowed = {
-            "governance",
-            "runtime-efficiency",
-            "contracts",
-            "lint",
-            "test",
-            "security",
-            "opentofu",
-            "ansible",
-            "system",
-            "automation-policy",
+            "governance", "runtime-efficiency", "contracts", "lint", "test",
+            "security", "opentofu", "ansible", "system", "automation-policy",
         }
         if gate not in allowed:
             return fail(f"unsupported GATE: {gate}")
         cmd = [sys.executable, "scripts/repoctl.py", gate]
         name = gate
-    p = run(cmd, check=False, capture=True)
-    text = (p.stdout or "") + (p.stderr or "")
-    lines = text.splitlines()
+
+    log_path = CONTEXT / "logs" / f"{name}.log"
+    if log_path.is_file() and not rerun:
+        output = log_path.read_text(encoding="utf-8", errors="replace")
+        returncode = None
+        source = str(log_path.relative_to(ROOT))
+    else:
+        process = run(cmd, check=False, capture=True)
+        output = (process.stdout or "") + (process.stderr or "")
+        returncode = process.returncode
+        source = "fresh execution"
+    lines = output.splitlines()
     keywords = re.compile(r"FAIL|FAILED|ERROR|error:|fatal:|panic:|cannot use|undefined|make: \*\*\*", re.I)
-    hits = [i for i, line in enumerate(lines) if keywords.search(line)]
-    chosen: set[int] = set()
-    for i in hits:
-        chosen.update(range(max(0, i - 3), min(len(lines), i + 4)))
-    relevant = [lines[i] for i in sorted(chosen)] if chosen else lines[-120:]
-    CONTEXT.mkdir(exist_ok=True)
-    path = CONTEXT / f"failure-{name}.md"
-    path.write_text(
-        f"# Failure context\nGATE: {name}\nSTATUS: {'PASS' if p.returncode == 0 else 'FAIL'}\nEXIT_CODE: {p.returncode}\n\n## Relevant output\n```text\n"
-        + "\n".join(relevant[:220])
-        + "\n```\n",
-        encoding="utf-8",
+    first = next((i for i, line in enumerate(lines) if keywords.search(line)), None)
+    budget = _codex_token_budget_contract()
+    max_lines = int(budget["failure_context_max_lines"])
+    max_bytes = int(budget["failure_context_max_bytes"])
+    if first is None:
+        relevant = lines[-min(max_lines, 20):]
+    else:
+        start = max(0, first - 4)
+        relevant = lines[start:start + max_lines]
+    omission = len(lines) - len(relevant)
+    body = (
+        f"# Failure context\nGATE: {name}\nSOURCE: {source}\n"
+        f"STATUS: {'UNKNOWN' if returncode is None else 'PASS' if returncode == 0 else 'FAIL'}\n"
+        f"EXIT_CODE: {returncode if returncode is not None else 'UNKNOWN'}\n\n"
+        "## Causal output\n~~~text\n" + "\n".join(relevant) + "\n~~~\n"
     )
-    print(path.relative_to(ROOT))
-    return p.returncode
+    if omission:
+        body += f"{omission} log lines omitted; read {source} for the full log.\n"
+    policy, cfg = _diagnostic_policy()
+    if source == "fresh execution":
+        output = policy.redact_sensitive(output, cfg)
+        _private_diagnostic(log_path, output)
+        source = str(log_path.relative_to(ROOT))
+        body = body.replace("SOURCE: fresh execution", f"SOURCE: {source}")
+    body = policy.redact_sensitive(body, cfg)
+    body = _bounded_utf8(body, max_bytes, f"[FAILURE CONTEXT TRUNCATED; read {source}]")
+    path = CONTEXT / f"failure-{name}.md"
+    _private_diagnostic(path, body)
+    print(f"{path.relative_to(ROOT)} bytes={len(body.encode('utf-8'))}/{max_bytes} lines={len(relevant)}/{max_lines}")
+    return returncode or 0
 
 
 def doctor() -> int:
@@ -7958,7 +8027,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                     "review_kinds": ["CODE", "SECURITY"],
                     "helper": "scripts/pr_monitor.py#chatgpt_review_handoff",
                     "payload": "required",
-                    "payload_budget_bytes": 16384,
+                    "payload_budget_bytes": 8192,
                     "payload_fields": [
                         "pr",
                         "review_kind",
@@ -12385,6 +12454,7 @@ def main() -> int:
     d = sub.add_parser("diff-context")
     d.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     fc = sub.add_parser("failure-context")
+    fc.add_argument("--rerun", action="store_true")
     fc.add_argument("--gate", default=os.environ.get("GATE", ""))
     fc.add_argument("--component", default=os.environ.get("COMPONENT", ""))
     ctx = sub.add_parser("context")
@@ -12685,7 +12755,7 @@ def main() -> int:
         if args.cmd == "diff-context":
             return diff_context(args.base)
         if args.cmd == "failure-context":
-            return failure_context(args.gate, args.component)
+            return failure_context(args.gate, args.component, args.rerun)
         if args.cmd == "context":
             return run([sys.executable, "scripts/context-pack.py", "--task", args.task], check=False).returncode
         if args.cmd == "api-generate":

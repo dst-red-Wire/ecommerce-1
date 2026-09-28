@@ -1,6 +1,7 @@
 import copy
 import importlib.util
 import inspect
+import json
 from pathlib import Path
 import unittest
 
@@ -67,7 +68,7 @@ class GitDeliveryLifecycleContractTest(unittest.TestCase):
             handoff["helper"],
         )
         self.assertEqual("required", handoff["payload"])
-        self.assertEqual(16 * 1024, handoff["payload_budget_bytes"])
+        self.assertEqual(json.loads((ROOT / "config/contracts/codex-token-budget.json").read_text())["review_handoff_max_bytes"], handoff["payload_budget_bytes"])
         self.assertEqual("sha256", handoff["payload_digest"])
         self.assertTrue(handoff["fail_if_payload_unavailable"])
         self.assertEqual("exact-pr-and-head-sha", handoff["invocation_binding"])
