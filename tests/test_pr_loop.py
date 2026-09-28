@@ -1454,6 +1454,10 @@ class PRLoopSourceContractTests(unittest.TestCase):
             "qualification": {"status": "PASS", "head_sha": old_sha},
             "code_review": {"status": "FAIL", "head_sha": old_sha},
             "security_review": {"status": "DEFERRED", "head_sha": old_sha},
+            "risk": {"classification": "LOW_RISK", "head_sha": old_sha},
+            "risk_classification": "LOW_RISK",
+            "owner_authorization": {"status": "PASS", "head_sha": old_sha},
+            "merge_requirements": {"required_checks": True},
         })
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1464,6 +1468,10 @@ class PRLoopSourceContractTests(unittest.TestCase):
             self.assertEqual(current_sha, payload[kind]["head_sha"])
             self.assertEqual("MISSING", payload[kind]["status"])
         self.assertEqual("HEAD_CHANGED", payload["state"])
+        self.assertEqual("UNKNOWN", payload["risk_classification"])
+        self.assertEqual(current_sha, payload["risk"]["head_sha"])
+        self.assertEqual("MISSING", payload["owner_authorization"]["status"])
+        self.assertNotIn("merge_requirements", payload)
 
     def test_json_cannot_report_old_review_as_current_fail_or_pass(self):
         current_sha, old_sha = "b" * 40, "a" * 40

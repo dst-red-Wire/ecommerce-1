@@ -9924,6 +9924,17 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
             result["next_action"] = "QUALIFICATION"
             result["merge_ready"] = False
             result.pop("review_request", None)
+            result.pop("merge_requirements", None)
+            result["risk"] = {
+                **_pr_loop_empty_result(0)["risk"],
+                "head_sha": current_head,
+            }
+            result["risk_classification"] = "UNKNOWN"
+            result["owner_authorization"] = {
+                "status": "MISSING", "head_sha": current_head
+            }
+            result["owner_authorization_required"] = True
+            result["merge_mode"] = "OWNER_GATED"
         stale = 0
         for field in ("qualification", "code_review", "security_review"):
             proof = result.get(field)
