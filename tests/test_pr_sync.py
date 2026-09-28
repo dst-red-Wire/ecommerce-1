@@ -50,6 +50,7 @@ class SyncPRBaseTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "run", side_effect=self.fake_run),
             mock.patch.object(REPOCTL, "_controller_command", side_effect=lambda *args: ["repoctl", *args]),
             mock.patch.object(REPOCTL, "_pr_loop_qualification", side_effect=self.proof),
+            mock.patch.object(REPOCTL, "publish", side_effect=self.fake_publish),
         ]
         for patch in self.patches:
             patch.start()
@@ -79,6 +80,15 @@ class SyncPRBaseTests(unittest.TestCase):
     def proof(self, base, head):
         return {"status": "PASS", "head_sha": head, "base_sha": base}
 
+    def fake_publish(self, base, message):
+        self.commands.append(["repoctl", "publish", base, message])
+        if getattr(self, "push_fails", False):
+            if getattr(self, "push_publishes", False):
+                self.remote = self.NEW
+            return 1
+        self.remote = self.NEW
+        return 0
+
     def fake_run(self, command, **_kwargs):
         self.commands.append(command)
         if command[:4] == ["git", "rev-parse", "--verify", "MERGE_HEAD"]:
@@ -101,12 +111,6 @@ class SyncPRBaseTests(unittest.TestCase):
         if command[:3] == ["git", "merge", "--abort"]:
             self.head = self.OLD
             self.merge_in_progress = False
-        if command[:2] == ["git", "push"]:
-            if getattr(self, "push_fails", False):
-                if getattr(self, "push_publishes", False):
-                    self.remote = self.NEW
-                return subprocess.CompletedProcess(command, 1, "", "rejected")
-            self.remote = self.NEW
         return subprocess.CompletedProcess(command, 0, "", "")
 
     def test_already_descended_creates_no_commit_or_push(self):
@@ -116,7 +120,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("NOT_REQUIRED", first["status"])
         self.assertEqual("NOT_REQUIRED", second["status"])
         self.assertEqual("", first["new_head_sha"])
-        self.assertFalse(any(c[:2] in (["git", "merge"], ["git", "push"]) for c in self.commands))
+        self.assertFalse(any(c[:2] in (["git", "merge"], ["repoctl", "publish"]) for c in self.commands))
 
     def test_signed_merge_is_qualified_before_normal_push(self):
         self.main_is_ancestor = False
@@ -126,11 +130,12 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual({"status": "PASS", "head_sha": self.NEW, "base_sha": self.MAIN, "source": "executed"}, result["qualification"])
         merge = next(i for i, c in enumerate(self.commands) if c[:2] == ["git", "merge"])
         qualify = next(i for i, c in enumerate(self.commands) if c[:2] == ["repoctl", "qualification-proof"])
-        push = next(i for i, c in enumerate(self.commands) if c[:2] == ["git", "push"])
+        push = next(i for i, c in enumerate(self.commands) if c[:2] == ["repoctl", "publish"])
         self.assertLess(merge, qualify)
         self.assertLess(qualify, push)
         self.assertIn("-S", self.commands[merge])
-        self.assertEqual(["git", "push", "origin", "HEAD:refs/heads/feature/pr-loop"], self.commands[push])
+        self.assertIn(["repoctl", "publish", "main", ""], self.commands)
+        self.assertEqual(["repoctl", "publish", "main", ""], self.commands[push])
         self.assertFalse(result["force_push_used"] or result["rebase_used"])
 
     def test_conflict_aborts_and_restores_without_push(self):
@@ -142,7 +147,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("PASS", result["worktree_clean"])
         self.assertEqual(self.OLD, self.head)
         self.assertIn(["git", "merge", "--abort"], self.commands)
-        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
 
     def test_remote_head_change_blocks_push(self):
         self.main_is_ancestor = False
@@ -151,7 +156,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("REMOTE_HEAD_CHANGED", result["error"])
         self.assertEqual("PASS", result["restore_verification"])
         self.assertEqual(self.OLD, self.head)
-        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
 
     def test_base_change_after_merge_abandons_old_controller_before_qualification(self):
         self.main_is_ancestor = False
@@ -165,7 +170,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual(self.OLD, self.head)
         self.assertEqual(self.OLD, self.remote)
         self.assertFalse(any(c[:2] == ["repoctl", "qualification-proof"] for c in self.commands))
-        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
 
     def test_base_change_after_qualification_blocks_publication(self):
         self.main_is_ancestor = False
@@ -179,7 +184,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("PASS", result["restore_verification"])
         self.assertEqual(self.OLD, self.head)
         self.assertTrue(any(c[:2] == ["repoctl", "qualification-proof"] for c in self.commands))
-        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
 
     def test_qualification_failure_blocks_push(self):
         self.main_is_ancestor = False
@@ -188,7 +193,7 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("QUALIFICATION_FAILED", result["error"])
         self.assertEqual("PASS", result["restore_verification"])
         self.assertEqual(self.OLD, self.head)
-        self.assertFalse(any(c[:2] == ["git", "push"] for c in self.commands))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
 
     def test_signed_merge_verification_failure_restores_head(self):
         self.main_is_ancestor = False

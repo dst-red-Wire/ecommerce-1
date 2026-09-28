@@ -15,6 +15,12 @@ SPEC = importlib.util.spec_from_file_location("repoctl_pr_loop_test", ROOT / "sc
 assert SPEC and SPEC.loader
 REPOCTL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPOCTL)
+# CI shards import this module in separate processes; isolate their simulated transitions.
+_TEST_SYNC_LOCK_DIRECTORY = tempfile.TemporaryDirectory()
+mock.patch.object(
+    REPOCTL, "_pr_sync_lock_path",
+    return_value=Path(_TEST_SYNC_LOCK_DIRECTORY.name) / "repoctl-sync-pr-base.lock",
+).start()
 RISK_SPEC = importlib.util.spec_from_file_location(
     "merge_risk_pr_loop_test", ROOT / "scripts/merge_risk.py"
 )

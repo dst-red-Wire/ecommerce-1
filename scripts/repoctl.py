@@ -7859,7 +7859,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         "qualification_before_push": {"required": True},
         "signed_commit": {"required": True},
         "mutation_sites": {
-            "git_push": ["scripts/repoctl.py#publish", "scripts/repoctl.py#_sync_pr_base_locked"],
+            "git_push": ["scripts/repoctl.py#publish"],
             "git_push_delete": ["scripts/repoctl.py#_delete_branch_ref"],
             "github_pr_create": ["scripts/repoctl.py#deliver"],
             "github_pr_update": ["scripts/repoctl.py#deliver"],
@@ -11023,15 +11023,19 @@ def _restore_pr_sync_state(snapshot: dict) -> tuple[bool, str]:
     return verified, "PASS" if verified else "restored checkout verification failed"
 
 
+def _serialize_pr_sync_transition(func):
+    @functools.wraps(func)
+    def locked(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
+        with _pr_sync_lock() as acquired:
+            if not acquired:
+                return {**_pr_sync_result(pr), "status": "FAIL", "error": "SYNC_BUSY"}
+            return func(gh, repository, pr, dry_run=dry_run)
+    return locked
+
+
+@_serialize_pr_sync_transition
 def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
-    """Reconcile one exact PR head with main; never publish unqualified history."""
-    with _pr_sync_lock() as acquired:
-        if not acquired:
-            return {**_pr_sync_result(pr), "status": "FAIL", "error": "SYNC_BUSY"}
-        return _sync_pr_base_locked(gh, repository, pr, dry_run=dry_run)
-
-
-def _sync_pr_base_locked(gh: str, repository: str, pr: dict, *, dry_run: bool) -> dict:
+    """Reconcile one exact PR head with main under the exclusive sync lock."""
     _require_trusted_pr_execution(
         pr_number=pr["number"], base_sha=pr["base_sha"], head_sha=pr["head_sha"]
     )
@@ -11132,11 +11136,7 @@ def _sync_pr_base_locked(gh: str, repository: str, pr: dict, *, dry_run: bool) -
         return fail_before_publication("SYNC_PREPUBLICATION_FAILED", str(exc))
 
     try:
-        pushed = run(
-            ["git", "push", "origin", f"HEAD:refs/heads/{pr['head_branch']}"],
-            check=False, capture=True,
-        )
-        push_failed = pushed.returncode != 0
+        push_failed = publish("main", "") != 0
     except (OSError, RuntimeError) as exc:
         push_failed = True
         sync["failure_detail"] = str(exc)
