@@ -24,6 +24,8 @@ class CodexBudgetTest(unittest.TestCase):
         self.contract_patch = mock.patch.object(codex_budget, "CONTRACT", self.contract_path)
         self.root_patch.start()
         self.contract_patch.start()
+        self.pack = self.root / ".context/codex-context.md"
+        self.pack.write_text("bounded context", encoding="utf-8")
         self.manifest = self.root / ".context/codex-context.json"
         self.manifest.write_text(
             json.dumps(
@@ -33,6 +35,8 @@ class CodexBudgetTest(unittest.TestCase):
                     "max_bytes": 4096,
                     "cache_key": "a" * 64,
                     "head_sha": "b" * 40,
+                    "pack_path": ".context/codex-context.md",
+                    "pack_sha256": __import__("hashlib").sha256(self.pack.read_bytes()).hexdigest(),
                 }
             ),
             encoding="utf-8",
@@ -72,6 +76,12 @@ class CodexBudgetTest(unittest.TestCase):
         value["actual_bytes"] = 5000
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "context budget violation"):
+            codex_budget.decide(self.manifest)
+
+
+    def test_context_pack_tamper_is_rejected(self):
+        self.pack.write_text("tampered", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "context pack integrity mismatch"):
             codex_budget.decide(self.manifest)
 
 

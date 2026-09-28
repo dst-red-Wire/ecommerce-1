@@ -68,6 +68,10 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     key = str(manifest.get("cache_key") or "")
     if len(key) != 64 or any(char not in "0123456789abcdef" for char in key):
         raise ValueError("manifest cache_key must be a full SHA-256")
+    pack_path = _result_path(str(manifest.get("pack_path") or ""))
+    pack_sha = str(manifest.get("pack_sha256") or "")
+    if not pack_path.is_file() or len(pack_sha) != 64 or _sha256(pack_path) != pack_sha:
+        raise ValueError("context pack integrity mismatch")
 
 
 def decide(manifest_path: Path) -> dict[str, Any]:

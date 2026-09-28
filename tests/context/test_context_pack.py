@@ -235,5 +235,24 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("AGENTS.md", canonical)
 
 
+    def test_relevant_state_digest_changes_when_file_content_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            target = root / "services/product/main.go"
+            target.parent.mkdir(parents=True)
+            target.write_text("package product\n", encoding="utf-8")
+            with mock.patch.object(MOD, "ROOT", root), mock.patch.object(
+                MOD, "_diff_for_scope", return_value="diff"
+            ):
+                first = MOD._relevant_state_digest(
+                    ["services/product/main.go"], since="", staged=False
+                )
+                target.write_text("package product\n// changed\n", encoding="utf-8")
+                second = MOD._relevant_state_digest(
+                    ["services/product/main.go"], since="", staged=False
+                )
+            self.assertNotEqual(first, second)
+
+
 if __name__ == "__main__":
     unittest.main()

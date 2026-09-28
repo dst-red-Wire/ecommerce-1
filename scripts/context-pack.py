@@ -592,6 +592,16 @@ def main() -> int:
         and destination.is_file()
         and len(destination.read_bytes()) <= int(manifest["max_bytes"])
     )
+    manifest["pack_path"] = str(destination.relative_to(ROOT))
+    manifest["pack_sha256"] = hashlib.sha256(output.encode("utf-8")).hexdigest()
+    existing_pack_sha = (
+        hashlib.sha256(destination.read_bytes()).hexdigest() if destination.is_file() else ""
+    )
+    reused = bool(
+        reused
+        and old_manifest.get("pack_sha256") == existing_pack_sha
+        and existing_pack_sha == manifest["pack_sha256"]
+    )
     manifest["pack_reused"] = reused
     if not reused:
         destination.parent.mkdir(parents=True, exist_ok=True)
