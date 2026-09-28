@@ -162,6 +162,24 @@ def route(task: str, files: list[str], cfg: dict | None = None) -> str:
     return max(candidates, key=lambda item: ranks[item])
 
 
+
+def targeted_section_pointers(task: str, files: list[str], cfg: dict) -> list[str]:
+    """Return section-level authority pointers relevant to this exact task delta."""
+    lowered = task.lower()
+    selected: list[str] = []
+    for rule in cfg.get("targeted_sections", []):
+        keywords = [str(item).lower() for item in rule.get("task_keywords", [])]
+        patterns = [str(item) for item in rule.get("patterns", [])]
+        keyword_hit = any(
+            re.search(rf"(?<![a-z0-9-]){re.escape(keyword)}(?![a-z0-9-])", lowered)
+            for keyword in keywords
+        )
+        path_hit = any(matches(path, pattern) for path in files for pattern in patterns)
+        if keyword_hit or path_hit:
+            selected.extend(str(pointer) for pointer in rule.get("pointers", []))
+    return list(dict.fromkeys(selected))
+
+
 def service_names() -> list[str]:
     return [str(x) for x in yq_json(".services | keys", OWNERSHIP)]
 
@@ -489,6 +507,14 @@ def build_pack(
     guard_context_paths(canonical, cfg)
     if canonical:
         parts += ["", "## Canonical pointers (read only if needed)", *[f"- {path}" for path in canonical]]
+
+    section_pointers = targeted_section_pointers(task, files, cfg)
+    if section_pointers:
+        parts += [
+            "",
+            "## Targeted authority sections (read before broad documents)",
+            *[f"- {pointer}" for pointer in section_pointers],
+        ]
 
     if services:
         parts += ["", "## Routed service contracts"]

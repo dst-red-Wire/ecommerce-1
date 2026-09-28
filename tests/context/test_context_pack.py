@@ -235,6 +235,28 @@ class RoutingTests(unittest.TestCase):
         self.assertNotIn("AGENTS.md", canonical)
 
 
+    def test_targeted_section_router_prefers_exact_authority_sections(self):
+        cfg = {
+            "targeted_sections": [
+                {
+                    "task_keywords": ["finish-pr"],
+                    "patterns": ["scripts/repository_delivery.py"],
+                    "pointers": [
+                        "architecture.lock.yaml#repository_governance",
+                        "config/contracts/review-policy.yaml#repository_delivery",
+                    ],
+                }
+            ]
+        }
+        by_task = MOD.targeted_section_pointers("fix finish-pr transition", [], cfg)
+        self.assertIn("config/contracts/review-policy.yaml#repository_delivery", by_task)
+        by_path = MOD.targeted_section_pointers(
+            "small correction",
+            ["scripts/repository_delivery.py"],
+            cfg,
+        )
+        self.assertIn("architecture.lock.yaml#repository_governance", by_path)
+
     def test_relevant_state_digest_changes_when_file_content_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

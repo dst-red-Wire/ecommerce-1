@@ -183,7 +183,7 @@ repository_delivery:
       review_kinds: [CODE, SECURITY]
       helper: scripts/pr_monitor.py#chatgpt_review_handoff
       payload: required
-      payload_budget_bytes: 16384
+      payload_budget_bytes: 8192
       payload_fields:
         - pr
         - review_kind

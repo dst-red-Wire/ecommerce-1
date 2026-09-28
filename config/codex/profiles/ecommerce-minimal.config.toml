@@ -1,5 +1,3 @@
 # User profile installed by Ansible. Select with: codex --profile ecommerce-minimal
+# Intentionally declares no repository-owned MCP server.
 project_doc_max_bytes = 4096
-
-[mcp_servers.openaiDeveloperDocs]
-enabled = false

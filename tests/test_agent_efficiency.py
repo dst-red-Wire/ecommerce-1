@@ -156,6 +156,15 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn('budget["failure_context_max_bytes"]', controller)
         self.assertIn('"review_handoff_max_bytes"', monitor)
 
+        review_policy = (ROOT / "config/contracts/review-policy.yaml").read_text(encoding="utf-8")
+        self.assertIn("payload_budget_bytes: 8192", review_policy)
+
+    def test_minimal_codex_profile_declares_no_repository_owned_mcp(self):
+        minimal = tomllib.loads(
+            (ROOT / "config/codex/profiles/ecommerce-minimal.config.toml").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("mcp_servers", minimal)
+
 
 if __name__ == "__main__":
     unittest.main()

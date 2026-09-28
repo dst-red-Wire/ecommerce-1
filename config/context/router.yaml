@@ -122,6 +122,65 @@ canonical:
     - config/contracts/public-api-contracts.yaml
   L0: []
 
+
+# Section-level pointers are selected from task semantics and relevant paths.
+# They avoid copying whole canonical documents into the model context.
+targeted_sections:
+  - name: repository-delivery
+    task_keywords:
+      - pull request
+      - pr-loop
+      - finish-pr
+      - owner authorization
+      - review policy
+      - delivery governance
+    patterns:
+      - scripts/repository_delivery.py
+      - scripts/pr_monitor.py
+      - scripts/review_budget.py
+      - config/contracts/review-policy.yaml
+    pointers:
+      - architecture.lock.yaml#repository_governance
+      - config/contracts/review-policy.yaml#pull_request_review
+      - config/contracts/review-policy.yaml#repository_delivery
+
+  - name: codex-context
+    task_keywords:
+      - codex
+      - context engineering
+      - mcp
+      - token
+    patterns:
+      - AGENTS.md
+      - .codex/**
+      - config/context/**
+      - config/codex/**
+      - config/contracts/codex-token-budget.json
+      - scripts/context-pack.py
+      - scripts/codex_budget.py
+    pointers:
+      - architecture.lock.yaml#machine_contracts.context_router
+      - architecture.lock.yaml#machine_contracts.codex_token_budget
+      - config/context/router.yaml#levels
+      - config/context/router.yaml#agent_data_access
+      - config/contracts/codex-token-budget.json
+
+  - name: security
+    task_keywords:
+      - security
+      - cve
+      - secrets
+      - supply chain
+    patterns:
+      - security/**
+      - config/contracts/security-scan-policy.yaml
+      - config/contracts/security-trust-zones.yaml
+    pointers:
+      - architecture.lock.yaml#supply_chain
+      - architecture.lock.yaml#tooling.security
+      - config/contracts/security-scan-policy.yaml
+      - config/contracts/security-trust-zones.yaml
+
 agent_data_access:
   authority: architecture.lock.yaml#machine_contracts.context_router
   default_mode: read-only
