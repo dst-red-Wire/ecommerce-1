@@ -290,9 +290,47 @@ class RoutingTests(unittest.TestCase):
                     MOD.changed_files(since="missing-ref")
                 first = MOD._relevant_state_digest(["index.txt"], since="", staged=True)
                 (root / "index.txt").write_text("worktree again", encoding="utf-8")
-                self.assertEqual(first, MOD._relevant_state_digest(["index.txt"], since="", staged=True))
+                self.assertNotEqual(first, MOD._relevant_state_digest(["index.txt"], since="", staged=True))
                 subprocess.run(["git", "-C", str(root), "add", "index.txt"], check=True)
                 self.assertNotEqual(first, MOD._relevant_state_digest(["index.txt"], since="", staged=True))
+
+    def test_since_scope_digest_tracks_rendered_worktree_outline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(root), "config", "commit.gpgsign", "false"], check=True)
+            target = root / "example.py"
+            target.write_text("def original(): pass\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "example.py"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-qm", "base"], check=True)
+            base = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+            target.write_text("def committed(): pass\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "commit", "-qam", "change"], check=True)
+            with mock.patch.object(MOD, "ROOT", root):
+                first = MOD._relevant_state_digest(["example.py"], since=base, staged=False)
+                first_outline = MOD.ast_outline("example.py")
+                target.write_text("def worktree(): pass\n", encoding="utf-8")
+                second = MOD._relevant_state_digest(["example.py"], since=base, staged=False)
+                second_outline = MOD.ast_outline("example.py")
+            self.assertNotEqual(first_outline, second_outline)
+            self.assertNotEqual(first, second)
+
+    def test_diff_line_omission_marks_pack_incomplete(self):
+        cfg = MOD.yq_json(".", MOD.ROUTER)
+        cfg["levels"]["L0"]["max_diff_lines"] = 2
+        with mock.patch.object(MOD, "_diff_for_scope", return_value="one\ntwo\nthree\nfour\n"), mock.patch.object(
+            MOD, "_stat_for_scope", return_value=""
+        ), mock.patch.object(MOD, "ast_outline", return_value=""):
+            output, manifest = MOD.build_pack(
+                task="local helper", since="", staged=False, working_tree=False,
+                explicit_paths=["scripts/context-pack.py"], include_excerpts=False, cfg=cfg,
+            )
+        self.assertIn("diff truncated after 2 lines", output)
+        self.assertNotIn("CONTEXT TRUNCATED", output)
+        self.assertEqual(2, manifest["omitted_diff_lines"])
+        self.assertTrue(manifest["truncated"])
 
     def test_relevant_state_digest_changes_when_file_content_changes(self):
         with tempfile.TemporaryDirectory() as tmp:

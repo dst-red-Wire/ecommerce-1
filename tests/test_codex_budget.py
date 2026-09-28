@@ -88,6 +88,7 @@ class CodexBudgetTest(unittest.TestCase):
         import subprocess
         root = pathlib.Path(__file__).resolve().parents[1]
         fixture = root / ".context/codex-budget-test-input.txt"
+        fixture.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = pathlib.Path(tmp)
             counter = bin_dir / "calls"
@@ -126,6 +127,40 @@ class CodexBudgetTest(unittest.TestCase):
                 self.assertEqual("2", counter.read_text())
             finally:
                 fixture.unlink(missing_ok=True)
+
+    def test_project_config_changes_identity_and_precedes_profile(self):
+        home = self.root / "home"
+        user_dir = home / ".codex"
+        project_dir = self.root / ".codex"
+        user_dir.mkdir(parents=True)
+        project_dir.mkdir()
+        (user_dir / "config.toml").write_text('model = "user-model"\n', encoding="utf-8")
+        (user_dir / "ecommerce-minimal.config.toml").write_text(
+            'model = "profile-model"\nmodel_reasoning_effort = "low"\n', encoding="utf-8"
+        )
+        project = project_dir / "config.toml"
+        project.write_text('model = "project-model"\nmodel_reasoning_effort = "high"\n', encoding="utf-8")
+        with mock.patch.object(pathlib.Path, "home", return_value=home):
+            first = codex_budget.effective_identity("ecommerce-minimal", "", "", "answer")
+            project.write_text('model = "project-model"\nmodel_reasoning_effort = "high"\ntool_output_token_limit = 1000\n', encoding="utf-8")
+            second = codex_budget.effective_identity("ecommerce-minimal", "", "", "answer")
+            explicit = codex_budget.effective_identity("ecommerce-minimal", "cli-model", "medium", "answer")
+        self.assertEqual(("project-model", "high"), (first["model"], first["effort"]))
+        self.assertNotEqual(first["config_digest"], second["config_digest"])
+        self.assertEqual(("cli-model", "medium"), (explicit["model"], explicit["effort"]))
+
+    def test_line_truncated_pack_cannot_be_cached(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        value["truncated"] = True
+        value["omitted_diff_lines"] = 40
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        decision = codex_budget.decide(self.manifest)
+        self.assertTrue(decision["should_invoke_ai"])
+        self.assertEqual("incomplete_context", decision["reason"])
+        result = self.root / ".context/result.txt"
+        result.write_text("answer", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "truncated context"):
+            codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
 
     def test_cache_miss_requires_ai(self):
         result = codex_budget.decide(self.manifest)

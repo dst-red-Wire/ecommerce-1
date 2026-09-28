@@ -250,14 +250,17 @@ def normalize_usage(events: list[dict[str, Any]]) -> dict[str, Any]:
 def effective_identity(profile: str, model: str, effort: str, expectation: str) -> dict[str, Any]:
     user = Path.home() / ".codex/config.toml"
     layer = Path.home() / f".codex/{profile}.config.toml"
+    project = ROOT / ".codex/config.toml"
     base = tomllib.loads(user.read_text(encoding="utf-8")) if user.is_file() else {}
     selected = tomllib.loads(layer.read_text(encoding="utf-8")) if layer.is_file() else {}
+    local = tomllib.loads(project.read_text(encoding="utf-8")) if project.is_file() else {}
     return {
         "profile": profile,
-        "model": model or selected.get("model") or base.get("model") or "UNKNOWN",
-        "effort": effort or selected.get("model_reasoning_effort") or base.get("model_reasoning_effort") or "UNKNOWN",
+        "model": model or local.get("model") or selected.get("model") or base.get("model") or "UNKNOWN",
+        "effort": effort or local.get("model_reasoning_effort") or selected.get("model_reasoning_effort") or base.get("model_reasoning_effort") or "UNKNOWN",
         "config_digest": _digest([_sha256(user) if user.is_file() else "",
-                                  _sha256(layer) if layer.is_file() else ""]),
+                                  _sha256(layer) if layer.is_file() else "",
+                                  _sha256(project) if project.is_file() else ""]),
         "success_condition_digest": hashlib.sha256(expectation.encode()).hexdigest(),
         "generator": 2,
     }

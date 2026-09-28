@@ -421,10 +421,12 @@ def _relevant_state_digest(files: list[str], *, since: str, staged: bool) -> str
         values.append("index:" + _sha256_text(_git_text(["ls-files", "-s", "--", *files])))
     elif not since:
         values.append("index:" + _sha256_text(_git_text(["diff", "--cached", "--binary", "--", *files])))
-        for path in files:
-            target = context_input(path)
-            values.append(path + ":" + (hashlib.sha256(target.read_bytes()).hexdigest()
-                                         if target.is_file() else "MISSING"))
+    # Symbol outlines read the worktree for every scope. Keep their source in the
+    # cache identity even when the selected Git diff is staged or commit-based.
+    for path in files:
+        target = context_input(path)
+        values.append(path + ":" + (hashlib.sha256(target.read_bytes()).hexdigest()
+                                     if target.is_file() else "MISSING"))
     return _sha256_parts(values)
 
 
@@ -538,7 +540,8 @@ def build_pack(
         "## Relevant paths",
         *(files[:80] or ["(none detected)"]),
     ]
-    if len(files) > 80:
+    paths_truncated = len(files) > 80
+    if paths_truncated:
         parts.append(f"... {len(files) - 80} additional paths omitted ...")
     if candidates and not raw_files:
         parts += ["", "SCOPE_UNRESOLVED: no dirty path matches task; pass PATHS=<exact paths>."]
@@ -581,9 +584,11 @@ def build_pack(
         parts += ["", "## Diff stat", "~~~text", stat[:2048], "~~~"]
 
     diff = _diff_for_scope(since=since, staged=staged, files=files)
+    omitted_diff_lines = 0
     if diff:
         diff_lines = diff.splitlines()
-        if len(diff_lines) > max_diff_lines:
+        omitted_diff_lines = max(0, len(diff_lines) - max_diff_lines)
+        if omitted_diff_lines:
             diff_lines = diff_lines[:max_diff_lines] + [f"... diff truncated after {max_diff_lines} lines ..."]
         parts += ["", "## Focused diff", "~~~diff", "\n".join(diff_lines), "~~~"]
 
@@ -612,7 +617,8 @@ def build_pack(
         "candidate_paths": len(candidates),
         "selected_paths": len(files),
         "scope_ambiguous": bool(candidates and not raw_files),
-        "truncated": "CONTEXT TRUNCATED" in output,
+        "omitted_diff_lines": omitted_diff_lines,
+        "truncated": bool(paths_truncated or omitted_diff_lines or "CONTEXT TRUNCATED" in output),
     }
     return output, manifest
 
