@@ -102,6 +102,8 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         )
         config = tomllib.loads((ROOT / ".codex/config.toml").read_text(encoding="utf-8"))
         self.assertEqual(budget["project_doc_max_bytes"], config["project_doc_max_bytes"])
+        self.assertEqual(budget["tool_output_token_limit"], config["tool_output_token_limit"])
+        self.assertEqual(budget["skills_catalog_max_tokens"], config["skills"]["max_context_tokens"])
         self.assertTrue(config["features"]["hooks"])
         hook = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]
         self.assertEqual("command", hook["type"])
@@ -160,10 +162,30 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("payload_budget_bytes: 8192", review_policy)
 
     def test_minimal_codex_profile_declares_no_repository_owned_mcp(self):
+        budget = json.loads(
+            (ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8")
+        )
         minimal = tomllib.loads(
             (ROOT / "config/codex/profiles/ecommerce-minimal.config.toml").read_text(encoding="utf-8")
         )
         self.assertNotIn("mcp_servers", minimal)
+        self.assertEqual(budget["tool_output_token_limit"], minimal["tool_output_token_limit"])
+        self.assertEqual(budget["skills_catalog_max_tokens"], minimal["skills"]["max_context_tokens"])
+
+    def test_openai_codex_profile_allowlists_and_caps_known_docs_tools(self):
+        budget = json.loads(
+            (ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8")
+        )
+        profile = tomllib.loads(
+            (ROOT / "config/codex/profiles/ecommerce-openai.config.toml").read_text(encoding="utf-8")
+        )
+        server = profile["mcp_servers"]["openaiDeveloperDocs"]
+        self.assertEqual(budget["mcp"]["known_openai_docs_tools"], server["enabled_tools"])
+        for tool in budget["mcp"]["known_openai_docs_tools"]:
+            self.assertEqual(
+                budget["mcp"]["per_tool_output_token_limit"],
+                server["tools"][tool]["output_token_limit"],
+            )
 
 
 if __name__ == "__main__":

@@ -1,5 +1,9 @@
 # Project-local Codex context policy. Loaded only for trusted workspaces.
 project_doc_max_bytes = 4096
+tool_output_token_limit = 4096
+
+[skills]
+max_context_tokens = 1200
 
 [features]
 hooks = true

@@ -58,7 +58,7 @@ Repository-managed user profiles are installed by Ansible under ~/.codex/ withou
 
 Run Codex with --profile ecommerce-minimal by default and select the OpenAI profile only for OpenAI/Codex/API documentation work. Unrelated user-global MCP servers remain user-owned and should be disabled in their own profile when not needed.
 
-The project-local Codex configuration also caps AGENTS.md ingestion to 4096 bytes. Per-tool MCP output budgets should be configured when a tool inventory is known; do not invent tool names merely to impose a limit.
+The project-local Codex configuration caps AGENTS.md ingestion to 4096 bytes, the available-skills catalog to 1200 tokens, and every generic tool/function output retained in history to 4096 tokens. The OpenAI Docs profile allow-lists only `search_openai_docs` and `fetch_openai_doc`, with a 2048-token output budget for each.
 
 ## Historical prompts
 

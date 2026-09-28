@@ -25,12 +25,16 @@
   "hook_additional_context_max_bytes": 768,
   "mcp": {
     "default_policy": "minimal",
-    "per_tool_output_token_limit_recommended": 2048,
     "repo_owned_profiles": [
       "ecommerce-minimal",
       "ecommerce-openai"
     ],
-    "unrelated_servers": "disabled-by-user-profile-when-known"
+    "unrelated_servers": "disabled-by-user-profile-when-known",
+    "per_tool_output_token_limit": 2048,
+    "known_openai_docs_tools": [
+      "search_openai_docs",
+      "fetch_openai_doc"
+    ]
   },
   "project_doc_max_bytes": 4096,
   "review_handoff_max_bytes": 8192,
@@ -39,5 +43,7 @@
     "authoritative": false,
     "method": "utf8-bytes-div-4-ceiling"
   },
-  "version": 1
+  "version": 1,
+  "tool_output_token_limit": 4096,
+  "skills_catalog_max_tokens": 1200
 }
