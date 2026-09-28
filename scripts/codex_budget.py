@@ -151,6 +151,9 @@ def decide(manifest_path: Path, identity: dict[str, Any] | None = None) -> dict[
         "reason": "exact_input_cache_miss",
         "cached_result": "",
     }
+    if manifest.get("scope_ambiguous") is not False:
+        result["reason"] = "ambiguous_scope"
+        return result
     try:
         _verify_current(manifest)
     except (ValueError, OSError, subprocess.CalledProcessError, RuntimeError) as exc:
@@ -187,6 +190,8 @@ def mark(manifest_path: Path, result_value: str, *, identity: dict[str, Any] | N
         raise ValueError("cache mark requires completed validated read-only result")
     manifest = load_json(manifest_path)
     validate_manifest(manifest)
+    if manifest.get("scope_ambiguous") is not False:
+        raise ValueError("ambiguous context scope is not reusable")
     _verify_current(manifest)
     if manifest.get("truncated"):
         raise ValueError("truncated context is not reusable")
@@ -356,7 +361,8 @@ def run_task(args: argparse.Namespace) -> int:
     measurement["duration_seconds"] = round(time.monotonic() - start, 3)
     if final:
         print(final)
-    if args.cacheable and args.expect and succeeded and not used_tools:
+    if (args.cacheable and args.expect and succeeded and not used_tools
+            and data.get("scope_ambiguous") is False and not data.get("truncated")):
         result_path = ROOT / f"{stem}.result.txt"
         _atomic_text(result_path, final)
         mark(manifest_path, str(result_path.relative_to(ROOT)), identity=identity,

@@ -1,5 +1,10 @@
+import hashlib
 import json
+import os
 import pathlib
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -38,6 +43,7 @@ class CodexBudgetTest(unittest.TestCase):
                     "max_bytes": 4096,
                     "cache_key": "a" * 64,
                     "head_sha": "b" * 40,
+                    "scope_ambiguous": False,
                     "pack_path": ".context/codex-context.md",
                     "pack_sha256": __import__("hashlib").sha256(self.pack.read_bytes()).hexdigest(),
                 }
@@ -127,6 +133,102 @@ class CodexBudgetTest(unittest.TestCase):
                 self.assertEqual("2", counter.read_text())
             finally:
                 fixture.unlink(missing_ok=True)
+
+    def test_ambiguous_scope_rejected_from_generation_through_cache_lookup(self):
+        source = pathlib.Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            checkout = pathlib.Path(tmp) / "checkout"
+            subprocess.run(["git", "clone", "-q", "--shared", str(source), str(checkout)], check=True)
+            for relative in ("scripts/context-pack.py", "scripts/codex_budget.py"):
+                target = checkout / relative
+                shutil.copy2(source / relative, target)
+                with target.open("a", encoding="utf-8") as stream:
+                    stream.write("\n# ambiguous scope fixture\n")
+
+            pack = checkout / ".context/ambiguous.md"
+            manifest_path = checkout / ".context/ambiguous.json"
+            generated = subprocess.run(
+                [sys.executable, "scripts/context-pack.py", "--task", "summarize",
+                 "--output", ".context/ambiguous.md", "--manifest", ".context/ambiguous.json"],
+                cwd=checkout, text=True, capture_output=True,
+            )
+            self.assertEqual(0, generated.returncode, generated.stderr)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(2, manifest["candidate_paths"])
+            self.assertEqual([], manifest["relevant_paths"])
+            self.assertTrue(manifest["scope_ambiguous"])
+            self.assertFalse(manifest["truncated"])
+            self.assertIn("SCOPE_UNRESOLVED", pack.read_text(encoding="utf-8"))
+
+            result = checkout / ".context/answer.txt"
+            result.write_text("validated answer", encoding="utf-8")
+            with mock.patch.object(codex_budget, "ROOT", checkout), mock.patch.object(
+                codex_budget, "CONTRACT", checkout / "config/contracts/codex-token-budget.json"
+            ):
+                marker_path = codex_budget._cache_path(manifest["cache_key"], {})
+            recorded = subprocess.run(
+                [sys.executable, "scripts/codex_budget.py", "mark",
+                 "--manifest", str(manifest_path), "--result", ".context/answer.txt",
+                 "--validated", "--read-only"],
+                cwd=checkout, text=True, capture_output=True,
+            )
+            self.assertNotEqual(0, recorded.returncode)
+            self.assertIn("ambiguous context scope", recorded.stderr)
+            self.assertFalse(marker_path.exists())
+
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(json.dumps({
+                "schema_version": 2, "status": "COMPLETE_VALIDATED",
+                "cache_key": manifest["cache_key"], "identity": {},
+                "head_sha": manifest["head_sha"], "result_path": ".context/answer.txt",
+                "result_sha256": hashlib.sha256(result.read_bytes()).hexdigest(),
+            }), encoding="utf-8")
+            lookup = subprocess.run(
+                [sys.executable, "scripts/codex_budget.py", "decide",
+                 "--manifest", str(manifest_path)],
+                cwd=checkout, text=True, capture_output=True,
+            )
+            self.assertEqual(0, lookup.returncode, lookup.stderr)
+            decision = json.loads(lookup.stdout)
+            self.assertTrue(decision["should_invoke_ai"])
+            self.assertEqual("ambiguous_scope", decision["reason"])
+            self.assertEqual("", decision["cached_result"])
+
+            binary = pathlib.Path(tmp) / "bin"
+            binary.mkdir()
+            fake_codex = binary / "codex"
+            fake_codex.write_text(
+                f"#!{sys.executable}\n"
+                "import json, sys\n"
+                "sys.stdin.read()\n"
+                "for event in ({'type':'turn.started'},"
+                "{'type':'item.completed','item':{'type':'agent_message','text':'answer'}},"
+                "{'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}):"
+                " print(json.dumps(event))\n",
+                encoding="utf-8",
+            )
+            fake_codex.chmod(0o755)
+            env = dict(os.environ, PATH=f"{binary}:{os.environ['PATH']}")
+            run = subprocess.run(
+                [sys.executable, "scripts/codex_budget.py", "run",
+                 "--task", "summarize", "--cacheable", "--expect", "answer"],
+                cwd=checkout, env=env, text=True, capture_output=True,
+            )
+            self.assertEqual(0, run.returncode, run.stderr)
+            metrics = list((checkout / ".context/codex-budget/metrics").glob("*.json"))
+            self.assertEqual(1, len(metrics))
+            self.assertEqual("ambiguous_scope", json.loads(metrics[0].read_text())["cache"])
+            self.assertEqual([marker_path], list(marker_path.parent.glob("*.json")))
+
+    def test_missing_ambiguity_signal_is_not_cacheable(self):
+        value = json.loads(self.manifest.read_text(encoding="utf-8"))
+        value.pop("scope_ambiguous")
+        self.manifest.write_text(json.dumps(value), encoding="utf-8")
+        self.assertEqual("ambiguous_scope", codex_budget.decide(self.manifest)["reason"])
+        result = self.root / ".context/result.txt"
+        result.write_text("answer", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "ambiguous context scope"):
+            codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
 
     def test_project_config_changes_identity_and_precedes_profile(self):
         home = self.root / "home"
