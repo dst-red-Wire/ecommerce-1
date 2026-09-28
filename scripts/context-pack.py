@@ -371,6 +371,24 @@ def _contract_digest(level: str, cfg: dict, services: list[str]) -> str:
     return _sha256_parts(values)
 
 
+def _relevant_state_digest(
+    files: list[str],
+    *,
+    since: str,
+    staged: bool,
+) -> str:
+    values = [f"scope:since={since}:staged={staged}"]
+    for path in files:
+        target = context_input(path)
+        if target.is_file():
+            values.append(path + ":" + hashlib.sha256(target.read_bytes()).hexdigest())
+        else:
+            values.append(path + ":MISSING")
+    diff = _diff_for_scope(since=since, staged=staged, files=files)
+    values.append("diff:" + _sha256_text(diff))
+    return _sha256_parts(values)
+
+
 def _cache_key(
     *,
     task_digest: str,
@@ -439,7 +457,7 @@ def build_pack(
 
     budget = _load_budget_contract()
     task_digest = _sha256_text(task)
-    relevant_paths_digest = _sha256_parts(files)
+    relevant_paths_digest = _relevant_state_digest(files, since=since, staged=staged)
     applicable_contract_digest = _contract_digest(level, cfg, services)
     context_policy_version = _policy_version(cfg, budget)
     cache_key = _cache_key(

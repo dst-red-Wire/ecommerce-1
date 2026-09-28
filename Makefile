@@ -332,7 +332,7 @@ qualification-proof: workspace-check ## Run one exact-SHA qualification plus its
 .PHONY: context diff-context failure-context review-budget codex-budget codex-budget-mark nx-graph bazel-verify pr-monitor
 
 context: ## Build task-delta context pack; optional SINCE/PATHS/STAGED/WORKING_TREE/PRINT
-	@test -n "$(TASK)" || { printf '%s\\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
+	@test -n "$(TASK)" || { printf '%s\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
 	@$(PYTHON) scripts/context-pack.py --task "$(TASK)" $(if $(SINCE),--since "$(SINCE)",) $(if $(PATHS),--paths $(PATHS),) $(if $(STAGED),--staged,) $(if $(WORKING_TREE),--working-tree,) $(if $(PRINT),--print,)
 
 diff-context: ## Build compact diff-only context pack (hard-capped by codex-token-budget)
@@ -345,15 +345,15 @@ pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handof
 	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
 
 review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
-	@test -n "$(PR)" || { printf '%s\\n' 'ERROR: PR=<number> is required'; exit 2; }
-	@test -n "$(SNAPSHOT)" || { printf '%s\\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
+	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
+	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
 	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
 
 codex-budget: ## Decide whether the exact current context can reuse a marked Codex result
 	@$(PYTHON) scripts/codex_budget.py decide --manifest "$${MANIFEST:-.context/codex-context.json}"
 
 codex-budget-mark: ## Mark RESULT=.context/... reusable only for the exact current context key
-	@test -n "$(RESULT)" || { printf '%s\\n' 'ERROR: RESULT=.context/<result> is required'; exit 2; }
+	@test -n "$(RESULT)" || { printf '%s\n' 'ERROR: RESULT=.context/<result> is required'; exit 2; }
 	@$(PYTHON) scripts/codex_budget.py mark --manifest "$${MANIFEST:-.context/codex-context.json}" --result "$(RESULT)"
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts

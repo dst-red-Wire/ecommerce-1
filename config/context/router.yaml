@@ -9,14 +9,19 @@ levels:
     max_excerpt_lines: 60
     patterns:
       - architecture.lock.yaml
+      - docs/architecture/**
       - .codex/**
       - config/context/**
       - config/codex/**
       - config/infrastructure/**
       - config/contracts/review-policy.yaml
+      - config/contracts/ci-topology.yaml
+      - config/contracts/resilience-governance.yaml
       - config/contracts/qualification-execution-policy.yaml
       - config/contracts/security-trust-zones.yaml
       - config/contracts/security-scan-policy.yaml
+      - config/contracts/service-slo.yaml
+      - config/contracts/engineering-metrics-policy.yaml
       - platform/**
       - gitops/**
       - security/**
@@ -26,17 +31,33 @@ levels:
       - control-plane
       - tekton
       - fleet
+      - rancher
       - terraform
       - opentofu
       - ansible
       - kubernetes
       - rke2
+      - iam
+      - keycloak
       - security
       - cve
       - qce
+      - slo
+      - error budget
+      - engineering metrics
       - context engineering
       - codex
       - mcp
+      - kratix
+      - kustomize
+      - helm
+      - tls
+      - pull request
+      - pr-loop
+      - finish-pr
+      - owner authorization
+      - review policy
+      - delivery governance
       - mlops
       - aiops
       - infrastructure
@@ -83,14 +104,21 @@ canonical:
     - architecture.lock.yaml
     - docs/architecture/EXACT_TOPOLOGY_V5.md
     - config/contracts/review-policy.yaml
+    - config/contracts/ci-topology.yaml
+    - config/contracts/resilience-governance.yaml
     - config/contracts/qualification-execution-policy.yaml
+    - config/contracts/security-trust-zones.yaml
     - config/contracts/security-scan-policy.yaml
+    - config/contracts/service-slo.yaml
+    - config/contracts/engineering-metrics-policy.yaml
     - config/infrastructure/deployment-waves.yaml
+    - config/infrastructure/kratix-platform.yaml
     - docs/architecture/AIOPS_TOPOLOGY_V1.md
     - docs/architecture/MLOPS_TOPOLOGY_V1.md
   L1:
     - config/contracts/service-ownership.yaml
     - config/contracts/dependency-map.yaml
+    - config/contracts/event-contracts.yaml
     - config/contracts/public-api-contracts.yaml
   L0: []
 
