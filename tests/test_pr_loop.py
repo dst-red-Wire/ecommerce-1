@@ -1444,6 +1444,23 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_github_snapshot_rejects_malformed_full_sha(self):
+        payload = {
+            "number": 164,
+            "head": {"sha": "z" * 40},
+            "base": {"sha": "b" * 40},
+        }
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with mock.patch.object(REPOCTL, "run", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "invalid full head SHA"):
+                REPOCTL._github_pr_snapshot("gh", "owner/repo", 164)
+        payload["head"]["sha"] = "a" * 40
+        payload["base"]["sha"] = "short"
+        response = subprocess.CompletedProcess([], 0, json.dumps(payload), "")
+        with mock.patch.object(REPOCTL, "run", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "invalid full base SHA"):
+                REPOCTL._github_pr_snapshot("gh", "owner/repo", 164)
+
     def test_json_head_change_rejects_old_sha_conclusions(self):
         old_sha, current_sha = "a" * 40, "b" * 40
         result = REPOCTL._pr_loop_empty_result(164)

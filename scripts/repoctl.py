@@ -8401,6 +8401,10 @@ def _github_pr_snapshot(gh: str, name_with_owner: str, pr_number: int) -> dict:
     head_repo = head.get("repo") or {}
     head_sha = str(head.get("sha") or "")
     base_sha = str(base.get("sha") or "")
+    if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
+        raise RuntimeError(f"GitHub pull request #{pr_number} has invalid full head SHA")
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError(f"GitHub pull request #{pr_number} has invalid full base SHA")
     merged = bool(payload.get("merged_at"))
     return {
         "number": int(payload.get("number") or pr_number),
@@ -9916,7 +9920,7 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
     # GitHub can advance the PR while a transition is in flight. The JSON
     # envelope must describe the newest observed head, never the old snapshot.
     current_head = result.get("current_head_sha") or result.get("head_sha")
-    if isinstance(current_head, str) and len(current_head) == 40:
+    if isinstance(current_head, str) and re.fullmatch(r"[0-9a-f]{40}", current_head):
         head_changed = current_head != result.get("head_sha")
         if head_changed:
             result["head_sha"] = current_head
