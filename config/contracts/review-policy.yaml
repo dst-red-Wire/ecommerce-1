@@ -184,6 +184,13 @@ repository_delivery:
       next_action: RESTART_EXACT_BASE_CONTROLLER
       stop_before: [sync-pr-base, qualification, git-push, finish-pr]
       restart_controller: fresh-checkout-at-current-exact-base-sha
+    sync_recovery:
+      capture_before_local_merge: [branch, head_sha, main_sha, tree_sha, clean_worktree]
+      prepublication_failure: restore-exact-captured-checkout
+      rollback_scope: invocation-owned-unpublished-merge-only
+      verification: [branch, head_sha, tree_sha, clean_worktree, no_merge_in_progress]
+      failed_verification: SYNC_RECOVERY_FAILED
+      uncertain_push_outcome: HEAD_SYNC_UNCONFIRMED
     chatgpt_handoff:
       trigger: canonical-bounded-handoff
       state: CHATGPT_REVIEW_REQUIRED

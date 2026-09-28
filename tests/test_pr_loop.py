@@ -887,6 +887,31 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertFalse(any("qualification-proof" in call.args[0] for call in run.call_args_list))
         sync.assert_not_called()
 
+    def test_base_change_during_sync_reports_recovery_and_restarts_controller(self):
+        patches = self.common()
+        sync_result = {
+            "status": "FAIL", "error": "BASE_CHANGED",
+            "current_base_sha": "d" * 40, "origin_main_sha": "d" * 40,
+            "capture_before_mutation": "PASS", "restore_on_failure": "PASS",
+            "restore_verification": "PASS",
+        }
+        def git_run(command, **_kwargs):
+            return self.completed(1 if command[:3] == ["git", "merge-base", "--is-ancestor"] else 0)
+
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
+        ), mock.patch.object(
+            REPOCTL, "run", side_effect=git_run
+        ), mock.patch.object(
+            REPOCTL, "sync_pr_base", return_value=sync_result
+        ):
+            rc, payload = self.run_json(dry_run=False)
+        self.assertEqual(1, rc)
+        self.assertEqual("BASE_CHANGED", payload["state"])
+        self.assertEqual("RESTART_EXACT_BASE_CONTROLLER", payload["next_action"])
+        self.assertEqual("PASS", payload["sync"]["restore_verification"])
+        self.assertEqual("MISSING", payload["qualification"]["status"])
+
     def test_base_change_at_merge_requirements_never_syncs_with_old_controller(self):
         patches = self.common()
         reviews = {

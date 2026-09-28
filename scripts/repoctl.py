@@ -7681,6 +7681,15 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
         "restart_controller": "fresh-checkout-at-current-exact-base-sha",
     }:
         return {}
+    if normalized.pop("sync_recovery", None) != {
+        "capture_before_local_merge": ["branch", "head_sha", "main_sha", "tree_sha", "clean_worktree"],
+        "prepublication_failure": "restore-exact-captured-checkout",
+        "rollback_scope": "invocation-owned-unpublished-merge-only",
+        "verification": ["branch", "head_sha", "tree_sha", "clean_worktree", "no_merge_in_progress"],
+        "failed_verification": "SYNC_RECOVERY_FAILED",
+        "uncertain_push_outcome": "HEAD_SYNC_UNCONFIRMED",
+    }:
+        return {}
     exact_sha = normalized.get("exact_sha")
     if (
         not isinstance(exact_sha, dict)
@@ -10896,6 +10905,68 @@ def _pr_loop_base_changed(result: dict, change: PRBaseChanged, *, json_output: b
     return 1
 
 
+def _capture_pr_sync_state(branch: str, head_sha: str, main_sha: str) -> dict:
+    """Capture the clean published checkout immediately before the local merge."""
+    actual_branch = git("branch", "--show-current").strip()
+    actual_head = git("rev-parse", "HEAD").strip()
+    tree_sha = git("rev-parse", "HEAD^{tree}").strip()
+    if (
+        actual_branch != branch or actual_head != head_sha
+        or re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError("cannot capture a clean exact PR checkout before sync mutation")
+    return {"branch": branch, "head_sha": head_sha, "main_sha": main_sha, "tree_sha": tree_sha}
+
+
+def _restore_pr_sync_state(snapshot: dict) -> tuple[bool, str]:
+    """Restore only this invocation's unpublished merge, then prove exact state."""
+    branch = snapshot["branch"]
+    old_head = snapshot["head_sha"]
+    if git("branch", "--show-current").strip() != branch:
+        return False, "source branch changed during sync recovery"
+    current_head = git("rev-parse", "HEAD").strip()
+    merge_head = run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture=True)
+    if merge_head.returncode == 0:
+        if current_head != old_head or merge_head.stdout.strip() != snapshot["main_sha"]:
+            return False, "merge in progress is not this invocation's merge"
+        aborted = run(["git", "merge", "--abort"], check=False, capture=True)
+        if aborted.returncode:
+            return False, "git merge --abort failed"
+    elif current_head != old_head:
+        parents = run(
+            ["git", "rev-list", "--parents", "-n", "1", current_head],
+            check=False, capture=True,
+        )
+        fields = parents.stdout.strip().split() if parents.returncode == 0 else []
+        if fields != [current_head, old_head, snapshot["main_sha"]]:
+            return False, "HEAD is not this invocation's merge commit"
+        restored_files = run(
+            ["git", "restore", "--source", old_head, "--staged", "--worktree", "--", ":/"],
+            check=False, capture=True,
+        )
+        if restored_files.returncode:
+            return False, "cannot restore files from initial PR head"
+        updated = run(
+            ["git", "update-ref", f"refs/heads/{branch}", old_head, current_head],
+            check=False, capture=True,
+        )
+        if updated.returncode:
+            run(
+                ["git", "restore", "--source", current_head, "--staged", "--worktree", "--", ":/"],
+                check=False, capture=True,
+            )
+            return False, "source branch changed during compare-and-restore"
+    verified = (
+        git("branch", "--show-current").strip() == branch
+        and git("rev-parse", "HEAD").strip() == old_head
+        and git("rev-parse", "HEAD^{tree}").strip() == snapshot["tree_sha"]
+        and not git("status", "--porcelain", "--untracked-files=all").strip()
+        and run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture=True).returncode != 0
+    )
+    return verified, "PASS" if verified else "restored checkout verification failed"
+
+
 def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
     """Reconcile one exact PR head with main; never publish unqualified history."""
     _require_trusted_pr_execution(
@@ -10906,6 +10977,9 @@ def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -
     sync = {
         "status": "NOT_REQUIRED", "old_head_sha": pr["head_sha"],
         "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED",
+        "capture_before_mutation": "NOT_ATTEMPTED",
+        "restore_on_failure": "NOT_ATTEMPTED",
+        "restore_verification": "NOT_ATTEMPTED",
         "force_push_used": False, "rebase_used": False,
     }
     current = _pr_loop_current_base(
@@ -10935,66 +11009,92 @@ def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -
     if dry_run:
         return sync
     _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
-    merge = run(
-        ["git", "merge", "--no-ff", "-S", "-m",
-         f"chore(governance): sync PR #{pr['number']} with current main", main_sha],
-        check=False, capture=True,
-    )
-    if merge.returncode:
-        in_progress = run(
-            ["git", "rev-parse", "--verify", "MERGE_HEAD"],
-            check=False, capture=True,
-        ).returncode == 0
-        aborted = (
-            run(["git", "merge", "--abort"], check=False, capture=True)
-            if in_progress else None
-        )
-        restored = (
-            (not in_progress or (aborted is not None and aborted.returncode == 0))
-            and git("rev-parse", "HEAD").strip() == local_sha
-            and not git("status", "--porcelain", "--untracked-files=all").strip()
-        )
-        sync.update(status="FAIL", error="SYNC_CONFLICT" if in_progress else "SYNC_MERGE_FAILED", restore_on_failure="PASS" if restored else "FAIL", worktree_clean="PASS" if restored else "FAIL")
+    captured = _capture_pr_sync_state(pr["head_branch"], local_sha, main_sha)
+    sync["capture_before_mutation"] = "PASS"
+
+    def fail_before_publication(error: str, detail: str = "") -> dict:
+        sync.update(status="FAIL", error=error)
+        if detail:
+            sync["failure_detail"] = detail
+        try:
+            restored, reason = _restore_pr_sync_state(captured)
+        except (OSError, RuntimeError, ValueError) as exc:
+            restored, reason = False, str(exc)
+        sync["restore_on_failure"] = "PASS" if restored else "FAIL"
+        sync["restore_verification"] = "PASS" if restored else "FAIL"
+        sync["worktree_clean"] = "PASS" if restored else "FAIL"
         if not restored:
+            sync["failure_reason"] = error
             sync["error"] = "SYNC_RECOVERY_FAILED"
+            sync["recovery_detail"] = reason
         return sync
-    new_sha = git("rev-parse", "HEAD").strip()
-    sync["new_head_sha"] = new_sha
-    if (
-        not re.fullmatch(r"[0-9a-f]{40}", new_sha) or new_sha == local_sha
-        or run(["git", "merge-base", "--is-ancestor", main_sha, new_sha], check=False, capture=True).returncode
-        or run(["git", "verify-commit", "--raw", new_sha], check=False, capture=True).returncode
-        or git("status", "--porcelain", "--untracked-files=all").strip()
-    ):
-        sync.update(status="FAIL", error="SIGNED_MERGE_VERIFICATION_FAILED")
-        return sync
-    _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
-    # Qualification is run before the branch is published. Its evidence binds
-    # the exact new commit and the main SHA merged above.
-    qualified = run(
-        _controller_command("qualification-proof", "--base", main_sha),
-        check=False, capture=True,
-        env={**os.environ, "REPOCTL_TRUSTED_HEAD_SHA": new_sha},
-    )
-    proof = _pr_loop_qualification(main_sha, new_sha)
-    sync["qualification"] = proof
-    if qualified.returncode or proof.get("status") != "PASS" or proof.get("base_sha") != main_sha:
-        sync.update(status="FAIL", error="QUALIFICATION_FAILED")
-        return sync
-    sync["qualification"]["source"] = "executed"
-    _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
-    # A normal push is inherently non-rewriting. Recheck the expected remote
-    # head immediately beforehand so concurrent writers fail closed.
-    observed_remote = _remote_branch_head(pr["head_branch"])
-    if observed_remote != local_sha:
-        sync.update(status="FAIL", error="REMOTE_HEAD_CHANGED")
-        return sync
-    pushed = run(
-        ["git", "push", "origin", f"HEAD:refs/heads/{pr['head_branch']}"],
-        check=False, capture=True,
-    )
-    if pushed.returncode:
-        sync.update(status="FAIL", push_result="FAIL", error="PUSH_FAILED")
+
+    try:
+        merge = run(
+            ["git", "merge", "--no-ff", "-S", "-m",
+             f"chore(governance): sync PR #{pr['number']} with current main", main_sha],
+            check=False, capture=True,
+        )
+        if merge.returncode:
+            in_progress = run(
+                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+                check=False, capture=True,
+            ).returncode == 0
+            return fail_before_publication(
+                "SYNC_CONFLICT" if in_progress else "SYNC_MERGE_FAILED"
+            )
+        new_sha = git("rev-parse", "HEAD").strip()
+        sync["new_head_sha"] = new_sha
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", new_sha) or new_sha == local_sha
+            or run(["git", "merge-base", "--is-ancestor", main_sha, new_sha], check=False, capture=True).returncode
+            or run(["git", "verify-commit", "--raw", new_sha], check=False, capture=True).returncode
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            return fail_before_publication("SIGNED_MERGE_VERIFICATION_FAILED")
+        _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
+        # Qualification binds the new commit to the merged main before push.
+        qualified = run(
+            _controller_command("qualification-proof", "--base", main_sha),
+            check=False, capture=True,
+            env={**os.environ, "REPOCTL_TRUSTED_HEAD_SHA": new_sha},
+        )
+        proof = _pr_loop_qualification(main_sha, new_sha)
+        sync["qualification"] = proof
+        if qualified.returncode or proof.get("status") != "PASS" or proof.get("base_sha") != main_sha:
+            return fail_before_publication("QUALIFICATION_FAILED")
+        sync["qualification"]["source"] = "executed"
+        _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
+        # The expected remote head is checked immediately before a normal push.
+        if _remote_branch_head(pr["head_branch"]) != local_sha:
+            return fail_before_publication("REMOTE_HEAD_CHANGED")
+    except PRBaseChanged as exc:
+        sync["current_base_sha"] = exc.github_base
+        sync["origin_main_sha"] = exc.origin_main
+        return fail_before_publication("BASE_CHANGED", str(exc))
+    except Exception as exc:
+        return fail_before_publication("SYNC_PREPUBLICATION_FAILED", str(exc))
+
+    try:
+        pushed = run(
+            ["git", "push", "origin", f"HEAD:refs/heads/{pr['head_branch']}"],
+            check=False, capture=True,
+        )
+        push_failed = pushed.returncode != 0
+    except (OSError, RuntimeError) as exc:
+        push_failed = True
+        sync["failure_detail"] = str(exc)
+    if push_failed:
+        sync["push_result"] = "FAIL"
+        try:
+            remote_after_push = _remote_branch_head(pr["head_branch"])
+            github_after_push = _github_pr_snapshot(gh, repository, pr["number"])
+        except (OSError, RuntimeError):
+            sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+        if remote_after_push == local_sha and github_after_push["head_sha"] == local_sha:
+            return fail_before_publication("PUSH_FAILED")
+        sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
         return sync
     sync["push_result"] = "PASS"
     try:
@@ -11551,6 +11651,15 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         result["sync"] = sync
         if sync["status"] == "FAIL":
             error = sync.get("error", "SYNC_FAILED")
+            if error == "BASE_CHANGED":
+                return _pr_loop_base_changed(
+                    result,
+                    PRBaseChanged(
+                        snapshot["base_sha"], sync["current_base_sha"],
+                        sync["origin_main_sha"],
+                    ),
+                    json_output=json_output,
+                )
             result["state"] = "SYNC_CONFLICT" if error == "SYNC_CONFLICT" else error
             result["next_action"] = "FIX_SYNC_CONFLICTS" if error == "SYNC_CONFLICT" else error
             result["blockers"].append(error)
