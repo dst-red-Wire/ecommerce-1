@@ -10102,7 +10102,15 @@ def _pr_loop_post_merge(
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     result["cleanup_result"] = "PASS"
-    if result["roadmap_result"] == "FAIL":
+    if result["roadmap_result"] == "NOT_ATTEMPTED":
+        try:
+            roadmap_rc = _roadmap_followup_after_merge()
+        except Exception as exc:
+            result["roadmap_result"] = "FAIL"
+            result["blockers"].append(f"roadmap follow-up raised: {exc}")
+        else:
+            result["roadmap_result"] = "PASS" if roadmap_rc == 0 else "FAIL"
+    if result["roadmap_result"] != "PASS":
         result["next_action"] = "FIX_ROADMAP_SYNC"
         _emit_pr_loop_result(result, json_output=json_output)
         return 1

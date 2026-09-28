@@ -1362,7 +1362,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL, "run", return_value=self.completed(0)
         ), mock.patch.object(
             REPOCTL, "branch_cleanup", return_value=0
-        ):
+        ), mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=0
+        ) as roadmap:
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 rc = REPOCTL._pr_loop_post_merge(
@@ -1373,6 +1375,41 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("DONE", payload["state"])
         self.assertEqual("PASS", payload["merge_result"])
         self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("PASS", payload["roadmap_result"])
+        roadmap.assert_called_once_with()
+
+    def test_cleanup_recovery_cannot_finish_without_roadmap(self):
+        result = REPOCTL._pr_loop_empty_result(161)
+        result.update({"head_sha": self.SHA_A, "merge_result": "PASS"})
+        merged = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+
+        def git(*args, **_kwargs):
+            if args[:2] == ("status", "--porcelain"):
+                return ""
+            if args == ("branch", "--show-current"):
+                return "main\n"
+            return ""
+
+        with mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(0)
+        ), mock.patch.object(
+            REPOCTL, "branch_cleanup", return_value=0
+        ), mock.patch.object(
+            REPOCTL, "_roadmap_followup_after_merge", return_value=1
+        ) as roadmap:
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL._pr_loop_post_merge(
+                    "gh", "owner/repo", merged, result, dry_run=False, json_output=True
+                )
+        payload = json.loads(stream.getvalue())
+        roadmap.assert_called_once_with()
+        self.assertEqual(1, rc)
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("PASS", payload["cleanup_result"])
+        self.assertEqual("FAIL", payload["roadmap_result"])
+        self.assertEqual("FIX_ROADMAP_SYNC", payload["next_action"])
 
     def test_pr_loop_cleanup_pass_does_not_hide_roadmap_failure(self):
         result = REPOCTL._pr_loop_empty_result(161)
