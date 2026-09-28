@@ -11084,24 +11084,30 @@ def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -
     except (OSError, RuntimeError) as exc:
         push_failed = True
         sync["failure_detail"] = str(exc)
+    confirmed = None
     if push_failed:
-        sync["push_result"] = "FAIL"
         try:
             remote_after_push = _remote_branch_head(pr["head_branch"])
             github_after_push = _github_pr_snapshot(gh, repository, pr["number"])
         except (OSError, RuntimeError):
+            sync.update(status="FAIL", push_result="UNKNOWN", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+        if remote_after_push == new_sha and github_after_push["head_sha"] == new_sha:
+            confirmed = github_after_push
+        elif remote_after_push == local_sha and github_after_push["head_sha"] == local_sha:
+            sync["push_result"] = "FAIL"
+            return fail_before_publication("PUSH_FAILED")
+        else:
+            sync.update(status="FAIL", push_result="UNKNOWN", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+    sync["push_result"] = "PASS"
+    sync.pop("failure_detail", None)
+    if confirmed is None:
+        try:
+            confirmed = _github_pr_snapshot(gh, repository, pr["number"])
+        except RuntimeError:
             sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
             return sync
-        if remote_after_push == local_sha and github_after_push["head_sha"] == local_sha:
-            return fail_before_publication("PUSH_FAILED")
-        sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
-        return sync
-    sync["push_result"] = "PASS"
-    try:
-        confirmed = _github_pr_snapshot(gh, repository, pr["number"])
-    except RuntimeError:
-        sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
-        return sync
     if confirmed["head_sha"] != new_sha:
         sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
         return sync

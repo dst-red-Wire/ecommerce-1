@@ -50,7 +50,7 @@ class SyncPRBaseTests(unittest.TestCase):
             patch.stop()
 
     def snapshot(self, *_):
-        return {**self.pr, "head_sha": self.remote}
+        return {**self.pr, "head_sha": getattr(self, "github_head", self.remote)}
 
     def ref(self, name):
         return self.MAIN if name == "origin/main" else self.remote
@@ -93,6 +93,8 @@ class SyncPRBaseTests(unittest.TestCase):
             self.merge_in_progress = False
         if command[:2] == ["git", "push"]:
             if getattr(self, "push_fails", False):
+                if getattr(self, "push_publishes", False):
+                    self.remote = self.NEW
                 return subprocess.CompletedProcess(command, 1, "", "rejected")
             self.remote = self.NEW
         return subprocess.CompletedProcess(command, 0, "", "")
@@ -202,6 +204,41 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("PASS", result["restore_verification"])
         self.assertEqual(self.OLD, self.head)
         self.assertEqual(self.OLD, self.remote)
+
+    def test_nonzero_push_is_pass_when_remote_and_github_confirm_new_head(self):
+        self.main_is_ancestor = False
+        self.push_fails = True
+        self.push_publishes = True
+        result = REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual("PASS", result["push_result"])
+        self.assertEqual(self.NEW, result["new_head_sha"])
+        self.assertEqual(self.NEW, self.head)
+        self.assertEqual("NOT_ATTEMPTED", result["restore_on_failure"])
+
+    def test_nonzero_push_with_mixed_remote_heads_is_unconfirmed(self):
+        self.main_is_ancestor = False
+        self.push_fails = True
+        self.push_publishes = True
+        self.github_head = self.OLD
+        result = REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertEqual("HEAD_SYNC_UNCONFIRMED", result["error"])
+        self.assertEqual("UNKNOWN", result["push_result"])
+        self.assertEqual(self.NEW, self.head)
+        self.assertEqual("NOT_ATTEMPTED", result["restore_on_failure"])
+
+    def test_nonzero_push_with_inaccessible_remote_is_unconfirmed(self):
+        self.main_is_ancestor = False
+        self.push_fails = True
+        with mock.patch.object(
+            REPOCTL, "_remote_branch_head",
+            side_effect=[self.OLD, RuntimeError("remote unavailable")],
+        ):
+            result = REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertEqual("HEAD_SYNC_UNCONFIRMED", result["error"])
+        self.assertEqual("UNKNOWN", result["push_result"])
+        self.assertEqual(self.NEW, self.head)
+        self.assertEqual("NOT_ATTEMPTED", result["restore_on_failure"])
 
     def test_recovery_failure_is_reported_without_false_verification(self):
         self.main_is_ancestor = False
