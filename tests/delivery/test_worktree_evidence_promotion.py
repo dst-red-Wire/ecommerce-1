@@ -27,7 +27,11 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
         (root / ".gitignore").write_text(".context/\n", encoding="utf-8")
         (root / "README.md").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=root, check=True)
-        subprocess.run(["git", "commit", "-qm", "base"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "base"],
+            cwd=root,
+            check=True,
+        )
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
 
     def test_make_ci_is_evidence_producing_and_ci_full_remains_available(self):
@@ -266,7 +270,11 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                 candidate = REPOCTL._load_promotable_worktree_evidence(base)
                 self.assertIsNotNone(candidate)
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-                subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
+                subprocess.run(
+                    ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "change"],
+                    cwd=root,
+                    check=True,
+                )
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
                 candidate["verification"]["execution_profile"] = "static"
                 self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, candidate))
@@ -320,7 +328,11 @@ class WorktreeEvidencePromotionTests(unittest.TestCase):
                     "gates": [{"gate": "governance", "status": "PASS", "duration_seconds": 1.0}],
                 }
                 subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-                subprocess.run(["git", "commit", "-qm", "change"], cwd=root, check=True)
+                subprocess.run(
+                    ["git", "-c", "commit.gpgsign=false", "commit", "-qm", "change"],
+                    cwd=root,
+                    check=True,
+                )
                 head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
                 self.assertIsNone(REPOCTL._promote_worktree_evidence(base, head, source))
 

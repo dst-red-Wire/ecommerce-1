@@ -244,14 +244,14 @@ class ApiCodegenBundleTest(unittest.TestCase):
             )
             subprocess.run(
                 ["git", "-c", "user.name=CLI Test", "-c", "user.email=cli@example.invalid",
-                 "commit", "--allow-empty", "-qm", "fixture"],
+                 "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "fixture"],
                 cwd=root,
                 check=True,
             )
             env = os.environ.copy()
             env["PATH"] = f"{bindir}:{env['PATH']}"
             result = subprocess.run(
-                ["python3", "scripts/repoctl.py", "api-generate", "--target", "go", "--service", "product"],
+                ["python3", "-c", "import sys; sys.path.insert(0, 'scripts'); import repoctl; raise SystemExit(repoctl.api_generate('go'))"],
                 cwd=root,
                 env=env,
                 text=True,

@@ -1,0 +1,16 @@
+---
+local_harbor_version: "2.13.2"
+local_harbor_archive: ""
+local_harbor_archive_sha256: ""
+local_harbor_nested_archive_sha256: ""
+local_harbor_docker_rpm_root: ""
+local_harbor_docker_signing_key: ""
+local_harbor_docker_signing_key_sha256: ""
+local_harbor_admin_password: ""
+local_harbor_database_password: ""
+local_harbor_tls_certificate: ""
+local_harbor_tls_private_key: ""
+local_harbor_tls_ca: ""
+local_harbor_external_port: 0
+local_harbor_project: machine-images
+local_harbor_images: []

@@ -1,0 +1,42 @@
+APP_NAME = Ecommerce local qualification Gitea
+RUN_USER = git
+RUN_MODE = prod
+
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+
+[repository]
+ROOT = /var/lib/gitea/repositories
+DEFAULT_BRANCH = main
+
+[server]
+DOMAIN = 127.0.0.1
+HTTP_ADDR = 127.0.0.1
+HTTP_PORT = 3000
+ROOT_URL = http://127.0.0.1:3000/
+DISABLE_SSH = false
+START_SSH_SERVER = true
+SSH_LISTEN_HOST = 127.0.0.1
+SSH_LISTEN_PORT = 2222
+SSH_DOMAIN = 127.0.0.1
+SSH_PORT = 2222
+LFS_START_SERVER = false
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = {{ local_gitea_secret_key }}
+INTERNAL_TOKEN = {{ local_gitea_internal_token }}
+
+[oauth2]
+JWT_SECRET = {{ local_gitea_lfs_jwt_secret }}
+
+[service]
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW = true
+ENABLE_NOTIFY_MAIL = false
+
+[log]
+MODE = console
+LEVEL = Info
+ROOT_PATH = /var/lib/gitea/log

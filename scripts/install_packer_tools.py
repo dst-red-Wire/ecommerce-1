@@ -17,6 +17,11 @@ class ToolInstallError(RuntimeError):
     """Fail closed without executing network access."""
 
 
+INSTALLONLY_ROOTS = frozenset(
+    {"kernel", "kernel-core", "kernel-modules", "kernel-modules-extra"}
+)
+
+
 def digest(path: Path) -> str:
     checksum = hashlib.sha256()
     with path.open("rb") as stream:
@@ -87,12 +92,21 @@ def install(entry: dict, artifact: Path) -> None:
 
 
 def qualify(entry: dict) -> None:
+    # Packer invokes this installer through sudo; its secure_path can omit
+    # /usr/local/bin even though that is where the verified tools are installed.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
+    }
+    environment["PATH"] = f"/usr/local/bin:{environment.get('PATH', '/usr/bin:/bin')}"
     result = subprocess.run(
         entry["version_command"],
         check=True,
         text=True,
         capture_output=True,
         timeout=30,
+        env=environment,
     )
     version_output = result.stdout + result.stderr
     if entry["version"] not in version_output:
@@ -111,11 +125,7 @@ def qualify(entry: dict) -> None:
             text=True,
             capture_output=True,
             timeout=30,
-            env={
-                key: value
-                for key, value in os.environ.items()
-                if key not in {"GH_TOKEN", "GITHUB_TOKEN"}
-            },
+            env=environment,
         )
         output = result.stdout + result.stderr
         missing = [
@@ -137,6 +147,20 @@ def install_profile(bundle: Path, profile: str) -> None:
         qualify(entry)
 
 
+def validate_rpm_versions(
+    package: str, expected: str, actual_versions: set[str]
+) -> None:
+    if package in INSTALLONLY_ROOTS:
+        valid = expected in actual_versions and 1 <= len(actual_versions) <= 2
+    else:
+        valid = actual_versions == {expected}
+    if not valid:
+        actual = ",".join(sorted(actual_versions)) or "missing"
+        raise ToolInstallError(
+            f"package={package} expected_version={expected} actual_versions={actual}"
+        )
+
+
 def qualify_rpm_profile(bundle: Path, profile: str) -> None:
     definition = json.loads(
         (bundle / "rpms" / profile / "manifest.json").read_text(encoding="utf-8")
@@ -146,17 +170,20 @@ def qualify_rpm_profile(bundle: Path, profile: str) -> None:
         entry = packages[package]
         expected = f"{entry['epoch']}:{entry['version']}-{entry['release']}.{entry['architecture']}"
         result = subprocess.run(
-            ["rpm", "-q", "--qf", "%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}", package],
+            [
+                "rpm",
+                "-q",
+                "--qf",
+                "%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\\n",
+                package,
+            ],
             check=True,
             text=True,
             capture_output=True,
             timeout=30,
         )
-        actual = result.stdout.strip()
-        if actual != expected:
-            raise ToolInstallError(
-                f"package={package} expected_version={expected} actual_version={actual}"
-            )
+        actual_versions = {line for line in result.stdout.splitlines() if line}
+        validate_rpm_versions(package, expected, actual_versions)
 
 
 def main() -> int:

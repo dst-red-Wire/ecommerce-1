@@ -196,6 +196,35 @@ The derived role assignments below mirror the lock’s `observability` mapping e
 
 ## Build dependencies
 
+The local Rocky 10.2 image pipeline mirrors the two explicit profiles under
+`architecture.lock.yaml#tooling.local_vm_image_pipeline`. The Windows profile is WSL2
+Make/Git -> PowerShell -> native Windows Packer -> VirtualBox, with Vagrant owning
+only disposable lifecycle/smoke testing. The native Ubuntu 24.04 profile is
+Make/Git -> Python/repoctl -> Packer -> QEMU/KVM, with a disposable qcow2 overlay for smoke
+testing. Ansible remains the sole guest and RKE2 configuration authority in both
+profiles. Packer, VirtualBox and Vagrant are forbidden as parallel WSL2
+toolchains, and the Linux profile rejects WSL. Operational detail is in
+`docs/engineering/LOCAL_VM_IMAGE_PIPELINE.md`.
+For Windows native local-service qualification, an ephemeral Rocky VirtualBox
+controller consumes the exact-SHA repository bundle and runs the same Ansible
+roles and qualification program. It uses the existing host-only lab adapter,
+then is destroyed with the Gitea and Harbor VMs after proof capture.
+
+Machine-image distribution is a separate post-release responsibility. ORAS is
+the sole OCI artifact transport to Harbor, pushes are labelled with the exact
+source SHA, pulls require an immutable `@sha256:` reference, and the local
+content cache is selected through `ORAS_CACHE`, synchronized with `rsync`, and
+verified with SHA-256 before and after synchronization.
+
+VM CPU, memory and disk sizing has one authority in
+`machine-image-lock.yaml#packer_image.build.resources`; firmware and partition
+layout have one authority in the adjacent `packer_image.build.storage` section.
+The renderer projects those values into generated Packer variables shared by
+VirtualBox and QEMU and into the Kickstart template; per-hypervisor resource or
+storage overrides are forbidden. Bounded communicator timeouts are likewise
+owned by the adjacent `packer_image.build.timeouts` section and projected to
+both builders.
+
 M2.5 is `M2-5-persistent-mgmt-bootstrap`, a persistent management-plane bootstrap independent of PREPROD JIT. Provider and bootstrap human gates remain unchanged in the lock.
 
 The lock’s `milestone_dependencies` maps each milestone to its prerequisites: M0 → M1; M1 → M2 and M2.5; M2.5 → M3 → M4; M2 + M4 → M5 → M6 → M7 → M8 → M9.
