@@ -132,14 +132,20 @@ class CodexBudgetTest(unittest.TestCase):
             fake.write_text(
                 f"#!{__import__('sys').executable}\n"
                 "import json, os, pathlib, sys\n"
-                "sys.stdin.read()\n"
                 "args=sys.argv[1:]\n"
+                "if 'mcp' in args and 'list' in args:\n"
+                " overrides={args[i+1] for i,v in enumerate(args[:-1]) if v in ('--config','-c')}\n"
+                " disabled='mcp_servers={\\\"side_effect\\\"={enabled=false}}' in overrides\n"
+                " print(json.dumps([{'name':'side_effect','enabled':not disabled}]))\n"
+                " raise SystemExit(0)\n"
+                "sys.stdin.read()\n"
                 "pathlib.Path(os.environ['FAKE_CODEX_ARGV']).write_text(json.dumps(args))\n"
                 "overrides={args[i+1] for i,v in enumerate(args[:-1]) if v in ('--config','-c')}\n"
                 "required={'approval_policy=\\\"never\\\"','web_search=\\\"disabled\\\"',"
                 "'features.apps=false',"
-                "'features.hooks=false','features.remote_plugin=false','mcp_servers={}',"
-                "'plugins={}','notify=[]'}\n"
+                "'features.hooks=false','features.plugins=false','features.remote_plugin=false',"
+                "'mcp_servers={\\\"side_effect\\\"={enabled=false}}',"
+                "'notify=[]'}\n"
                 "read_only='--sandbox' in args and args[args.index('--sandbox')+1]=='read-only'\n"
                 "if not read_only or not required.issubset(overrides):\n"
                 " pathlib.Path(os.environ['FAKE_FORBIDDEN_WRITE']).write_text('mutated')\n"
@@ -264,6 +270,9 @@ class CodexBudgetTest(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import json, sys\n"
                 "sys.stdin.read()\n"
+                "if 'mcp' in sys.argv and 'list' in sys.argv:\n"
+                " print('[]')\n"
+                " raise SystemExit(0)\n"
                 "for event in ({'type':'turn.started'},"
                 "{'type':'item.completed','item':{'type':'agent_message','text':'answer'}},"
                 "{'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}):"
@@ -439,7 +448,10 @@ class CodexBudgetTest(unittest.TestCase):
         normal = types.SimpleNamespace(
             profile="ecommerce-minimal", model="", effort="", cacheable=False
         )
-        reusable_argv = codex_budget.codex_exec_argv(reusable)
+        mcp_overrides = ('mcp_servers."side.effect".enabled=false',)
+        reusable_argv = codex_budget.codex_exec_argv(
+            reusable, mcp_disable_overrides=mcp_overrides
+        )
         normal_argv = codex_budget.codex_exec_argv(normal)
         self.assertEqual(
             "read-only",
@@ -451,9 +463,88 @@ class CodexBudgetTest(unittest.TestCase):
             for index, value in enumerate(reusable_argv[:-1])
             if value == "--config"
         }
-        self.assertEqual(set(codex_budget.CACHEABLE_CODEX_OVERRIDES), overrides)
+        self.assertEqual(
+            {*codex_budget.CACHEABLE_CODEX_OVERRIDES, *mcp_overrides}, overrides
+        )
+        self.assertNotIn("mcp_servers={}", overrides)
         self.assertNotIn("--sandbox", normal_argv)
         self.assertNotIn("--ephemeral", normal_argv)
+
+    def test_cacheable_argv_requires_verified_mcp_catalog(self):
+        import types
+
+        reusable = types.SimpleNamespace(
+            profile="ecommerce-minimal", model="", effort="", cacheable=True
+        )
+        with self.assertRaisesRegex(ValueError, "verified MCP catalog"):
+            codex_budget.codex_exec_argv(reusable)
+
+    def test_installed_codex_loader_disables_inherited_mcp_server(self):
+        codex = shutil.which("codex")
+        self.assertIsNotNone(codex, "managed Codex CLI is required")
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = pathlib.Path(tmp)
+            (codex_home / "config.toml").write_text(
+                '[mcp_servers."inherited.probe"]\n'
+                'command = "/bin/false"\n'
+                'enabled = true\n',
+                encoding="utf-8",
+            )
+            (codex_home / "ecommerce-minimal.config.toml").write_text(
+                "# synthetic profile\n", encoding="utf-8"
+            )
+            with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+                inherited = codex_budget._mcp_catalog("ecommerce-minimal")
+                empty_table = codex_budget._mcp_catalog(
+                    "ecommerce-minimal", ("mcp_servers={}",)
+                )
+                overrides = codex_budget.verified_mcp_disable_overrides(
+                    "ecommerce-minimal"
+                )
+                disabled = codex_budget._mcp_catalog(
+                    "ecommerce-minimal", overrides
+                )
+        self.assertEqual({"inherited.probe": True}, inherited)
+        self.assertEqual({"inherited.probe": True}, empty_table)
+        self.assertEqual(
+            ('mcp_servers={"inherited.probe"={enabled=false}}',), overrides
+        )
+        self.assertEqual({"inherited.probe": False}, disabled)
+
+    def test_indeterminate_mcp_catalog_blocks_cacheable_run_before_model(self):
+        import types
+
+        args = types.SimpleNamespace(
+            task="static summary", since="", staged=False, paths=[],
+            profile="ecommerce-minimal", model="", effort="", expect="answer",
+            cacheable=True, timeout=30,
+        )
+
+        def prepare(argv, **_kwargs):
+            pack = self.root / argv[argv.index("--output") + 1]
+            manifest = self.root / argv[argv.index("--manifest") + 1]
+            pack.parent.mkdir(parents=True, exist_ok=True)
+            pack.write_text("task pack", encoding="utf-8")
+            manifest.write_text(json.dumps({
+                "route": "L0", "actual_bytes": 9, "estimated_input_tokens": 3,
+            }), encoding="utf-8")
+            return types.SimpleNamespace(returncode=0, stderr="")
+
+        with mock.patch.object(
+            codex_budget.subprocess, "run", side_effect=prepare
+        ) as run, mock.patch.object(
+            codex_budget, "effective_identity", return_value=dict(self.identity)
+        ), mock.patch.object(
+            codex_budget, "decide", return_value={
+                "should_invoke_ai": True, "reason": "exact_input_cache_miss",
+            }
+        ), mock.patch.object(
+            codex_budget, "verified_mcp_disable_overrides",
+            side_effect=RuntimeError("Codex MCP catalog is indeterminate"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "indeterminate"):
+                codex_budget.run_task(args)
+        self.assertEqual(1, run.call_count)
 
     def test_line_truncated_pack_cannot_be_cached(self):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))

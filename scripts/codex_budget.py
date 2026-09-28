@@ -40,11 +40,11 @@ CACHEABLE_CODEX_OVERRIDES = (
     "web_search=\"disabled\"",
     "features.apps=false",
     "features.hooks=false",
+    "features.plugins=false",
     "features.remote_plugin=false",
-    "mcp_servers={}",
-    "plugins={}",
     "notify=[]",
 )
+MCP_CATALOG_TIMEOUT_SECONDS = 30
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -381,11 +381,67 @@ def effective_identity(profile: str, model: str, effort: str, expectation: str) 
     }
 
 
-def codex_exec_argv(args: argparse.Namespace) -> list[str]:
+def _mcp_catalog(profile: str, overrides: tuple[str, ...] = ()) -> dict[str, bool]:
+    argv = ["codex", "--profile", profile, "mcp", "list", "--json"]
+    for override in overrides:
+        argv += ["--config", override]
+    proc = subprocess.run(
+        argv,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        timeout=MCP_CATALOG_TIMEOUT_SECONDS,
+    )
+    if proc.returncode:
+        raise RuntimeError(
+            "unable to resolve Codex MCP catalog: "
+            + (proc.stderr.strip() or f"exit {proc.returncode}")[:300]
+        )
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Codex MCP catalog is not valid JSON") from exc
+    if not isinstance(payload, list):
+        raise RuntimeError("Codex MCP catalog must be a list")
+    catalog: dict[str, bool] = {}
+    for server in payload:
+        if not isinstance(server, dict):
+            raise RuntimeError("Codex MCP catalog contains an invalid server")
+        name = server.get("name")
+        enabled = server.get("enabled")
+        if not isinstance(name, str) or not name or not isinstance(enabled, bool):
+            raise RuntimeError("Codex MCP catalog contains an indeterminate server")
+        if name in catalog:
+            raise RuntimeError("Codex MCP catalog contains duplicate server names")
+        catalog[name] = enabled
+    return catalog
+
+
+def verified_mcp_disable_overrides(profile: str) -> tuple[str, ...]:
+    catalog = _mcp_catalog(profile)
+    overrides: tuple[str, ...] = ()
+    if catalog:
+        entries = ",".join(
+            f"{json.dumps(name)}={{enabled=false}}" for name in sorted(catalog)
+        )
+        overrides = (f"mcp_servers={{{entries}}}",)
+    disabled = _mcp_catalog(profile, overrides)
+    if set(disabled) != set(catalog) or any(disabled.values()):
+        raise RuntimeError("Codex MCP catalog could not be fully disabled")
+    return overrides
+
+
+def codex_exec_argv(
+    args: argparse.Namespace,
+    *,
+    mcp_disable_overrides: tuple[str, ...] | None = None,
+) -> list[str]:
     argv = ["codex", "exec", "--json", "--profile", args.profile]
     if args.cacheable:
+        if mcp_disable_overrides is None:
+            raise ValueError("cacheable Codex runs require a verified MCP catalog")
         argv += ["--ephemeral", "--sandbox", "read-only"]
-        for override in CACHEABLE_CODEX_OVERRIDES:
+        for override in (*CACHEABLE_CODEX_OVERRIDES, *mcp_disable_overrides):
             argv += ["--config", override]
     if args.model:
         argv += ["--model", args.model]
@@ -440,7 +496,10 @@ def run_task(args: argparse.Namespace) -> int:
         measurement["estimated_avoided_input_tokens"] = data["estimated_input_tokens"]
         _atomic_text(metrics, json.dumps(measurement, sort_keys=True) + "\n")
         return 0
-    argv = codex_exec_argv(args)
+    mcp_disable_overrides = (
+        verified_mcp_disable_overrides(args.profile) if args.cacheable else None
+    )
+    argv = codex_exec_argv(args, mcp_disable_overrides=mcp_disable_overrides)
     prompt = (ROOT / pack).read_text(encoding="utf-8")
     try:
         proc = subprocess.run(argv, input=prompt, text=True, cwd=ROOT, capture_output=True,
