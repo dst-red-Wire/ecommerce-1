@@ -16,106 +16,93 @@ packer {
   }
 }
 
-variable "iso_url" {
-  type = string
-}
-
-variable "iso_checksum" {
-  type      = string
-  sensitive = true
-}
-
-variable "build_ssh_public_key" {
-  type      = string
-  sensitive = true
-
-  validation {
-    condition     = can(regex("^ssh-(ed25519|rsa) [A-Za-z0-9+/]+={0,3}(?: [A-Za-z0-9._@-]+)?$", trimspace(var.build_ssh_public_key)))
-    error_message = "The build SSH public key must contain one OpenSSH public key."
-  }
-}
-
-variable "build_ssh_private_key_file" {
-  type      = string
-  sensitive = true
-
-  validation {
-    condition     = length(trimspace(var.build_ssh_private_key_file)) > 0
-    error_message = "The build SSH private key file must reference the runtime-injected private key."
-  }
-}
-
-variable "offline_bundle_dir" {
-  type = string
-}
-
-variable "image_profile" {
-  type    = string
-  default = "rke2"
-
-  validation {
-    condition     = contains(["rke2", "admin-qualification"], var.image_profile)
-    error_message = "Image_profile must be rke2 or admin-qualification."
-  }
-}
-
 locals {
   image_name = "rocky-10.2-${var.image_profile}"
-  boot_command = [
-    "<up><wait><tab><wait>",
-    " inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks",
-    "<enter>",
+  vm_name    = "ecommerce-rocky-10-2-build-${var.image_profile}"
+  qemu_boot_command = [
+    "c<wait5>",
+    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks<enter><wait>",
+    "initrd /images/pxeboot/initrd.img<enter><wait>",
+    "boot<enter>",
   ]
 }
 
 source "virtualbox-iso" "base" {
-  vm_name       = "ecommerce-${local.image_name}"
+  vm_name       = local.vm_name
   guest_os_type = "RedHat_64"
   iso_url       = var.iso_url
   iso_checksum  = "sha256:${var.iso_checksum}"
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
-      build_ssh_public_key = trimspace(var.build_ssh_public_key)
+      build_ssh_public_key        = trimspace(var.build_ssh_public_key)
+      partition_table             = var.vm_partition_table
+      bios_boot_mib               = var.vm_bios_boot_mib
+      boot_mib                    = var.vm_boot_mib
+      root_min_mib                = var.vm_root_min_mib
+      root_filesystem             = var.vm_root_filesystem
+      bootloader_kernel_arguments = "quiet console=tty0 console=ttyS0,115200n8"
     })
   }
-  boot_command         = local.boot_command
-  boot_wait            = "10s"
-  ssh_username         = "packer"
-  ssh_private_key_file = var.build_ssh_private_key_file
-  ssh_timeout          = "30m"
-  shutdown_command     = "true"
-  guest_additions_mode = "disable"
-  disk_size            = 32768
-  cpus                 = 2
-  memory               = 4096
-  hard_drive_interface = "sata"
-  format               = "ova"
-  output_directory     = "${path.root}/../../../.context/packer/${local.image_name}-virtualbox"
+  boot_command = [
+    "c<wait5>",
+    "linux /images/pxeboot/vmlinuz inst.stage2=hd:LABEL=Rocky-10-2-x86_64-dvd inst.text inst.notmux inst.ks=http://{{ .HTTPIP }}:{{ .HTTPPort }}/rocky-10.2.ks console=tty0 console=ttyS0,115200n8<enter><wait>",
+    "initrd /images/pxeboot/initrd.img<enter><wait>",
+    "boot<enter>",
+  ]
+  boot_keygroup_interval = "500ms"
+  boot_wait              = "10s"
+  ssh_username           = "packer"
+  ssh_private_key_file   = var.build_ssh_private_key_file
+  ssh_timeout            = "${var.vm_ssh_timeout_seconds}s"
+  shutdown_command       = "true"
+  guest_additions_mode   = "disable"
+  headless               = var.vm_headless
+  firmware               = var.vm_firmware
+  disk_size              = var.vm_disk_mib
+  cpus                   = var.vm_cpus
+  memory                 = var.vm_memory_mib
+  hard_drive_interface   = "sata"
+  nic_type               = var.vm_virtualbox_nic_type
+  format                 = "ova"
+  output_directory       = "${var.artifact_dir}/${local.image_name}-virtualbox"
+  vboxmanage = [
+    ["modifyvm", "{{.Name}}", "--uart1", "0x3F8", "4"],
+    ["modifyvm", "{{.Name}}", "--uartmode1", "file", var.virtualbox_serial_log_file],
+  ]
 }
 
 source "qemu" "base" {
-  vm_name      = "ecommerce-${local.image_name}"
+  vm_name      = local.vm_name
   iso_url      = var.iso_url
   iso_checksum = "sha256:${var.iso_checksum}"
   http_content = {
     "/rocky-10.2.ks" = templatefile("${abspath(path.root)}/http/rocky-10.2.ks", {
-      build_ssh_public_key = trimspace(var.build_ssh_public_key)
+      build_ssh_public_key        = trimspace(var.build_ssh_public_key)
+      partition_table             = var.vm_partition_table
+      bios_boot_mib               = var.vm_bios_boot_mib
+      boot_mib                    = var.vm_boot_mib
+      root_min_mib                = var.vm_root_min_mib
+      root_filesystem             = var.vm_root_filesystem
+      bootloader_kernel_arguments = "quiet console=tty0"
     })
   }
-  boot_command         = local.boot_command
+  boot_command         = local.qemu_boot_command
+  boot_key_interval    = "100ms"
   boot_wait            = "10s"
   ssh_username         = "packer"
   ssh_private_key_file = var.build_ssh_private_key_file
-  ssh_timeout          = "30m"
+  ssh_timeout          = "${var.vm_ssh_timeout_seconds}s"
   shutdown_command     = "true"
   accelerator          = "kvm"
-  disk_size            = "32G"
+  headless             = var.vm_headless
+  efi_boot             = var.vm_firmware == "efi"
+  disk_size            = "${var.vm_disk_mib}M"
   disk_interface       = "virtio"
   format               = "qcow2"
-  cpus                 = 2
-  memory               = 4096
+  cpus                 = var.vm_cpus
+  memory               = var.vm_memory_mib
   net_device           = "virtio-net"
-  output_directory     = "${path.root}/../../../.context/packer/${local.image_name}-kvm"
+  output_directory     = "${var.artifact_dir}/${local.image_name}-kvm"
 }
 
 build {
@@ -126,7 +113,10 @@ build {
   ]
 
   provisioner "shell" {
-    inline = ["install -d -m 0700 /tmp/packer-offline"]
+    inline = [
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T10_PACKER_SSH_CONNECTION\\n' | sudo -n tee /dev/ttyS0 >/dev/null; fi",
+      "install -d -m 0700 /tmp/packer-offline",
+    ]
   }
 
   provisioner "file" {
@@ -154,21 +144,28 @@ build {
     environment_vars = ["IMAGE_PROFILE=${var.image_profile}"]
     inline = [
       "set -eu",
+      "export PATH=/usr/local/bin:$PATH",
       "cd /tmp/packer-offline/rpm-keys && sha256sum --check SHA256SUMS",
       "rpm --import /tmp/packer-offline/rpm-keys/*.asc",
       "cd /tmp/packer-offline/rpms/base && sha256sum --check SHA256SUMS",
-      "dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 install /tmp/packer-offline/rpms/base/*.rpm",
+      "dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 --allowerasing install /tmp/packer-offline/rpms/base/*.rpm",
       "python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile base",
       "cd /tmp/packer-offline/tools/base && sha256sum --check SHA256SUMS",
       "python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --profile base",
-      "if [ \"$IMAGE_PROFILE\" = rke2 ]; then cd /tmp/packer-offline/rpms/rke2 && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 install /tmp/packer-offline/rpms/rke2/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile rke2; cd /tmp/packer-offline/tools/rke2 && sha256sum --check SHA256SUMS && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --profile rke2; fi",
-      "if [ \"$PACKER_BUILDER_TYPE\" = qemu ]; then cd /tmp/packer-offline/rpms/qemu-kvm && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 install /tmp/packer-offline/rpms/qemu-kvm/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile qemu-kvm && systemctl enable qemu-guest-agent; else ! rpm -q qemu-guest-agent; fi",
-      "if [ \"$IMAGE_PROFILE\" = admin-qualification ]; then cd /tmp/packer-offline/rpms/admin-qualification && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 install /tmp/packer-offline/rpms/admin-qualification/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile admin-qualification; cd /tmp/packer-offline/tools/admin-qualification && sha256sum --check SHA256SUMS && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --profile admin-qualification; fi",
+      "if [ \"$IMAGE_PROFILE\" = rke2 ]; then cd /tmp/packer-offline/rpms/rke2 && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 --allowerasing install /tmp/packer-offline/rpms/rke2/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile rke2; cd /tmp/packer-offline/tools/rke2 && sha256sum --check SHA256SUMS && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --profile rke2; fi",
+      "if [ \"$PACKER_BUILDER_TYPE\" = qemu ]; then cd /tmp/packer-offline/rpms/qemu-kvm && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 --allowerasing install /tmp/packer-offline/rpms/qemu-kvm/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile qemu-kvm && systemctl enable qemu-guest-agent; else ! rpm -q qemu-guest-agent; fi",
+      "if [ \"$IMAGE_PROFILE\" = admin-qualification ]; then cd /tmp/packer-offline/rpms/admin-qualification && sha256sum --check SHA256SUMS && dnf -y --disablerepo='*' --setopt=localpkg_gpgcheck=1 --allowerasing install /tmp/packer-offline/rpms/admin-qualification/*.rpm && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --rpm-profile admin-qualification; cd /tmp/packer-offline/tools/admin-qualification && sha256sum --check SHA256SUMS && python3 /tmp/packer-offline/install_tools.py --bundle /tmp/packer-offline --profile admin-qualification; fi",
       "rpm -q kernel-modules-extra container-selinux NetworkManager openssh-server python3 chrony nftables iptables-nft conntrack-tools",
+      "rpm -q cloud-init",
       "! rpm -q firewalld",
       "test \"$(getenforce)\" = Enforcing",
       "find /lib/modules -maxdepth 1 -mindepth 1 -type d -name '6.12.*' | grep -q .",
+      "grubby --default-kernel | grep -Fq '6.12.0-211.58.1.el10_2.x86_64'",
       "systemctl is-enabled sshd chronyd NetworkManager",
+      "install -d -m 0755 /etc/cloud/cloud.cfg.d",
+      "printf '%s\\n' 'datasource_list: [ NoCloud, None ]' > /etc/cloud/cloud.cfg.d/90-ecommerce-datasource.cfg",
+      "cloud-init clean --logs --seed",
+      "systemctl enable cloud-init-local.service cloud-init.service cloud-config.service cloud-final.service",
       "test -z \"$(swapon --noheadings --show)\"",
       "! grep -Ev '^[[:space:]]*(#|$)' /etc/fstab | grep -qw swap",
       "modprobe overlay && modprobe br_netfilter && modprobe nf_conntrack && modprobe vxlan",
@@ -195,15 +192,21 @@ build {
       "truncate -s 0 /etc/machine-id",
       "rm -f /var/lib/dbus/machine-id /etc/ssh/ssh_host_*",
       "rm -rf /tmp/packer-offline",
-      "usermod --lock --shell /sbin/nologin packer",
-      "rm -f /etc/sudoers.d/packer && rm -rf /home/packer/.ssh",
+      "passwd --status packer | grep -Eq '^packer[[:space:]]+L'",
+      "test -s /home/packer/.ssh/authorized_keys",
+      "chmod 0700 /home/packer/.ssh && chmod 0600 /home/packer/.ssh/authorized_keys",
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T11_PROVISIONING_COMPLETE\\n' > /dev/ttyS0; fi",
+      "systemctl disable packer-milestone-t8.service packer-milestone-t9.service",
+      "rm -f /etc/systemd/system/packer-milestone-t8.service /etc/systemd/system/packer-milestone-t9.service",
+      "systemctl daemon-reload",
+      "if [ -c /dev/ttyS0 ]; then printf 'ECOMMERCE_MILESTONE T12_SHUTDOWN\\n' > /dev/ttyS0; fi",
       "systemd-run --unit=packer-final-shutdown --on-active=10s /usr/sbin/shutdown -P now",
     ]
   }
 
   post-processor "vagrant" {
     only              = ["virtualbox-iso.base"]
-    output            = "${path.root}/../../../.context/packer/${local.image_name}-virtualbox.box"
+    output            = "${var.artifact_dir}/${local.image_name}-virtualbox.box"
     provider_override = "virtualbox"
   }
 }

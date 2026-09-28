@@ -1,0 +1,45 @@
+hostname: 127.0.0.2
+http:
+  port: 80
+https:
+  port: 443
+  certificate: /etc/harbor/tls/harbor.crt
+  private_key: /etc/harbor/tls/harbor.key
+  strong_ssl_ciphers: true
+external_url: https://127.0.0.2:{{ local_harbor_external_port }}
+harbor_admin_password: {{ local_harbor_admin_password }}
+database:
+  password: {{ local_harbor_database_password }}
+  max_idle_conns: 20
+  max_open_conns: 100
+  conn_max_lifetime: 5m
+  conn_max_idle_time: 0
+data_volume: /data
+trivy:
+  ignore_unfixed: false
+  skip_update: true
+  skip_java_db_update: true
+  offline_scan: true
+  security_check: vuln
+  insecure: false
+  timeout: 5m0s
+jobservice:
+  max_job_workers: 2
+  max_job_duration_hours: 24
+  job_loggers: [STD_OUTPUT, FILE]
+  logger_sweeper_duration: 1
+notification:
+  webhook_job_max_retry: 3
+  webhook_job_http_client_timeout: 3
+log:
+  level: info
+  local:
+    rotate_count: 10
+    rotate_size: 50M
+    location: /var/log/harbor
+_version: 2.13.0
+proxy:
+  http_proxy:
+  https_proxy:
+  no_proxy: 127.0.0.1,localhost,core,registry,jobservice,portal,postgresql,redis
+  components: []

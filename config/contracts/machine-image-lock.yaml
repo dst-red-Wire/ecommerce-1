@@ -21,6 +21,13 @@ packer_image:
     projection_from: packer_image.profiles.*.rpm_packages
     schema: profile-separated-rpm-closure-v2
     single_definition_for_all_outputs: true
+    transaction:
+      repositories: forbidden
+      local_package_gpg_check: required
+      iso_conflict_replacement: allowerasing
+      skip_broken: forbidden
+      nobest: forbidden
+      qualification: exact-profile-roots
     sources:
       rocky:
         repositories:
@@ -54,6 +61,7 @@ packer_image:
         - openssh-server
         - sudo
         - python3
+        - cloud-init
         - ca-certificates
         - bash-completion
         - which
@@ -119,11 +127,14 @@ packer_image:
     virtualbox:
       base_agent: none
       guest_additions: disabled
+      network_adapter: virtio
     qemu_kvm:
       rpm_packages: [qemu-guest-agent]
 
   kernel:
     nevra: kernel-0:6.12.0-211.58.1.el10_2.x86_64
+    installonly_retention: exact-plus-one-previous
+    default_boot_nevra: exact
     modules_extra: required
     required_modules: [br_netfilter, nf_conntrack, overlay, vxlan]
 
@@ -144,7 +155,7 @@ packer_image:
     static_ip: forbidden
 
   services:
-    enabled: [NetworkManager, chronyd, sshd]
+    enabled: [NetworkManager, chronyd, sshd, cloud-init-local, cloud-init, cloud-config, cloud-final]
     disabled: [firewalld]
 
   kubernetes_prerequisites:
@@ -155,15 +166,45 @@ packer_image:
 
   build:
     packer_version_ref: config/contracts/toolchain-lock.json#versions.PACKER_VERSION
+    resources:
+      authority: shared-all-hypervisors
+      vcpus: 4
+      memory_mib: 4096
+      disk_mib: 32768
+      headless: true
+    storage:
+      authority: shared-all-hypervisors
+      firmware: bios
+      partition_table: gpt
+      bios_boot_mib: 1
+      boot_mib: 2048
+      root_min_mib: 10240
+      root_filesystem: xfs
+      lvm: forbidden
+      swap: forbidden
+    timeouts:
+      authority: shared-all-hypervisors
+      ssh_seconds: 3600
+    host_tool_versions:
+      virtualbox: config/contracts/toolchain-lock.json#versions.VIRTUALBOX_VERSION
+      vagrant: config/contracts/toolchain-lock.json#versions.VAGRANT_VERSION
+      qemu: config/contracts/toolchain-lock.json#versions.QEMU_VERSION
     credential:
       type: runtime-injected-temporary-ssh-key
       committed_private_key: forbidden
       committed_password_or_hash: forbidden
       password_authentication: forbidden
-      authorized_key_removed_before_export: required
-      build_user_final_state: locked-nologin
+      private_key_storage: host-local-outside-repository
+      private_key_cleanup_after_qualification: required
+      released_artifact_private_key_exists: forbidden
+      authorized_public_key_purpose: build-and-local-qualification-only
+      build_user_final_state: password-locked-key-only
     virtualbox:
       version: 7.2.18
+      acceleration:
+        required: native-vtx
+        forbidden: [nem]
+        hyper_v_present: false
       plugin:
         source: github.com/hashicorp/virtualbox
         version: 1.1.5
@@ -178,6 +219,17 @@ packer_image:
 
   outputs:
     logical_base: rocky-10.2-base
+    local_artifact_root: .artifacts/packer/rocky-10.2
+    local_evidence_root: .context/evidence/rocky-image/rocky-10.2
+    evidence_by_profile:
+      windows:
+        build: .context/evidence/rocky-image/rocky-10.2/windows/build.json
+        qualification: .context/evidence/rocky-image/rocky-10.2/windows/qualification.json
+        release: .context/evidence/rocky-image/rocky-10.2/windows/release.json
+      linux:
+        build: .context/evidence/rocky-image/rocky-10.2/linux/build.json
+        qualification: .context/evidence/rocky-image/rocky-10.2/linux/qualification.json
+        release: .context/evidence/rocky-image/rocky-10.2/linux/release.json
     rke2:
       virtualbox: rocky-10.2-rke2-virtualbox.box
       qemu_kvm: rocky-10.2-rke2-kvm.qcow2
@@ -185,14 +237,68 @@ packer_image:
       virtualbox: rocky-10.2-admin-qualification-virtualbox.box
       qemu_kvm: rocky-10.2-admin-qualification-kvm.qcow2
 
+  distribution:
+    authority: oras
+    registry: harbor
+    runtime_tls:
+      ca_file_environment: ORAS_CA_FILE
+      registry_config_environment: ORAS_REGISTRY_CONFIG
+      insecure_skip_verify: forbidden
+    artifact_type: application/vnd.ecommerce.rocky-machine-image.v1
+    repository_entrypoints:
+      push: image-rocky-oras-push
+      pull: image-rocky-oras-pull
+    push:
+      repository_environment: ORAS_REPOSITORY
+      tag_format: git-{source_sha}
+      output_reference: repository@sha256:digest
+      requires: [release-evidence-pass, clean-exact-source-sha, published-exact-source-sha, artifact-sha256]
+    pull:
+      reference_environment: ORAS_REF
+      reference_format: repository@sha256:digest
+      mutable_tag: forbidden
+    cache:
+      environment: ORAS_CACHE
+      default: .context/cache/oras
+      layout: materialized/sha256/{artifact_sha256}
+      synchronization: rsync
+      synchronization_flags: [--archive, --checksum, --partial, --delay-updates]
+      integrity: sha256-before-and-after-sync
+    profiles:
+      windows:
+        artifact: rocky-10.2-rke2-virtualbox.box
+        layer_media_type: application/vnd.hashicorp.vagrant.box
+      linux:
+        artifact: rocky-10.2-rke2-kvm.qcow2
+        layer_media_type: application/vnd.qemu.qcow2
+    evidence_by_profile:
+      windows:
+        push: .context/evidence/rocky-image/rocky-10.2/windows/oras-push.json
+        pull: .context/evidence/rocky-image/rocky-10.2/windows/oras-pull.json
+      linux:
+        push: .context/evidence/rocky-image/rocky-10.2/linux/oras-push.json
+        pull: .context/evidence/rocky-image/rocky-10.2/linux/oras-pull.json
+    timeouts_seconds:
+      oras: 7200
+      rsync: 7200
+
   clone_hygiene:
     hostname: rocky-10-2-base
     machine_id: cleaned-before-export
     ssh_host_keys: regenerate-on-first-boot
     private_keys: forbidden
-    build_authorized_keys: removed-before-export
-    build_user: locked-nologin
+    build_authorized_keys: ephemeral-public-half-only
+    build_private_key: destroyed-after-qualification-before-release
+    build_user: password-locked-key-only
     secrets: forbidden
+    first_boot_access:
+      authority: cloud-init-nocloud-net
+      transport: virtualbox-nat-host-loopback-http
+      ssh_public_key: runtime-generated-ephemeral
+      ssh_private_key: host-runtime-only
+      image_embedded_private_key: forbidden
+      image_embedded_shared_private_key: forbidden
+      datasource_fallback: none
     rke2_token: forbidden
 
   evidence:
@@ -217,6 +323,105 @@ packer_image:
       openscap_datastream: /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml
       kube_bench_profile: rke2-cis-1.9
       kube_bench_profile_status: unsupported-for-rke2-v1.37
+
+  local_pipeline:
+    source_root: platform/packer/rocky-10.2
+    vagrant_smoke_root: platform/vagrant/rocky-image-smoke
+    windows_scripts_root: scripts/windows
+    linux_orchestrator: scripts/linux_image_pipeline.py
+    windows_stage_root: LOCALAPPDATA/ecommerce-1/packer/rocky-10.2
+    windows_native_vtx_cycle:
+      lab_root: C:/ecommerce-lab
+      boot_entry_name: Windows - VirtualBox VT-x native
+      scheduled_task_name: Ecommerce-VirtualBox-Native-Qualification
+      max_native_boot_attempts: 1
+      normal_boot:
+        hyper_v: enabled
+        wsl2: enabled
+        mutation: forbidden
+      native_boot:
+        hypervisorlaunchtype: "off"
+        vsmlaunchtype: off-or-unsupported
+        required_backend: native-vtx
+        forbidden_backend: nem
+      bcd:
+        backup_before_mutation: required
+        next_boot_authority: bootsequence-one-shot
+        default_entry_mutation: forbidden
+      staging:
+        layout: staging/{source_git_sha}
+        exact_git_sha: required
+        exact_tree_sha: required
+        sha256_manifest: required
+        wsl_dependency_during_native_boot: forbidden
+      evidence:
+        layout: evidence/{source_git_sha}/result.json
+        import_binding: [source-git-sha, source-tree-sha, staging-manifest-sha256, artifact-sha256]
+      recovery:
+        return_to_normal_boot: required
+        remove_scheduled_task: required
+        preserve_native_boot_entry: true
+    linux_stage_root: .context/packer-linux/rocky-10.2
+    profiles:
+      windows:
+        builder: virtualbox-iso
+        artifact_root: .artifacts/packer/rocky-10.2/windows
+        artifact: rocky-10.2-rke2-virtualbox.box
+        repository_entrypoints:
+          preflight: image-rocky-windows-preflight
+          build: image-rocky-windows-build
+          qualification: image-rocky-windows-qualify
+          release: image-rocky-windows-release
+          native_prepare: image-rocky-windows-native-prepare
+          native_reboot: image-rocky-windows-native-reboot
+          native_import: image-rocky-windows-native-import
+          native_recover: image-rocky-windows-native-recover
+      linux:
+        host_os: ubuntu-24.04-x86_64
+        builder: qemu
+        artifact_root: .artifacts/packer/rocky-10.2/linux
+        artifact: rocky-10.2-rke2-kvm.qcow2
+        repository_entrypoints:
+          preflight: image-rocky-linux-preflight
+          build: image-rocky-linux-build
+          qualification: image-rocky-linux-qualify
+          release: image-rocky-linux-release
+    stages: [preflight, build, qualification, release]
+    separation:
+      build_is_qualification: false
+      qualification_is_release: false
+      release_publishes_remote_artifact: false
+      distribution_is_explicit_after_release: true
+    timeouts_seconds:
+      command_probe: 15
+      wsl_bridge: 60
+      wsl_render: 300
+      packer_init: 300
+      packer_validate: 120
+      packer_build: 7200
+      vagrant_box_add: 600
+      vagrant_boot: 900
+      ssh_probe: 120
+      guest_probe: 120
+      cleanup: 300
+    retries:
+      ssh_attempts: 12
+      delay_seconds: 5
+    evidence:
+      encoding: utf-8-no-bom
+      schema: 1
+      exact_artifact_sha256: required
+      runtime_pass_may_be_static: false
+    path_policy:
+      windows_program_working_directory_unc: forbidden
+      local_windows_staging_required_for_unc_repository: true
+      wsl_to_windows_conversion: wslpath
+      linux_profile_requires_native_host: true
+    network_policy:
+      packer_plugins_initialized_before_isolated_guest_provisioning: required
+      guest_package_network_access: forbidden
+      vagrant_smoke_nat: ephemeral-cleaned
+      qemu_smoke_user_nat: ephemeral-cleaned
 
 responsibility_boundary:
   packer:
@@ -247,3 +452,8 @@ rules:
   rke2_token_in_image: forbidden
   network_identity_in_image: forbidden
   generated_images_in_git: forbidden
+  one_responsibility_one_authority: required
+  packer_execution_must_match_selected_host_profile: required
+  packer_in_wsl2: forbidden
+  vagrant_provisioning: forbidden
+  release_without_build_and_qualification_evidence: forbidden

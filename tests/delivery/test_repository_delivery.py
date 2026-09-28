@@ -187,7 +187,13 @@ class BundleDeliveryTests(unittest.TestCase):
         subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, check=True)
         (path / "README.md").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
-        subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "commit", "-m", "base"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def test_bundle_branch_requires_exact_unique_feature_head(self):
         with tempfile.TemporaryDirectory() as td:
@@ -196,7 +202,13 @@ class BundleDeliveryTests(unittest.TestCase):
             subprocess.run(["git", "switch", "-c", "feat/proof"], cwd=root, check=True, capture_output=True, text=True)
             (root / "feature.txt").write_text("x\n", encoding="utf-8")
             subprocess.run(["git", "add", "feature.txt"], cwd=root, check=True)
-            subprocess.run(["git", "commit", "-m", "feature"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             head = self.git(root, "rev-parse", "HEAD")
             bundle = Path(td) / "change.bundle"
             subprocess.run(["git", "bundle", "create", str(bundle), "feat/proof"], cwd=root, check=True)
@@ -219,7 +231,13 @@ class BundleDeliveryTests(unittest.TestCase):
             )
             (source / "feature.txt").write_text("x\n", encoding="utf-8")
             subprocess.run(["git", "add", "feature.txt"], cwd=source, check=True)
-            subprocess.run(["git", "commit", "-m", "feature"], cwd=source, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             head = self.git(source, "rev-parse", "HEAD")
             bundle = td / "change.bundle"
             subprocess.run(["git", "bundle", "create", str(bundle), "feat/proof"], cwd=source, check=True)
