@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,15 @@ class ExecutionEnvironmentDetectionTests(unittest.TestCase):
         common = dict(environ={}, proc_version="", cgroup="", mountinfo="", docker_env=False, container_env=False)
         self.assertEqual("native_linux", detect_execution_environment(platform_name="linux", **common).name)
         self.assertEqual("unknown", detect_execution_environment(platform_name="darwin", **common).name)
+
+
+class WindowsInteropOutputTests(unittest.TestCase):
+    def test_invalid_console_bytes_do_not_abort_runtime_probe(self):
+        result = BuiltinCapabilityDriver._run(
+            [sys.executable, "-c", "import os; os.write(1, b'\\x82')"]
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("\ufffd", result.stdout)
 
 
 def capability(

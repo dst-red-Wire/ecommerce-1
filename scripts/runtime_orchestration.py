@@ -398,6 +398,7 @@ class BuiltinCapabilityDriver:
                 command,
                 check=False,
                 text=True,
+                errors="replace",
                 capture_output=True,
                 env=dict(env) if env is not None else None,
                 timeout=timeout,
