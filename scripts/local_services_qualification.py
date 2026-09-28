@@ -24,6 +24,11 @@ from pathlib import Path
 
 import yaml
 
+try:
+    import native_controller_bootstrap
+except ModuleNotFoundError:
+    from scripts import native_controller_bootstrap
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_PATH = ROOT / "config/contracts/local-services-qualification.yaml"
 FIXTURE = ROOT / "platform/ansible/tests/local_services_vm"
@@ -235,7 +240,7 @@ def prepare_native_controller_payload(destination: Path, *, offline: bool) -> di
     """Freeze the published source and locked Linux tools before WSL2 stops."""
     head = git("rev-parse", "HEAD")
     branch = git("symbolic-ref", "--short", "HEAD")
-    if not re.fullmatch(r"[0-9a-f]{40}", head) or branch != "feat/packer-dual-host-rocky-image-pipeline":
+    if not re.fullmatch(r"[0-9a-f]{40}", head) or branch not in native_controller_bootstrap.NATIVE_CONTROLLER_BRANCHES:
         raise QualificationError("native controller payload requires the published PR branch")
     if git("status", "--porcelain", "--untracked-files=all"):
         raise QualificationError("native controller payload requires a clean exact-SHA worktree")
