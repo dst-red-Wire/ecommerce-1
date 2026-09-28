@@ -13,6 +13,8 @@ import ast
 import contextlib
 import contextvars
 import copy
+import errno
+import fcntl
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import functools
@@ -41,6 +43,7 @@ _MODERN_ENGINEERING = None
 _CVE_POLICY = None
 _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=None)
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
+_PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 
 
@@ -7682,6 +7685,9 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     }:
         return {}
     if normalized.pop("sync_recovery", None) != {
+        "exclusive_lock": "git-common-dir-flock",
+        "lock_scope": ["capture", "merge", "qualification", "remote-head-check", "push", "push-resolution", "recovery-or-confirmation"],
+        "concurrent_invocation": "SYNC_BUSY",
         "capture_before_local_merge": ["branch", "head_sha", "main_sha", "tree_sha", "clean_worktree"],
         "prepublication_failure": "restore-exact-captured-checkout",
         "rollback_scope": "invocation-owned-unpublished-merge-only",
@@ -7853,7 +7859,7 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
         "qualification_before_push": {"required": True},
         "signed_commit": {"required": True},
         "mutation_sites": {
-            "git_push": ["scripts/repoctl.py#publish", "scripts/repoctl.py#sync_pr_base"],
+            "git_push": ["scripts/repoctl.py#publish", "scripts/repoctl.py#_sync_pr_base_locked"],
             "git_push_delete": ["scripts/repoctl.py#_delete_branch_ref"],
             "github_pr_create": ["scripts/repoctl.py#deliver"],
             "github_pr_update": ["scripts/repoctl.py#deliver"],
@@ -10905,6 +10911,56 @@ def _pr_loop_base_changed(result: dict, change: PRBaseChanged, *, json_output: b
     return 1
 
 
+def _pr_sync_lock_path() -> Path:
+    """Use one lock for all worktrees sharing the same Git repository."""
+    common_dir = ROOT / ".git"
+    if not common_dir.is_dir():
+        raw = git("rev-parse", "--git-common-dir").strip()
+        if not raw:
+            raise RuntimeError("cannot locate Git common directory for PR sync lock")
+        common_dir = Path(raw)
+        if not common_dir.is_absolute():
+            common_dir = ROOT / common_dir
+    return common_dir.resolve() / "repoctl-sync-pr-base.lock"
+
+
+@contextlib.contextmanager
+def _pr_sync_lock():
+    """Acquire a nonblocking process lock through confirmation or recovery."""
+    path = _pr_sync_lock_path()
+    if _PR_SYNC_LOCK_HELD.get() == path:
+        yield True
+        return
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            yield False
+            return
+        token = _PR_SYNC_LOCK_HELD.set(path)
+        try:
+            yield True
+        finally:
+            _PR_SYNC_LOCK_HELD.reset(token)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _pr_sync_result(pr: dict) -> dict:
+    return {
+        "status": "NOT_REQUIRED", "old_head_sha": pr["head_sha"],
+        "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED",
+        "capture_before_mutation": "NOT_ATTEMPTED",
+        "restore_on_failure": "NOT_ATTEMPTED",
+        "restore_verification": "NOT_ATTEMPTED",
+        "force_push_used": False, "rebase_used": False,
+    }
+
+
 def _capture_pr_sync_state(branch: str, head_sha: str, main_sha: str) -> dict:
     """Capture the clean published checkout immediately before the local merge."""
     actual_branch = git("branch", "--show-current").strip()
@@ -10969,19 +11025,19 @@ def _restore_pr_sync_state(snapshot: dict) -> tuple[bool, str]:
 
 def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
     """Reconcile one exact PR head with main; never publish unqualified history."""
+    with _pr_sync_lock() as acquired:
+        if not acquired:
+            return {**_pr_sync_result(pr), "status": "FAIL", "error": "SYNC_BUSY"}
+        return _sync_pr_base_locked(gh, repository, pr, dry_run=dry_run)
+
+
+def _sync_pr_base_locked(gh: str, repository: str, pr: dict, *, dry_run: bool) -> dict:
     _require_trusted_pr_execution(
         pr_number=pr["number"], base_sha=pr["base_sha"], head_sha=pr["head_sha"]
     )
     if _pr_loop_open_pr_errors(pr, repository) or _pr_loop_checkout_errors(pr):
         raise RuntimeError("SYNC_PR_BASE requires an open, non-draft exact clean PR checkout")
-    sync = {
-        "status": "NOT_REQUIRED", "old_head_sha": pr["head_sha"],
-        "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED",
-        "capture_before_mutation": "NOT_ATTEMPTED",
-        "restore_on_failure": "NOT_ATTEMPTED",
-        "restore_verification": "NOT_ATTEMPTED",
-        "force_push_used": False, "rebase_used": False,
-    }
+    sync = _pr_sync_result(pr)
     current = _pr_loop_current_base(
         gh, repository, pr["number"], pr["base_sha"], fetch=not dry_run
     )
@@ -11556,6 +11612,19 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
 
 
 def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
+    with _pr_sync_lock() as acquired:
+        if not acquired:
+            result = _pr_loop_empty_result(pr_number)
+            result["state"] = "SYNC_BUSY"
+            result["next_action"] = "RETRY_SYNC_PR_BASE"
+            result["sync"].update(status="FAIL", error="SYNC_BUSY")
+            result["blockers"].append("another PR transition holds the repository sync lock")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        return _pr_loop_impl_locked(pr_number, dry_run=dry_run, json_output=json_output)
+
+
+def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
     """Derive current PR delivery state and execute only its next authorized transition."""
     result = _pr_loop_empty_result(pr_number)
     _PR_LOOP_ACTIVE_RESULT.set(result)

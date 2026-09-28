@@ -78,7 +78,7 @@ repository_delivery:
     qualification_before_push: {required: true}
     signed_commit: {required: true}
     mutation_sites:
-      git_push: [scripts/repoctl.py#publish, scripts/repoctl.py#sync_pr_base]
+      git_push: [scripts/repoctl.py#publish, scripts/repoctl.py#_sync_pr_base_locked]
       git_push_delete: [scripts/repoctl.py#_delete_branch_ref]
       github_pr_create: [scripts/repoctl.py#deliver]
       github_pr_update: [scripts/repoctl.py#deliver]
@@ -185,6 +185,9 @@ repository_delivery:
       stop_before: [sync-pr-base, qualification, git-push, finish-pr]
       restart_controller: fresh-checkout-at-current-exact-base-sha
     sync_recovery:
+      exclusive_lock: git-common-dir-flock
+      lock_scope: [capture, merge, qualification, remote-head-check, push, push-resolution, recovery-or-confirmation]
+      concurrent_invocation: SYNC_BUSY
       capture_before_local_merge: [branch, head_sha, main_sha, tree_sha, clean_worktree]
       prepublication_failure: restore-exact-captured-checkout
       rollback_scope: invocation-owned-unpublished-merge-only

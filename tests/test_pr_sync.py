@@ -1,8 +1,12 @@
 """Contract tests for the one bounded, exact-SHA PR base transition."""
 
+import contextlib
 import importlib.util
+import io
+import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +26,7 @@ class SyncPRBaseTests(unittest.TestCase):
     TREE = "d" * 40
 
     def setUp(self):
+        self.lock_directory = tempfile.TemporaryDirectory()
         self.head = self.OLD
         self.commands = []
         self.remote = self.OLD
@@ -34,6 +39,10 @@ class SyncPRBaseTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "_require_trusted_pr_execution", return_value={}),
             mock.patch.object(REPOCTL, "_pr_loop_open_pr_errors", return_value=[]),
             mock.patch.object(REPOCTL, "_pr_loop_checkout_errors", return_value=[]),
+            mock.patch.object(
+                REPOCTL, "_pr_sync_lock_path",
+                return_value=Path(self.lock_directory.name) / "repoctl-sync-pr-base.lock",
+            ),
             mock.patch.object(REPOCTL, "_github_pr_snapshot", side_effect=self.snapshot),
             mock.patch.object(REPOCTL, "_remote_ref_sha", side_effect=self.ref),
             mock.patch.object(REPOCTL, "_remote_branch_head", side_effect=lambda _: self.remote),
@@ -48,6 +57,7 @@ class SyncPRBaseTests(unittest.TestCase):
     def tearDown(self):
         for patch in reversed(self.patches):
             patch.stop()
+        self.lock_directory.cleanup()
 
     def snapshot(self, *_):
         return {**self.pr, "head_sha": getattr(self, "github_head", self.remote)}
@@ -249,8 +259,75 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("QUALIFICATION_FAILED", result["failure_reason"])
         self.assertEqual("FAIL", result["restore_verification"])
 
+    def test_concurrent_invocation_returns_sync_busy_without_mutation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".git").mkdir()
+            locked = threading.Event()
+            release = threading.Event()
+            worker_errors = []
+
+            def hold_lock():
+                try:
+                    with REPOCTL._pr_sync_lock() as acquired:
+                        if not acquired:
+                            raise AssertionError("first invocation could not acquire lock")
+                        locked.set()
+                        release.wait(5)
+                except Exception as exc:
+                    worker_errors.append(exc)
+                    locked.set()
+
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                worker = threading.Thread(target=hold_lock)
+                worker.start()
+                try:
+                    self.assertTrue(locked.wait(5))
+                    self.assertFalse(worker_errors)
+                    direct = REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        rc = REPOCTL.pr_loop(self.pr["number"], json_output=True)
+                    loop = json.loads(output.getvalue())
+                finally:
+                    release.set()
+                    worker.join(5)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(worker_errors)
+                self.assertEqual("SYNC_BUSY", direct["error"])
+                self.assertEqual("NOT_ATTEMPTED", direct["capture_before_mutation"])
+                self.assertEqual(1, rc)
+                self.assertEqual("SYNC_BUSY", loop["state"])
+                self.assertEqual("RETRY_SYNC_PR_BASE", loop["next_action"])
+                self.assertEqual("SYNC_BUSY", loop["sync"]["error"])
+                self.assertEqual([], self.commands)
+                with REPOCTL._pr_sync_lock() as acquired:
+                    self.assertTrue(acquired)
+
 
 class SyncRecoveryGitTests(unittest.TestCase):
+    def test_linked_worktrees_share_one_lock_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "primary"
+            linked = Path(directory) / "linked"
+            root.mkdir()
+            subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+            subprocess.run(
+                ["git", "-c", "user.name=Sync Test", "-c", "user.email=sync@example.invalid",
+                 "-c", "commit.gpgsign=false",
+                 "commit", "-q", "--allow-empty", "-m", "initial"],
+                cwd=root, check=True,
+            )
+            subprocess.run(
+                ["git", "worktree", "add", "-q", "-b", "linked", str(linked)],
+                cwd=root, check=True,
+            )
+            with mock.patch.object(REPOCTL, "ROOT", root):
+                primary_lock = REPOCTL._pr_sync_lock_path()
+            with mock.patch.object(REPOCTL, "ROOT", linked):
+                linked_lock = REPOCTL._pr_sync_lock_path()
+            self.assertEqual(primary_lock, linked_lock)
+
     def test_unpublished_merge_restores_exact_branch_head_tree_and_cleanliness(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
