@@ -21,6 +21,17 @@ import tomllib
 import uuid
 from typing import Any
 
+try:
+    from scripts.codex_instruction_identity import (
+        instruction_chain_digest,
+        normalize_fallback_names,
+    )
+except ModuleNotFoundError:  # Direct execution outside the repository import path.
+    from codex_instruction_identity import (  # type: ignore[no-redef]
+        instruction_chain_digest,
+        normalize_fallback_names,
+    )
+
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/contracts/codex-token-budget.json"
 
@@ -119,6 +130,8 @@ def _context_module():
 def _verify_current(manifest: dict[str, Any]) -> None:
     if manifest.get("schema_version") != 2:
         raise ValueError("legacy context manifest cannot be reused")
+    if manifest.get("instruction_identity_verified") is not True:
+        raise ValueError("context instruction identity is not verified")
     module = _context_module()
     scope = manifest.get("scope") or {}
     since = str(scope.get("since") or "")
@@ -326,10 +339,30 @@ def effective_identity(profile: str, model: str, effort: str, expectation: str) 
         or system_values.get("model_reasoning_effort")
     )
     config_paths = [system, user, layer, *([project] if trusted else [])]
-    instruction = codex_home / "AGENTS.md"
+    fallback_value = next(
+        (
+            values["project_doc_fallback_filenames"]
+            for values in (local, selected, base, system_values)
+            if "project_doc_fallback_filenames" in values
+        ),
+        None,
+    )
+    instructions_verified = True
+    try:
+        fallback_names = normalize_fallback_names(fallback_value)
+        instruction_digest = instruction_chain_digest(
+            global_directory=codex_home,
+            project_directories=[ROOT],
+            fallback_names=fallback_names,
+        )
+    except (OSError, ValueError):
+        fallback_names = ()
+        instruction_digest = "UNVERIFIED"
+        instructions_verified = False
     verified = bool(
         isinstance(resolved_model, str) and resolved_model.strip()
         and isinstance(resolved_effort, str) and resolved_effort.strip()
+        and instructions_verified
     )
     return {
         "profile": profile,
@@ -341,9 +374,10 @@ def effective_identity(profile: str, model: str, effort: str, expectation: str) 
             f"{path}:{_sha256(path) if path.is_file() else 'MISSING'}"
             for path in config_paths
         ]),
-        "instruction_digest": _sha256(instruction) if instruction.is_file() else "MISSING",
+        "instruction_digest": instruction_digest,
+        "instruction_fallback_filenames": list(fallback_names),
         "success_condition_digest": hashlib.sha256(expectation.encode()).hexdigest(),
-        "generator": 3,
+        "generator": 4,
     }
 
 
@@ -365,6 +399,8 @@ def run_task(args: argparse.Namespace) -> int:
     if not task:
         raise ValueError("task is required")
     run_id = uuid.uuid4().hex
+    identity = effective_identity(args.profile, args.model, args.effort, args.expect or "")
+    identity["scope"] = "local-static-read-only" if args.cacheable else "nonreusable"
     stem = f".context/codex-budget/runs/{run_id}"
     pack = f"{stem}.md"
     manifest = f"{stem}.json"
@@ -381,8 +417,6 @@ def run_task(args: argparse.Namespace) -> int:
         raise RuntimeError(prepared.stderr.strip() or "context preparation failed")
     manifest_path = ROOT / manifest
     data = load_json(manifest_path)
-    identity = effective_identity(args.profile, args.model, args.effort, args.expect or "")
-    identity["scope"] = "local-static-read-only" if args.cacheable else "nonreusable"
     start = time.monotonic()
     decision = decide(manifest_path, identity) if args.cacheable else {
         "should_invoke_ai": True, "reason": "operation_not_cacheable"}

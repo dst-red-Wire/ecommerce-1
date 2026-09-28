@@ -350,6 +350,63 @@ class RoutingTests(unittest.TestCase):
                     second = MOD._instruction_digest([])
             self.assertNotEqual(first, second)
 
+    def test_instruction_digest_follows_override_and_configured_fallback_precedence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            codex_home = pathlib.Path(tmp) / "codex-home"
+            nested = root / "services/product"
+            nested.mkdir(parents=True)
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'project_doc_fallback_filenames = ["TEAM_GUIDE.md"]\n',
+                encoding="utf-8",
+            )
+            (codex_home / "AGENTS.md").write_text(
+                "global normal\n", encoding="utf-8"
+            )
+            fallback = root / "TEAM_GUIDE.md"
+            fallback.write_text("root fallback\n", encoding="utf-8")
+            override = root / "AGENTS.override.md"
+            with mock.patch.object(MOD, "ROOT", root), mock.patch.dict(
+                os.environ, {"CODEX_HOME": str(codex_home)}
+            ):
+                fallback_digest = MOD._instruction_digest(["services/product/main.go"])
+                override.write_text("root override one\n", encoding="utf-8")
+                override_digest = MOD._instruction_digest(["services/product/main.go"])
+                fallback.write_text("ignored while override exists\n", encoding="utf-8")
+                ignored_fallback_digest = MOD._instruction_digest(
+                    ["services/product/main.go"]
+                )
+                override.write_text("root override two\n", encoding="utf-8")
+                modified_override_digest = MOD._instruction_digest(
+                    ["services/product/main.go"]
+                )
+                override.unlink()
+                restored_fallback_digest = MOD._instruction_digest(
+                    ["services/product/main.go"]
+                )
+            self.assertNotEqual(fallback_digest, override_digest)
+            self.assertEqual(override_digest, ignored_fallback_digest)
+            self.assertNotEqual(override_digest, modified_override_digest)
+            self.assertNotEqual(modified_override_digest, restored_fallback_digest)
+
+    def test_instruction_identity_is_unverified_for_invalid_fallback_configuration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            codex_home = pathlib.Path(tmp) / "codex-home"
+            root.mkdir()
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'project_doc_fallback_filenames = "TEAM_GUIDE.md"\n',
+                encoding="utf-8",
+            )
+            with mock.patch.object(MOD, "ROOT", root), mock.patch.dict(
+                os.environ, {"CODEX_HOME": str(codex_home)}
+            ):
+                digest, verified = MOD._instruction_identity([])
+            self.assertEqual("UNVERIFIED", digest)
+            self.assertFalse(verified)
+
     def test_relevant_state_digest_changes_when_file_content_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

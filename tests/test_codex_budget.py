@@ -125,6 +125,9 @@ class CodexBudgetTest(unittest.TestCase):
                 'enabled = true\n',
                 encoding="utf-8",
             )
+            (codex_home / "AGENTS.md").write_text(
+                "stable global instructions\n", encoding="utf-8"
+            )
             fake = bin_dir / "codex"
             fake.write_text(
                 f"#!{__import__('sys').executable}\n"
@@ -174,9 +177,14 @@ class CodexBudgetTest(unittest.TestCase):
                 second = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
                 self.assertEqual(0, second.returncode, second.stderr)
                 self.assertEqual("1", counter.read_text())
-                fixture.write_text("version two", encoding="utf-8")
+                (codex_home / "AGENTS.override.md").write_text(
+                    "priority global instructions\n", encoding="utf-8"
+                )
                 third = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
                 self.assertEqual(0, third.returncode, third.stderr)
+                self.assertEqual("2", counter.read_text())
+                fourth = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
+                self.assertEqual(0, fourth.returncode, fourth.stderr)
                 self.assertEqual("2", counter.read_text())
             finally:
                 fixture.unlink(missing_ok=True)
@@ -186,7 +194,11 @@ class CodexBudgetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             checkout = pathlib.Path(tmp) / "checkout"
             subprocess.run(["git", "clone", "-q", "--shared", str(source), str(checkout)], check=True)
-            for relative in ("scripts/context-pack.py", "scripts/codex_budget.py"):
+            for relative in (
+                "scripts/context-pack.py",
+                "scripts/codex_budget.py",
+                "scripts/codex_instruction_identity.py",
+            ):
                 target = checkout / relative
                 shutil.copy2(source / relative, target)
                 with target.open("a", encoding="utf-8") as stream:
@@ -201,7 +213,7 @@ class CodexBudgetTest(unittest.TestCase):
             )
             self.assertEqual(0, generated.returncode, generated.stderr)
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            self.assertEqual(2, manifest["candidate_paths"])
+            self.assertEqual(3, manifest["candidate_paths"])
             self.assertEqual([], manifest["relevant_paths"])
             self.assertTrue(manifest["scope_ambiguous"])
             self.assertFalse(manifest["truncated"])
@@ -337,6 +349,61 @@ class CodexBudgetTest(unittest.TestCase):
         self.assertNotEqual(first["config_digest"], second["config_digest"])
         self.assertNotEqual(first["instruction_digest"], second["instruction_digest"])
         self.assertTrue(first["verified"])
+
+    def test_effective_identity_tracks_global_override_lifecycle(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            'model = "test-model"\nmodel_reasoning_effort = "low"\n',
+            encoding="utf-8",
+        )
+        normal = codex_home / "AGENTS.md"
+        override = codex_home / "AGENTS.override.md"
+        normal.write_text("normal instructions\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            normal_identity = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+            override.write_text("override one\n", encoding="utf-8")
+            created_identity = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+            override.write_text("override two\n", encoding="utf-8")
+            modified_identity = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+            override.unlink()
+            removed_identity = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+        self.assertNotEqual(
+            normal_identity["instruction_digest"], created_identity["instruction_digest"]
+        )
+        self.assertNotEqual(
+            created_identity["instruction_digest"], modified_identity["instruction_digest"]
+        )
+        self.assertNotEqual(
+            modified_identity["instruction_digest"], removed_identity["instruction_digest"]
+        )
+        self.assertEqual(
+            normal_identity["instruction_digest"], removed_identity["instruction_digest"]
+        )
+
+    def test_invalid_instruction_fallback_configuration_is_not_verified(self):
+        codex_home = self.root / "codex-home"
+        codex_home.mkdir()
+        (codex_home / "config.toml").write_text(
+            'model = "test-model"\n'
+            'model_reasoning_effort = "low"\n'
+            'project_doc_fallback_filenames = "TEAM_GUIDE.md"\n',
+            encoding="utf-8",
+        )
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            identity = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+        self.assertFalse(identity["verified"])
+        self.assertEqual("UNVERIFIED", identity["instruction_digest"])
 
     def test_unknown_identity_cannot_be_marked_or_reused(self):
         codex_home = self.root / "empty-codex-home"

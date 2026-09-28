@@ -20,7 +20,19 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from typing import Iterable
+
+try:
+    from scripts.codex_instruction_identity import (
+        instruction_chain_digest,
+        normalize_fallback_names,
+    )
+except ModuleNotFoundError:  # Direct execution outside the repository import path.
+    from codex_instruction_identity import (  # type: ignore[no-redef]
+        instruction_chain_digest,
+        normalize_fallback_names,
+    )
 
 ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
 ROUTER = ROOT / "config/context/router.yaml"
@@ -384,20 +396,66 @@ def _policy_version(cfg: dict, budget: dict) -> str:
     return _sha256_text(canonical)
 
 
-def _instruction_digest(files: list[str]) -> str:
+def _codex_home() -> Path:
     configured = os.environ.get("CODEX_HOME", "").strip()
-    codex_home = Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
-    paths = [ROOT / "AGENTS.md", codex_home / "AGENTS.md"]
-    for file in files:
-        relative = Path(file)
-        for parent in relative.parents:
-            if str(parent) == ".":
-                continue
-            paths.append(ROOT / parent / "AGENTS.md")
-    return _sha256_parts(
-        [str(path) + ":" + hashlib.sha256(path.read_bytes()).hexdigest()
-         for path in set(paths) if path.is_file()]
+    return Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
+
+
+def _read_toml(path: Path) -> dict:
+    return tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _project_is_trusted(user_config: dict) -> bool:
+    matches: list[tuple[int, str]] = []
+    for value, project in (user_config.get("projects") or {}).items():
+        if not isinstance(project, dict):
+            continue
+        configured = Path(str(value)).expanduser().resolve()
+        if configured == ROOT.resolve() or configured in ROOT.resolve().parents:
+            matches.append((len(configured.parts), str(project.get("trust_level") or "")))
+    return bool(matches and max(matches, key=lambda item: item[0])[1] == "trusted")
+
+
+def _instruction_fallback_names() -> tuple[str, ...]:
+    codex_home = _codex_home()
+    system = _read_toml(Path("/etc/codex/config.toml"))
+    user = _read_toml(codex_home / "config.toml")
+    project_path = ROOT / ".codex/config.toml"
+    project = _read_toml(project_path) if _project_is_trusted(user) else {}
+    value = next(
+        (
+            values["project_doc_fallback_filenames"]
+            for values in (project, user, system)
+            if "project_doc_fallback_filenames" in values
+        ),
+        None,
     )
+    return normalize_fallback_names(value)
+
+
+def _project_instruction_directories(files: list[str]) -> list[Path]:
+    directories = [ROOT]
+    for file in files:
+        current = ROOT
+        for part in Path(file).parent.parts:
+            current /= part
+            directories.append(current)
+    return list(dict.fromkeys(directories))
+
+
+def _instruction_identity(files: list[str]) -> tuple[str, bool]:
+    try:
+        return instruction_chain_digest(
+            global_directory=_codex_home(),
+            project_directories=_project_instruction_directories(files),
+            fallback_names=_instruction_fallback_names(),
+        ), True
+    except (OSError, ValueError, tomllib.TOMLDecodeError):
+        return "UNVERIFIED", False
+
+
+def _instruction_digest(files: list[str]) -> str:
+    return _instruction_identity(files)[0]
 
 
 def _contract_digest(level: str, cfg: dict, services: list[str], pointers: list[str] | None = None) -> str:
@@ -519,7 +577,7 @@ def build_pack(
     section_pointers = targeted_section_pointers(task, files, cfg)
     applicable_contract_digest = _contract_digest(level, cfg, services, section_pointers)
     context_policy_version = _policy_version(cfg, budget)
-    instruction_digest = _instruction_digest(files)
+    instruction_digest, instruction_identity_verified = _instruction_identity(files)
     cache_key = _cache_key(
         task_digest=task_digest,
         head_sha=head_sha,
@@ -606,6 +664,7 @@ def build_pack(
         "targeted_pointers": section_pointers,
         "candidate_paths_digest": candidate_paths_digest,
         "instruction_digest": instruction_digest,
+        "instruction_identity_verified": instruction_identity_verified,
         "historical_paths_excluded": historical,
         "relevant_paths_digest": relevant_paths_digest,
         "applicable_contract_digest": applicable_contract_digest,
@@ -682,6 +741,8 @@ def main() -> int:
             old_manifest = {}
     reused = bool(
         old_manifest.get("cache_key") == manifest["cache_key"]
+        and manifest.get("instruction_identity_verified") is True
+        and old_manifest.get("instruction_identity_verified") is True
         and destination.is_file()
         and len(destination.read_bytes()) <= int(manifest["max_bytes"])
     )
