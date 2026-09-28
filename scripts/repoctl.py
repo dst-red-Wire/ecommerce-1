@@ -13,6 +13,8 @@ import ast
 import contextlib
 import contextvars
 import copy
+import errno
+import fcntl
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import functools
@@ -41,6 +43,7 @@ _MODERN_ENGINEERING = None
 _CVE_POLICY = None
 _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=None)
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
+_PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 
 
@@ -7641,6 +7644,7 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     risk_policy = normalized.pop("risk_classification", None)
     expected_transition = [
         "exact-pr-head",
+        "sync-pr-base-if-required",
         "qualification",
         "chatgpt-code",
         "chatgpt-security",
@@ -7671,6 +7675,33 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     }:
         return {}
     if normalized.get("transition_order") != expected_transition:
+        return {}
+    if normalized.pop("base_change", None) != {
+        "detection": "github-rest-base-sha-or-origin-main-differs-from-trusted-base-sha",
+        "state": "BASE_CHANGED",
+        "next_action": "RESTART_EXACT_BASE_CONTROLLER",
+        "stop_before": ["sync-pr-base", "qualification", "git-push", "finish-pr"],
+        "restart_controller": "fresh-checkout-at-current-exact-base-sha",
+    }:
+        return {}
+    if normalized.pop("sync_recovery", None) != {
+        "exclusive_lock": "git-common-dir-flock",
+        "lock_scope": ["capture", "merge", "qualification", "remote-head-check", "push", "push-resolution", "recovery-or-confirmation"],
+        "concurrent_invocation": "SYNC_BUSY",
+        "capture_before_local_merge": ["branch", "head_sha", "main_sha", "tree_sha", "clean_worktree"],
+        "prepublication_failure": "restore-exact-captured-checkout",
+        "rollback_scope": "invocation-owned-unpublished-merge-only",
+        "verification": ["branch", "head_sha", "tree_sha", "clean_worktree", "no_merge_in_progress"],
+        "failed_verification": "SYNC_RECOVERY_FAILED",
+        "uncertain_push_outcome": "HEAD_SYNC_UNCONFIRMED",
+    }:
+        return {}
+    exact_sha = normalized.get("exact_sha")
+    if (
+        not isinstance(exact_sha, dict)
+        or exact_sha.pop("in_flight_transition_on_base_change", None)
+        != "abandon-and-restart-from-current-exact-base"
+    ):
         return {}
     if not _merge_risk_policy_is_valid(risk_policy, owner_boundary):
         return {}
@@ -10785,6 +10816,7 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "state": "GITHUB_UNAVAILABLE",
         "review_kind": "",
         "draft": False,
+        "sync": {"status": "NOT_REQUIRED", "old_head_sha": "", "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED", "force_push_used": False, "rebase_used": False},
         "qualification": {"status": "UNKNOWN", "source": "none"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
         "security_review": {"status": "UNKNOWN", "head_sha": ""},
@@ -10826,9 +10858,319 @@ def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
         "status": "PASS",
         "source": "reused",
         "head_sha": head_sha,
+        "base_sha": git("rev-parse", base_ref).strip(),
         "evidence": str(evidence.relative_to(ROOT)),
         "performance_audit": str(audit.relative_to(ROOT)),
     }
+
+
+class PRBaseChanged(RuntimeError):
+    def __init__(self, expected: str, github_base: str, origin_main: str):
+        self.github_base = github_base
+        self.origin_main = origin_main
+        super().__init__(
+            f"exact-base controller {expected} is obsolete: "
+            f"GitHub base={github_base}, origin/main={origin_main}"
+        )
+
+
+def _pr_loop_current_base(
+    gh: str, repository: str, pr_number: int, expected_base: str, *, fetch: bool
+) -> dict:
+    """Read both base authorities before any exact-base transition."""
+    if fetch:
+        fetched = run(["git", "fetch", "origin", "--prune"], check=False, capture=True)
+        if fetched.returncode:
+            raise RuntimeError("git fetch origin --prune failed during base revalidation")
+    snapshot = _github_pr_snapshot(gh, repository, pr_number)
+    origin_main = _remote_ref_sha("origin/main")
+    if snapshot["base_sha"] != expected_base or origin_main != expected_base:
+        raise PRBaseChanged(expected_base, snapshot["base_sha"], origin_main)
+    return snapshot
+
+
+def _pr_loop_base_changed(result: dict, change: PRBaseChanged, *, json_output: bool) -> int:
+    """Discard in-flight authorities and request a fresh exact-base controller."""
+    result["state"] = "BASE_CHANGED"
+    result["next_action"] = "RESTART_EXACT_BASE_CONTROLLER"
+    result["current_base_sha"] = change.github_base
+    result["origin_main_sha"] = change.origin_main
+    result["merge_ready"] = False
+    result["qualification"] = {
+        "status": "MISSING", "source": "none", "head_sha": result.get("head_sha", "")
+    }
+    for field in ("code_review", "security_review"):
+        result[field] = {"status": "MISSING", "head_sha": result.get("head_sha", "")}
+    result["risk"] = _pr_loop_empty_result(result["pr"])["risk"]
+    result["risk_classification"] = "UNKNOWN"
+    result["owner_authorization"] = {"status": "MISSING"}
+    result.pop("review_request", None)
+    result.pop("merge_requirements", None)
+    result["blockers"].append(str(change))
+    _emit_pr_loop_result(result, json_output=json_output)
+    return 1
+
+
+def _pr_sync_lock_path() -> Path:
+    """Use one lock for all worktrees sharing the same Git repository."""
+    common_dir = ROOT / ".git"
+    if not common_dir.is_dir():
+        raw = git("rev-parse", "--git-common-dir").strip()
+        if not raw:
+            raise RuntimeError("cannot locate Git common directory for PR sync lock")
+        common_dir = Path(raw)
+        if not common_dir.is_absolute():
+            common_dir = ROOT / common_dir
+    return common_dir.resolve() / "repoctl-sync-pr-base.lock"
+
+
+@contextlib.contextmanager
+def _pr_sync_lock():
+    """Acquire a nonblocking process lock through confirmation or recovery."""
+    path = _pr_sync_lock_path()
+    if _PR_SYNC_LOCK_HELD.get() == path:
+        yield True
+        return
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                raise
+            yield False
+            return
+        token = _PR_SYNC_LOCK_HELD.set(path)
+        try:
+            yield True
+        finally:
+            _PR_SYNC_LOCK_HELD.reset(token)
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+def _pr_sync_result(pr: dict) -> dict:
+    return {
+        "status": "NOT_REQUIRED", "old_head_sha": pr["head_sha"],
+        "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED",
+        "capture_before_mutation": "NOT_ATTEMPTED",
+        "restore_on_failure": "NOT_ATTEMPTED",
+        "restore_verification": "NOT_ATTEMPTED",
+        "force_push_used": False, "rebase_used": False,
+    }
+
+
+def _capture_pr_sync_state(branch: str, head_sha: str, main_sha: str) -> dict:
+    """Capture the clean published checkout immediately before the local merge."""
+    actual_branch = git("branch", "--show-current").strip()
+    actual_head = git("rev-parse", "HEAD").strip()
+    tree_sha = git("rev-parse", "HEAD^{tree}").strip()
+    if (
+        actual_branch != branch or actual_head != head_sha
+        or re.fullmatch(r"[0-9a-f]{40}", tree_sha) is None
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError("cannot capture a clean exact PR checkout before sync mutation")
+    return {"branch": branch, "head_sha": head_sha, "main_sha": main_sha, "tree_sha": tree_sha}
+
+
+def _restore_pr_sync_state(snapshot: dict) -> tuple[bool, str]:
+    """Restore only this invocation's unpublished merge, then prove exact state."""
+    branch = snapshot["branch"]
+    old_head = snapshot["head_sha"]
+    if git("branch", "--show-current").strip() != branch:
+        return False, "source branch changed during sync recovery"
+    current_head = git("rev-parse", "HEAD").strip()
+    merge_head = run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture=True)
+    if merge_head.returncode == 0:
+        if current_head != old_head or merge_head.stdout.strip() != snapshot["main_sha"]:
+            return False, "merge in progress is not this invocation's merge"
+        aborted = run(["git", "merge", "--abort"], check=False, capture=True)
+        if aborted.returncode:
+            return False, "git merge --abort failed"
+    elif current_head != old_head:
+        parents = run(
+            ["git", "rev-list", "--parents", "-n", "1", current_head],
+            check=False, capture=True,
+        )
+        fields = parents.stdout.strip().split() if parents.returncode == 0 else []
+        if fields != [current_head, old_head, snapshot["main_sha"]]:
+            return False, "HEAD is not this invocation's merge commit"
+        restored_files = run(
+            ["git", "restore", "--source", old_head, "--staged", "--worktree", "--", ":/"],
+            check=False, capture=True,
+        )
+        if restored_files.returncode:
+            return False, "cannot restore files from initial PR head"
+        updated = run(
+            ["git", "update-ref", f"refs/heads/{branch}", old_head, current_head],
+            check=False, capture=True,
+        )
+        if updated.returncode:
+            run(
+                ["git", "restore", "--source", current_head, "--staged", "--worktree", "--", ":/"],
+                check=False, capture=True,
+            )
+            return False, "source branch changed during compare-and-restore"
+    verified = (
+        git("branch", "--show-current").strip() == branch
+        and git("rev-parse", "HEAD").strip() == old_head
+        and git("rev-parse", "HEAD^{tree}").strip() == snapshot["tree_sha"]
+        and not git("status", "--porcelain", "--untracked-files=all").strip()
+        and run(["git", "rev-parse", "--verify", "MERGE_HEAD"], check=False, capture=True).returncode != 0
+    )
+    return verified, "PASS" if verified else "restored checkout verification failed"
+
+
+def _serialize_pr_sync_transition(func):
+    @functools.wraps(func)
+    def locked(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
+        with _pr_sync_lock() as acquired:
+            if not acquired:
+                return {**_pr_sync_result(pr), "status": "FAIL", "error": "SYNC_BUSY"}
+            return func(gh, repository, pr, dry_run=dry_run)
+    return locked
+
+
+@_serialize_pr_sync_transition
+def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -> dict:
+    """Reconcile one exact PR head with main under the exclusive sync lock."""
+    _require_trusted_pr_execution(
+        pr_number=pr["number"], base_sha=pr["base_sha"], head_sha=pr["head_sha"]
+    )
+    if _pr_loop_open_pr_errors(pr, repository) or _pr_loop_checkout_errors(pr):
+        raise RuntimeError("SYNC_PR_BASE requires an open, non-draft exact clean PR checkout")
+    sync = _pr_sync_result(pr)
+    current = _pr_loop_current_base(
+        gh, repository, pr["number"], pr["base_sha"], fetch=not dry_run
+    )
+    main_sha = pr["base_sha"]
+    remote_sha = _remote_ref_sha(f"origin/{pr['head_branch']}")
+    local_sha = git("rev-parse", "HEAD").strip()
+    sync["main_sha"] = main_sha
+    if (
+        current["state"] != "OPEN" or current["draft"]
+        or current["head_branch"] != pr["head_branch"]
+        or current["head_repository"] != repository
+        or local_sha != remote_sha or remote_sha != current["head_sha"]
+        or local_sha != pr["head_sha"]
+    ):
+        raise RuntimeError("REMOTE_HEAD_CHANGED: local, origin branch and GitHub PR head must match")
+    ancestor = run(
+        ["git", "merge-base", "--is-ancestor", main_sha, local_sha],
+        check=False, capture=True,
+    )
+    if ancestor.returncode == 0:
+        return sync
+    if ancestor.returncode != 1:
+        raise RuntimeError("SYNC_PR_BASE cannot determine current main lineage")
+    sync["status"] = "REQUIRED"
+    if dry_run:
+        return sync
+    _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
+    captured = _capture_pr_sync_state(pr["head_branch"], local_sha, main_sha)
+    sync["capture_before_mutation"] = "PASS"
+
+    def fail_before_publication(error: str, detail: str = "") -> dict:
+        sync.update(status="FAIL", error=error)
+        if detail:
+            sync["failure_detail"] = detail
+        try:
+            restored, reason = _restore_pr_sync_state(captured)
+        except (OSError, RuntimeError, ValueError) as exc:
+            restored, reason = False, str(exc)
+        sync["restore_on_failure"] = "PASS" if restored else "FAIL"
+        sync["restore_verification"] = "PASS" if restored else "FAIL"
+        sync["worktree_clean"] = "PASS" if restored else "FAIL"
+        if not restored:
+            sync["failure_reason"] = error
+            sync["error"] = "SYNC_RECOVERY_FAILED"
+            sync["recovery_detail"] = reason
+        return sync
+
+    try:
+        merge = run(
+            ["git", "merge", "--no-ff", "-S", "-m",
+             f"chore(governance): sync PR #{pr['number']} with current main", main_sha],
+            check=False, capture=True,
+        )
+        if merge.returncode:
+            in_progress = run(
+                ["git", "rev-parse", "--verify", "MERGE_HEAD"],
+                check=False, capture=True,
+            ).returncode == 0
+            return fail_before_publication(
+                "SYNC_CONFLICT" if in_progress else "SYNC_MERGE_FAILED"
+            )
+        new_sha = git("rev-parse", "HEAD").strip()
+        sync["new_head_sha"] = new_sha
+        if (
+            not re.fullmatch(r"[0-9a-f]{40}", new_sha) or new_sha == local_sha
+            or run(["git", "merge-base", "--is-ancestor", main_sha, new_sha], check=False, capture=True).returncode
+            or run(["git", "verify-commit", "--raw", new_sha], check=False, capture=True).returncode
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            return fail_before_publication("SIGNED_MERGE_VERIFICATION_FAILED")
+        _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
+        # Qualification binds the new commit to the merged main before push.
+        qualified = run(
+            _controller_command("qualification-proof", "--base", main_sha),
+            check=False, capture=True,
+            env={**os.environ, "REPOCTL_TRUSTED_HEAD_SHA": new_sha},
+        )
+        proof = _pr_loop_qualification(main_sha, new_sha)
+        sync["qualification"] = proof
+        if qualified.returncode or proof.get("status") != "PASS" or proof.get("base_sha") != main_sha:
+            return fail_before_publication("QUALIFICATION_FAILED")
+        sync["qualification"]["source"] = "executed"
+        _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
+        # The expected remote head is checked immediately before a normal push.
+        if _remote_branch_head(pr["head_branch"]) != local_sha:
+            return fail_before_publication("REMOTE_HEAD_CHANGED")
+    except PRBaseChanged as exc:
+        sync["current_base_sha"] = exc.github_base
+        sync["origin_main_sha"] = exc.origin_main
+        return fail_before_publication("BASE_CHANGED", str(exc))
+    except Exception as exc:
+        return fail_before_publication("SYNC_PREPUBLICATION_FAILED", str(exc))
+
+    try:
+        push_failed = publish("main", "") != 0
+    except (OSError, RuntimeError) as exc:
+        push_failed = True
+        sync["failure_detail"] = str(exc)
+    confirmed = None
+    if push_failed:
+        try:
+            remote_after_push = _remote_branch_head(pr["head_branch"])
+            github_after_push = _github_pr_snapshot(gh, repository, pr["number"])
+        except (OSError, RuntimeError):
+            sync.update(status="FAIL", push_result="UNKNOWN", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+        if remote_after_push == new_sha and github_after_push["head_sha"] == new_sha:
+            confirmed = github_after_push
+        elif remote_after_push == local_sha and github_after_push["head_sha"] == local_sha:
+            sync["push_result"] = "FAIL"
+            return fail_before_publication("PUSH_FAILED")
+        else:
+            sync.update(status="FAIL", push_result="UNKNOWN", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+    sync["push_result"] = "PASS"
+    sync.pop("failure_detail", None)
+    if confirmed is None:
+        try:
+            confirmed = _github_pr_snapshot(gh, repository, pr["number"])
+        except RuntimeError:
+            sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
+            return sync
+    if confirmed["head_sha"] != new_sha:
+        sync.update(status="FAIL", error="HEAD_SYNC_UNCONFIRMED")
+        return sync
+    if confirmed["base_sha"] != main_sha:
+        raise PRBaseChanged(main_sha, confirmed["base_sha"], _remote_ref_sha("origin/main"))
+    sync["status"] = "PASS"
+    return sync
 
 
 def _pr_loop_chatgpt_handoff(
@@ -10849,6 +11191,17 @@ def _pr_loop_chatgpt_handoff(
         raise RuntimeError("cannot build ChatGPT handoff without an exact base SHA")
     if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
         raise RuntimeError("cannot build ChatGPT handoff without an exact head SHA")
+    previous_head = base_sha
+    if review_kind == "CODE":
+        parents = run(
+            ["git", "rev-list", "--parents", "-n", "1", head_sha],
+            check=False, capture=True,
+        )
+        if parents.returncode:
+            raise RuntimeError("cannot derive exact commit parents for ChatGPT handoff")
+        parts = parents.stdout.strip().split()
+        if len(parts) == 3 and parts[0] == head_sha and parts[2] == base_sha:
+            previous_head = parts[1]
     changed = run(
         ["git", "diff", "--name-only", "-z", f"{base_sha}..{head_sha}"],
         check=False,
@@ -10872,7 +11225,7 @@ def _pr_loop_chatgpt_handoff(
         "state": "OPEN",
         "merged": False,
     }
-    previous = {**empty_state, "head_sha": base_sha, "validated_verdict": ""}
+    previous = {**empty_state, "head_sha": previous_head, "validated_verdict": ""}
     if review_kind == "SECURITY":
         previous.update(
             {
@@ -11259,6 +11612,19 @@ def pr_loop(pr_number: int, *, dry_run: bool = False, json_output: bool = False)
 
 
 def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
+    with _pr_sync_lock() as acquired:
+        if not acquired:
+            result = _pr_loop_empty_result(pr_number)
+            result["state"] = "SYNC_BUSY"
+            result["next_action"] = "RETRY_SYNC_PR_BASE"
+            result["sync"].update(status="FAIL", error="SYNC_BUSY")
+            result["blockers"].append("another PR transition holds the repository sync lock")
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        return _pr_loop_impl_locked(pr_number, dry_run=dry_run, json_output=json_output)
+
+
+def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
     """Derive current PR delivery state and execute only its next authorized transition."""
     result = _pr_loop_empty_result(pr_number)
     _PR_LOOP_ACTIVE_RESULT.set(result)
@@ -11291,12 +11657,16 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
             fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
             if fetch.returncode:
                 raise RuntimeError("git fetch origin --prune failed")
-        initial = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        initial = _pr_loop_current_base(
+            gh, name_with_owner, pr_number, str(trusted_context["base_sha"]), fetch=False
+        )
         _require_trusted_pr_execution(
             pr_number=initial["number"],
             base_sha=initial["base_sha"],
             head_sha=initial["head_sha"],
         )
+    except PRBaseChanged as exc:
+        return _pr_loop_base_changed(result, exc, json_output=json_output)
     except RuntimeError as exc:
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
@@ -11339,6 +11709,72 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         result["blockers"].extend(checkout_errors)
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
+
+    def reconcile_main(snapshot: dict) -> int:
+        result["state"] = "SYNC_PR_BASE"
+        result["next_action"] = "SYNC_PR_BASE"
+        try:
+            sync = sync_pr_base(gh, name_with_owner, snapshot, dry_run=dry_run)
+        except PRBaseChanged as exc:
+            return _pr_loop_base_changed(result, exc, json_output=json_output)
+        except RuntimeError as exc:
+            result["state"] = "BLOCKED"
+            result["next_action"] = "RECHECK_EXACT_HEAD"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        result["sync"] = sync
+        if sync["status"] == "FAIL":
+            error = sync.get("error", "SYNC_FAILED")
+            if error == "BASE_CHANGED":
+                return _pr_loop_base_changed(
+                    result,
+                    PRBaseChanged(
+                        snapshot["base_sha"], sync["current_base_sha"],
+                        sync["origin_main_sha"],
+                    ),
+                    json_output=json_output,
+                )
+            result["state"] = "SYNC_CONFLICT" if error == "SYNC_CONFLICT" else error
+            result["next_action"] = "FIX_SYNC_CONFLICTS" if error == "SYNC_CONFLICT" else error
+            result["blockers"].append(error)
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        if sync["status"] == "PASS":
+            new_head = sync["new_head_sha"]
+            result["head_sha"] = new_head
+            result["qualification"] = sync["qualification"]
+            result["code_review"] = {"status": "MISSING", "head_sha": new_head}
+            result["security_review"] = {"status": "MISSING", "head_sha": new_head}
+            result["risk"] = {**_pr_loop_empty_result(pr_number)["risk"], "head_sha": new_head}
+            result["risk_classification"] = "UNKNOWN"
+            result["owner_authorization"] = {"status": "MISSING", "head_sha": new_head}
+            result["owner_authorization_required"] = True
+            result["merge_ready"] = False
+            result["next_action"] = "QUALIFICATION"
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 0
+
+    current_main_sha = str(trusted_context["base_sha"])
+    result["sync"].update(old_head_sha=initial_head_sha, main_sha=current_main_sha)
+    if not re.fullmatch(r"[0-9a-f]{40}", current_main_sha):
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FETCH_ORIGIN"
+        result["blockers"].append("current origin/main is unavailable")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    lineage = run(
+        ["git", "merge-base", "--is-ancestor", current_main_sha, initial_head_sha],
+        check=False, capture=True,
+    ).returncode
+    if lineage not in {0, 1}:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "RECHECK_MAIN_LINEAGE"
+        result["blockers"].append("cannot determine current origin/main lineage")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if lineage == 1:
+        return reconcile_main(initial)
 
     def refresh_authorities(snapshot: dict) -> None:
         reviews, authorization = pull_request_authority_evidence(
@@ -11383,7 +11819,11 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
     )
     if state == "QUALIFICATION_REQUIRED" and not dry_run:
         try:
-            before_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+            before_qualification = _pr_loop_current_base(
+                gh, name_with_owner, pr_number, str(trusted_context["base_sha"]), fetch=True
+            )
+        except PRBaseChanged as exc:
+            return _pr_loop_base_changed(result, exc, json_output=json_output)
         except RuntimeError as exc:
             result["state"] = "GITHUB_UNAVAILABLE"
             result["next_action"] = "RETRY"
@@ -11424,7 +11864,9 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
             return 1
         result["qualification"]["source"] = "executed"
         try:
-            after_qualification = _github_pr_snapshot(gh, name_with_owner, pr_number)
+            after_qualification = _pr_loop_current_base(
+                gh, name_with_owner, pr_number, str(trusted_context["base_sha"]), fetch=True
+            )
             if after_qualification["head_sha"] != initial_head_sha:
                 result["state"] = "HEAD_CHANGED"
                 result["next_action"] = "QUALIFICATION"
@@ -11433,6 +11875,8 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
                 return 1
             refresh_authorities(after_qualification)
             initial = after_qualification
+        except PRBaseChanged as exc:
+            return _pr_loop_base_changed(result, exc, json_output=json_output)
         except RuntimeError as exc:
             result["state"] = "GITHUB_UNAVAILABLE"
             result["next_action"] = "RETRY"
@@ -11455,6 +11899,25 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         "SECURITY_FAILED",
         "OWNER_AUTH_REQUIRED",
     }:
+        try:
+            latest = _pr_loop_current_base(
+                gh, name_with_owner, pr_number, str(trusted_context["base_sha"]),
+                fetch=not dry_run,
+            )
+        except PRBaseChanged as exc:
+            return _pr_loop_base_changed(result, exc, json_output=json_output)
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        if latest["head_sha"] != initial_head_sha:
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["current_head_sha"] = latest["head_sha"]
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         result["state"] = state
         result["next_action"] = next_action
         result["review_trigger"] = (
@@ -11557,15 +12020,10 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         return 0 if state == "MERGE_READY" else 1
 
     try:
-        if not dry_run:
-            final_fetch = run(
-                ["git", "fetch", "origin", "--prune"],
-                check=False,
-                capture=json_output,
-            )
-            if final_fetch.returncode:
-                raise RuntimeError("git fetch origin --prune failed during final revalidation")
-        before_merge = _github_pr_snapshot(gh, name_with_owner, pr_number)
+        before_merge = _pr_loop_current_base(
+            gh, name_with_owner, pr_number, str(trusted_context["base_sha"]),
+            fetch=not dry_run,
+        )
         if before_merge["head_sha"] != initial_head_sha:
             result["state"] = "HEAD_CHANGED"
             result["next_action"] = "QUALIFICATION"
@@ -11583,6 +12041,8 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
             result["code_review"],
             result["security_review"],
         )
+    except PRBaseChanged as exc:
+        return _pr_loop_base_changed(result, exc, json_output=json_output)
     except RuntimeError as exc:
         result["state"] = "GITHUB_UNAVAILABLE"
         result["next_action"] = "RETRY"
@@ -11591,6 +12051,21 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
         return 1
     result["merge_requirements"] = merge_requirements
     result["blockers"].extend(details)
+    if merge_requirements.get("current_main_lineage") is False:
+        result["blockers"].clear()
+        try:
+            _pr_loop_current_base(
+                gh, name_with_owner, pr_number, str(trusted_context["base_sha"]), fetch=True
+            )
+        except PRBaseChanged as exc:
+            return _pr_loop_base_changed(result, exc, json_output=json_output)
+        except RuntimeError as exc:
+            result["state"] = "GITHUB_UNAVAILABLE"
+            result["next_action"] = "RETRY"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+        return reconcile_main(initial)
     state, next_action = derive_pr_loop_state(
         before_merge,
         result["qualification"],
@@ -11604,6 +12079,25 @@ def _pr_loop_impl(pr_number: int, *, dry_run: bool, json_output: bool) -> int:
     result["next_action"] = next_action
     result["merge_ready"] = state == "MERGE_READY"
     if state != "MERGE_READY":
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+
+    try:
+        final_base = _pr_loop_current_base(
+            gh, name_with_owner, pr_number, str(trusted_context["base_sha"]), fetch=True
+        )
+    except PRBaseChanged as exc:
+        return _pr_loop_base_changed(result, exc, json_output=json_output)
+    except RuntimeError as exc:
+        result["state"] = "GITHUB_UNAVAILABLE"
+        result["next_action"] = "RETRY"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if final_base["head_sha"] != initial_head_sha:
+        result["state"] = "HEAD_CHANGED"
+        result["next_action"] = "QUALIFICATION"
+        result["current_head_sha"] = final_base["head_sha"]
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
 

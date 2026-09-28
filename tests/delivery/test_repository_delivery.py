@@ -176,6 +176,37 @@ class RemoteEvidenceTests(unittest.TestCase):
                     RD.fetch_evidence(root, root / ".context", requested)
 
 
+class TrustedPRBindingTests(unittest.TestCase):
+    def test_uses_rest_base_and_head_even_if_cli_sha_fields_disagree(self):
+        base_sha, head_sha = "a" * 40, "b" * 40
+        payload = {
+            "number": 166, "state": "open", "draft": False,
+            "base": {"ref": "main", "sha": base_sha},
+            "head": {
+                "ref": "feat/sync", "sha": head_sha,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "baseRefOid": "c" * 40,
+            "headRefOid": "d" * 40,
+        }
+        with mock.patch.object(RD, "_output", return_value=json.dumps(payload)) as output:
+            binding = RD._github_pr_binding(ROOT, "gh", "owner/repo", 166)
+        output.assert_called_once_with(
+            ["gh", "api", "repos/owner/repo/pulls/166"], cwd=ROOT
+        )
+        self.assertEqual(base_sha, binding["base_sha"])
+        self.assertEqual(head_sha, binding["head_sha"])
+
+    def test_cli_only_sha_fields_cannot_authorize_transition(self):
+        payload = {
+            "number": 166, "state": "open", "draft": False,
+            "baseRefOid": "a" * 40, "headRefOid": "b" * 40,
+        }
+        with mock.patch.object(RD, "_output", return_value=json.dumps(payload)):
+            with self.assertRaisesRegex(RuntimeError, "REST pull request base/head"):
+                RD._github_pr_binding(ROOT, "gh", "owner/repo", 166)
+
+
 class BundleDeliveryTests(unittest.TestCase):
     def git(self, cwd: Path, *args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
@@ -331,11 +362,10 @@ class BundleDeliveryTests(unittest.TestCase):
             binding = {
                 "number": 162,
                 "state": "OPEN",
-                "isDraft": False,
-                "baseRefName": "main",
-                "baseRefOid": base_sha,
-                "headRefName": "feat/tamper",
-                "headRefOid": head_sha,
+                "draft": False,
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+                "head_repository": "owner/repo",
             }
             seen = {}
             real_run = RD._run

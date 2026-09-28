@@ -320,32 +320,45 @@ def _github_repository(root: Path, gh: str) -> str:
     return repository
 
 
-def _github_pr_binding(root: Path, gh: str, pr_number: int) -> dict[str, Any]:
+def _github_pr_binding(root: Path, gh: str, repository: str, pr_number: int) -> dict[str, Any]:
     raw = _output(
-        [
-            gh,
-            "pr",
-            "view",
-            str(pr_number),
-            "--json",
-            "number,state,isDraft,baseRefName,baseRefOid,headRefName,headRefOid",
-        ],
+        [gh, "api", f"repos/{repository}/pulls/{pr_number}"],
         cwd=root,
     )
     try:
         value = json.loads(raw or "{}")
     except json.JSONDecodeError as exc:
-        raise RuntimeError("GitHub pull request binding returned invalid JSON") from exc
+        raise RuntimeError("GitHub REST pull request binding returned invalid JSON") from exc
     if not isinstance(value, dict) or value.get("number") != pr_number:
-        raise RuntimeError("GitHub pull request binding does not match the requested PR")
-    for field in ("baseRefOid", "headRefOid"):
-        if not re.fullmatch(r"[0-9a-f]{40}", str(value.get(field) or "")):
-            raise RuntimeError(f"GitHub pull request {field} is missing or invalid")
-    if value.get("baseRefName") != "main":
+        raise RuntimeError("GitHub REST pull request binding does not match the requested PR")
+    base = value.get("base")
+    head = value.get("head")
+    if not isinstance(base, dict) or not isinstance(head, dict):
+        raise RuntimeError("GitHub REST pull request base/head objects are missing")
+    for side, payload in (("base", base), ("head", head)):
+        if not re.fullmatch(r"[0-9a-f]{40}", str(payload.get("sha") or "")):
+            raise RuntimeError(f"GitHub REST pull request {side}.sha is missing or invalid")
+        if not isinstance(payload.get("ref"), str) or not payload["ref"]:
+            raise RuntimeError(f"GitHub REST pull request {side}.ref is missing or invalid")
+    if base["ref"] != "main":
         raise RuntimeError("trusted PR transition requires the main default branch")
-    if value.get("state") not in {"OPEN", "MERGED"}:
+    if value.get("state") not in {"open", "closed"}:
         raise RuntimeError(f"trusted PR transition refuses PR state {value.get('state')!r}")
-    return value
+    if value.get("state") == "closed" and not value.get("merged_at"):
+        raise RuntimeError("trusted PR transition refuses a closed unmerged PR")
+    if type(value.get("draft")) is not bool:
+        raise RuntimeError("GitHub REST pull request draft flag is missing or invalid")
+    head_repository = head.get("repo")
+    if head_repository is not None and not isinstance(head_repository, dict):
+        raise RuntimeError("GitHub REST pull request head repository is invalid")
+    return {
+        "number": pr_number,
+        "state": "MERGED" if value.get("merged_at") else "OPEN",
+        "draft": value["draft"],
+        "base_sha": base["sha"],
+        "head_sha": head["sha"],
+        "head_repository": str((head_repository or {}).get("full_name") or ""),
+    }
 
 
 def _require_clean_sha(root: Path, expected_sha: str, label: str) -> None:
@@ -386,25 +399,23 @@ def trusted_pr_transition(
         raise RuntimeError("trusted exact-base repoctl.py is unavailable")
 
     gh = require_command("gh")
-    binding = _github_pr_binding(trusted_root, gh, pr_number)
-    base_sha = str(binding["baseRefOid"])
-    head_sha = str(binding["headRefOid"])
+    trusted_repository = _github_repository(trusted_root, gh)
+    binding = _github_pr_binding(trusted_root, gh, trusted_repository, pr_number)
+    base_sha = str(binding["base_sha"])
+    head_sha = str(binding["head_sha"])
     _require_clean_sha(trusted_root, base_sha, "trusted base")
     _require_clean_sha(target_root, head_sha, "target PR")
 
-    trusted_repository = _github_repository(trusted_root, gh)
     target_repository = _github_repository(target_root, gh)
-    if target_repository != trusted_repository:
+    if target_repository != trusted_repository or (
+        binding["state"] == "OPEN" and binding["head_repository"] != trusted_repository
+    ):
         raise RuntimeError(
-            f"target repository mismatch: expected {trusted_repository}, got {target_repository}"
+            "target PR repository mismatch: expected "
+            f"{trusted_repository}, got target={target_repository}, head={binding['head_repository']}"
         )
-    if _run(
-        ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-        cwd=target_root,
-        check=False,
-        capture=True,
-    ).returncode:
-        raise RuntimeError("target PR head is not descended from its exact GitHub base")
+    # A stale PR head is a state for the trusted controller to reconcile. The
+    # exact checkout and GitHub binding above remain mandatory before mutation.
 
     environment = os.environ.copy()
     for name in (
