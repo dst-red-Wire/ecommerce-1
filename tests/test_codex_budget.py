@@ -34,6 +34,12 @@ class CodexBudgetTest(unittest.TestCase):
         self.manifest = self.root / ".context/codex-context.json"
         self.current_patch = mock.patch.object(codex_budget, "_verify_current", return_value=None)
         self.current_patch.start()
+        self.identity = {
+            "model": "test-model",
+            "effort": "low",
+            "verified": True,
+            "scope": "local-static-read-only",
+        }
         self.manifest.write_text(
             json.dumps(
                 {
@@ -79,7 +85,7 @@ class CodexBudgetTest(unittest.TestCase):
             expect="answer", cacheable=True, timeout=30)
         with mock.patch.object(codex_budget, "ROOT", self.root), mock.patch.object(
             codex_budget.subprocess, "run", side_effect=fake_run
-        ), mock.patch.object(codex_budget, "effective_identity", return_value={"model":"test-model","effort":"low"}), mock.patch.object(
+        ), mock.patch.object(codex_budget, "effective_identity", return_value=dict(self.identity)), mock.patch.object(
             codex_budget, "decide", return_value={"should_invoke_ai": False,
                 "reason": "exact_input_cache_hit", "cached_result": ".context/result.txt"}
         ):
@@ -89,7 +95,7 @@ class CodexBudgetTest(unittest.TestCase):
         self.assertEqual(1, len(metrics))
         self.assertEqual(0, json.loads(metrics[0].read_text())["calls"])
 
-    def test_real_entrypoint_hit_miss_and_invalidation_without_model(self):
+    def test_cacheable_entrypoint_overrides_permissive_config_and_blocks_side_effects(self):
         import os
         import subprocess
         root = pathlib.Path(__file__).resolve().parents[1]
@@ -98,11 +104,42 @@ class CodexBudgetTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             bin_dir = pathlib.Path(tmp)
             counter = bin_dir / "calls"
+            attempted_write = bin_dir / "forbidden-write"
+            argv_log = bin_dir / "argv.json"
+            codex_home = bin_dir / "codex-home"
+            codex_home.mkdir()
+            (codex_home / "config.toml").write_text(
+                'model = "test-model"\n'
+                'model_reasoning_effort = "low"\n'
+                'sandbox_mode = "danger-full-access"\n'
+                'approval_policy = "never"\n'
+                'web_search = "live"\n'
+                'notify = ["side-effect"]\n'
+                '[features]\n'
+                'apps = true\n'
+                'hooks = true\n'
+                'remote_plugin = true\n'
+                '[mcp_servers.side_effect]\n'
+                'command = "side-effect"\n'
+                '[plugins.side_effect]\n'
+                'enabled = true\n',
+                encoding="utf-8",
+            )
             fake = bin_dir / "codex"
             fake.write_text(
                 f"#!{__import__('sys').executable}\n"
                 "import json, os, pathlib, sys\n"
                 "sys.stdin.read()\n"
+                "args=sys.argv[1:]\n"
+                "pathlib.Path(os.environ['FAKE_CODEX_ARGV']).write_text(json.dumps(args))\n"
+                "overrides={args[i+1] for i,v in enumerate(args[:-1]) if v in ('--config','-c')}\n"
+                "required={'approval_policy=\\\"never\\\"','web_search=\\\"disabled\\\"',"
+                "'features.apps=false',"
+                "'features.hooks=false','features.remote_plugin=false','mcp_servers={}',"
+                "'plugins={}','notify=[]'}\n"
+                "read_only='--sandbox' in args and args[args.index('--sandbox')+1]=='read-only'\n"
+                "if not read_only or not required.issubset(overrides):\n"
+                " pathlib.Path(os.environ['FAKE_FORBIDDEN_WRITE']).write_text('mutated')\n"
                 "p=pathlib.Path(os.environ['FAKE_CODEX_COUNT'])\n"
                 "p.write_text(str(int(p.read_text() or '0')+1) if p.exists() else '1')\n"
                 "for event in ["
@@ -113,8 +150,14 @@ class CodexBudgetTest(unittest.TestCase):
                 encoding="utf-8",
             )
             fake.chmod(0o755)
-            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}",
-                       FAKE_CODEX_COUNT=str(counter))
+            env = dict(
+                os.environ,
+                PATH=f"{bin_dir}:{os.environ['PATH']}",
+                CODEX_HOME=str(codex_home),
+                FAKE_CODEX_ARGV=str(argv_log),
+                FAKE_CODEX_COUNT=str(counter),
+                FAKE_FORBIDDEN_WRITE=str(attempted_write),
+            )
             argv = [__import__('sys').executable, "scripts/codex_budget.py", "run",
                     "--task", f"summarize fixture {bin_dir.name}", "--paths",
                     ".context/codex-budget-test-input.txt", "--cacheable",
@@ -124,6 +167,10 @@ class CodexBudgetTest(unittest.TestCase):
                 first = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
                 self.assertEqual(0, first.returncode, first.stderr)
                 self.assertEqual("1", counter.read_text())
+                self.assertFalse(attempted_write.exists())
+                built = json.loads(argv_log.read_text())
+                self.assertEqual("read-only", built[built.index("--sandbox") + 1])
+                self.assertIn("--ephemeral", built)
                 second = subprocess.run(argv, cwd=root, env=env, text=True, capture_output=True)
                 self.assertEqual(0, second.returncode, second.stderr)
                 self.assertEqual("1", counter.read_text())
@@ -165,7 +212,11 @@ class CodexBudgetTest(unittest.TestCase):
             with mock.patch.object(codex_budget, "ROOT", checkout), mock.patch.object(
                 codex_budget, "CONTRACT", checkout / "config/contracts/codex-token-budget.json"
             ):
-                marker_path = codex_budget._cache_path(manifest["cache_key"], {})
+                identity = codex_budget.effective_identity(
+                    "ecommerce-minimal", "", "", ""
+                )
+                identity["scope"] = "local-static-read-only"
+                marker_path = codex_budget._cache_path(manifest["cache_key"], identity)
             recorded = subprocess.run(
                 [sys.executable, "scripts/codex_budget.py", "mark",
                  "--manifest", str(manifest_path), "--result", ".context/answer.txt",
@@ -179,7 +230,7 @@ class CodexBudgetTest(unittest.TestCase):
             marker_path.parent.mkdir(parents=True, exist_ok=True)
             marker_path.write_text(json.dumps({
                 "schema_version": 2, "status": "COMPLETE_VALIDATED",
-                "cache_key": manifest["cache_key"], "identity": {},
+                "cache_key": manifest["cache_key"], "identity": identity,
                 "head_sha": manifest["head_sha"], "result_path": ".context/answer.txt",
                 "result_sha256": hashlib.sha256(result.read_bytes()).hexdigest(),
             }), encoding="utf-8")
@@ -224,11 +275,20 @@ class CodexBudgetTest(unittest.TestCase):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))
         value.pop("scope_ambiguous")
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
-        self.assertEqual("ambiguous_scope", codex_budget.decide(self.manifest)["reason"])
+        self.assertEqual(
+            "ambiguous_scope",
+            codex_budget.decide(self.manifest, self.identity)["reason"],
+        )
         result = self.root / ".context/result.txt"
         result.write_text("answer", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "ambiguous context scope"):
-            codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
+            codex_budget.mark(
+                self.manifest,
+                ".context/result.txt",
+                identity=self.identity,
+                validated=True,
+                read_only=True,
+            )
 
     def test_project_config_changes_identity_and_precedes_profile(self):
         home = self.root / "home"
@@ -236,7 +296,10 @@ class CodexBudgetTest(unittest.TestCase):
         project_dir = self.root / ".codex"
         user_dir.mkdir(parents=True)
         project_dir.mkdir()
-        (user_dir / "config.toml").write_text('model = "user-model"\n', encoding="utf-8")
+        (user_dir / "config.toml").write_text(
+            f'model = "user-model"\n[projects."{self.root}"]\ntrust_level = "trusted"\n',
+            encoding="utf-8",
+        )
         (user_dir / "ecommerce-minimal.config.toml").write_text(
             'model = "profile-model"\nmodel_reasoning_effort = "low"\n', encoding="utf-8"
         )
@@ -250,60 +313,162 @@ class CodexBudgetTest(unittest.TestCase):
         self.assertEqual(("project-model", "high"), (first["model"], first["effort"]))
         self.assertNotEqual(first["config_digest"], second["config_digest"])
         self.assertEqual(("cli-model", "medium"), (explicit["model"], explicit["effort"]))
+        self.assertTrue(first["verified"])
+
+    def test_alternate_codex_home_changes_effective_identity(self):
+        codex_home = self.root / "alternate-codex-home"
+        codex_home.mkdir()
+        config = codex_home / "config.toml"
+        config.write_text(
+            'model = "base-model"\nmodel_reasoning_effort = "low"\n',
+            encoding="utf-8",
+        )
+        profile = codex_home / "ecommerce-minimal.config.toml"
+        profile.write_text('model = "first-model"\n', encoding="utf-8")
+        instructions = codex_home / "AGENTS.md"
+        instructions.write_text("first instructions\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}):
+            first = codex_budget.effective_identity("ecommerce-minimal", "", "", "answer")
+            profile.write_text('model = "second-model"\n', encoding="utf-8")
+            instructions.write_text("second instructions\n", encoding="utf-8")
+            second = codex_budget.effective_identity("ecommerce-minimal", "", "", "answer")
+        self.assertEqual("first-model", first["model"])
+        self.assertEqual("second-model", second["model"])
+        self.assertNotEqual(first["config_digest"], second["config_digest"])
+        self.assertNotEqual(first["instruction_digest"], second["instruction_digest"])
+        self.assertTrue(first["verified"])
+
+    def test_unknown_identity_cannot_be_marked_or_reused(self):
+        codex_home = self.root / "empty-codex-home"
+        codex_home.mkdir()
+        with (
+            mock.patch.dict(os.environ, {"CODEX_HOME": str(codex_home)}),
+            mock.patch.object(codex_budget, "_read_toml", return_value={}),
+        ):
+            unknown = codex_budget.effective_identity(
+                "ecommerce-minimal", "", "", "answer"
+            )
+        self.assertFalse(unknown["verified"])
+        decision = codex_budget.decide(self.manifest, unknown)
+        self.assertTrue(decision["should_invoke_ai"])
+        self.assertEqual("unverified_identity", decision["reason"])
+        result = self.root / ".context/result.txt"
+        result.write_text("answer", encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "unverified Codex identity"):
+            codex_budget.mark(
+                self.manifest,
+                ".context/result.txt",
+                identity=unknown,
+                validated=True,
+                read_only=True,
+            )
+
+    def test_only_cacheable_runs_force_read_only_and_disable_external_tools(self):
+        import types
+
+        reusable = types.SimpleNamespace(
+            profile="ecommerce-minimal", model="", effort="", cacheable=True
+        )
+        normal = types.SimpleNamespace(
+            profile="ecommerce-minimal", model="", effort="", cacheable=False
+        )
+        reusable_argv = codex_budget.codex_exec_argv(reusable)
+        normal_argv = codex_budget.codex_exec_argv(normal)
+        self.assertEqual(
+            "read-only",
+            reusable_argv[reusable_argv.index("--sandbox") + 1],
+        )
+        self.assertIn("--ephemeral", reusable_argv)
+        overrides = {
+            reusable_argv[index + 1]
+            for index, value in enumerate(reusable_argv[:-1])
+            if value == "--config"
+        }
+        self.assertEqual(set(codex_budget.CACHEABLE_CODEX_OVERRIDES), overrides)
+        self.assertNotIn("--sandbox", normal_argv)
+        self.assertNotIn("--ephemeral", normal_argv)
 
     def test_line_truncated_pack_cannot_be_cached(self):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))
         value["truncated"] = True
         value["omitted_diff_lines"] = 40
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
-        decision = codex_budget.decide(self.manifest)
+        decision = codex_budget.decide(self.manifest, self.identity)
         self.assertTrue(decision["should_invoke_ai"])
         self.assertEqual("incomplete_context", decision["reason"])
         result = self.root / ".context/result.txt"
         result.write_text("answer", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "truncated context"):
-            codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
+            codex_budget.mark(
+                self.manifest,
+                ".context/result.txt",
+                identity=self.identity,
+                validated=True,
+                read_only=True,
+            )
 
     def test_cache_miss_requires_ai(self):
-        result = codex_budget.decide(self.manifest)
+        result = codex_budget.decide(self.manifest, self.identity)
         self.assertTrue(result["should_invoke_ai"])
         self.assertEqual("exact_input_cache_miss", result["reason"])
 
     def test_exact_marked_result_is_reused_and_content_change_invalidates_it(self):
         result_path = self.root / ".context/result.txt"
         result_path.write_text("validated result", encoding="utf-8")
-        codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
-        hit = codex_budget.decide(self.manifest)
+        codex_budget.mark(
+            self.manifest,
+            ".context/result.txt",
+            identity=self.identity,
+            validated=True,
+            read_only=True,
+        )
+        hit = codex_budget.decide(self.manifest, self.identity)
         self.assertFalse(hit["should_invoke_ai"])
         self.assertEqual("exact_input_cache_hit", hit["reason"])
         self.assertEqual(".context/result.txt", hit["cached_result"])
 
         result_path.write_text("changed result", encoding="utf-8")
-        miss = codex_budget.decide(self.manifest)
+        miss = codex_budget.decide(self.manifest, self.identity)
         self.assertTrue(miss["should_invoke_ai"])
 
     def test_result_outside_context_is_rejected(self):
         outside = self.root / "outside.txt"
         outside.write_text("no", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "must remain under .context"):
-            codex_budget.mark(self.manifest, "outside.txt", validated=True, read_only=True)
+            codex_budget.mark(
+                self.manifest,
+                "outside.txt",
+                identity=self.identity,
+                validated=True,
+                read_only=True,
+            )
 
     def test_manifest_cannot_exceed_route_budget(self):
         value = json.loads(self.manifest.read_text(encoding="utf-8"))
         value["actual_bytes"] = 5000
         self.manifest.write_text(json.dumps(value), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "context budget violation"):
-            codex_budget.decide(self.manifest)
+            codex_budget.decide(self.manifest, self.identity)
 
 
     def test_unvalidated_or_stale_result_never_hits(self):
         result_path = self.root / ".context/result.txt"
         result_path.write_text("validated result", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "validated read-only"):
-            codex_budget.mark(self.manifest, ".context/result.txt")
-        codex_budget.mark(self.manifest, ".context/result.txt", validated=True, read_only=True)
+            codex_budget.mark(
+                self.manifest,
+                ".context/result.txt",
+                identity=self.identity,
+            )
+        codex_budget.mark(
+            self.manifest,
+            ".context/result.txt",
+            identity=self.identity,
+            validated=True,
+            read_only=True,
+        )
         with mock.patch.object(codex_budget, "_verify_current", side_effect=ValueError("stale")):
-            decision = codex_budget.decide(self.manifest)
+            decision = codex_budget.decide(self.manifest, self.identity)
         self.assertTrue(decision["should_invoke_ai"])
         self.assertIn("current_input_unverified", decision["reason"])
 
@@ -327,7 +492,7 @@ class CodexBudgetTest(unittest.TestCase):
     def test_context_pack_tamper_is_rejected(self):
         self.pack.write_text("tampered", encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "context pack integrity mismatch"):
-            codex_budget.decide(self.manifest)
+            codex_budget.decide(self.manifest, self.identity)
 
 
 if __name__ == "__main__":

@@ -385,7 +385,9 @@ def _policy_version(cfg: dict, budget: dict) -> str:
 
 
 def _instruction_digest(files: list[str]) -> str:
-    paths = [ROOT / "AGENTS.md", Path.home() / ".codex/AGENTS.md"]
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    codex_home = Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
+    paths = [ROOT / "AGENTS.md", codex_home / "AGENTS.md"]
     for file in files:
         relative = Path(file)
         for parent in relative.parents:

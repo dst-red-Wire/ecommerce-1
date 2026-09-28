@@ -332,6 +332,24 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(2, manifest["omitted_diff_lines"])
         self.assertTrue(manifest["truncated"])
 
+    def test_instruction_digest_uses_effective_codex_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp) / "repo"
+            first_home = pathlib.Path(tmp) / "first-home"
+            second_home = pathlib.Path(tmp) / "second-home"
+            root.mkdir()
+            first_home.mkdir()
+            second_home.mkdir()
+            (root / "AGENTS.md").write_text("repository instructions\n", encoding="utf-8")
+            (first_home / "AGENTS.md").write_text("first user instructions\n", encoding="utf-8")
+            (second_home / "AGENTS.md").write_text("second user instructions\n", encoding="utf-8")
+            with mock.patch.object(MOD, "ROOT", root):
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(first_home)}):
+                    first = MOD._instruction_digest([])
+                with mock.patch.dict(os.environ, {"CODEX_HOME": str(second_home)}):
+                    second = MOD._instruction_digest([])
+            self.assertNotEqual(first, second)
+
     def test_relevant_state_digest_changes_when_file_content_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = pathlib.Path(tmp)

@@ -24,6 +24,17 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = ROOT / "config/contracts/codex-token-budget.json"
 
+CACHEABLE_CODEX_OVERRIDES = (
+    "approval_policy=\"never\"",
+    "web_search=\"disabled\"",
+    "features.apps=false",
+    "features.hooks=false",
+    "features.remote_plugin=false",
+    "mcp_servers={}",
+    "plugins={}",
+    "notify=[]",
+)
+
 
 def load_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
@@ -54,6 +65,38 @@ def _sha256(path: Path) -> str:
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _codex_home() -> Path:
+    configured = os.environ.get("CODEX_HOME", "").strip()
+    return Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
+
+
+def _read_toml(path: Path) -> dict[str, Any]:
+    return tomllib.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def _project_is_trusted(user_config: dict[str, Any]) -> bool:
+    matches: list[tuple[int, str]] = []
+    for value, project in (user_config.get("projects") or {}).items():
+        if not isinstance(project, dict):
+            continue
+        try:
+            configured = Path(str(value)).expanduser().resolve()
+        except OSError:
+            continue
+        if configured == ROOT.resolve() or configured in ROOT.resolve().parents:
+            matches.append((len(configured.parts), str(project.get("trust_level") or "")))
+    return bool(matches and max(matches, key=lambda item: item[0])[1] == "trusted")
+
+
+def _identity_verified(identity: dict[str, Any] | None) -> bool:
+    return bool(
+        identity
+        and identity.get("verified") is True
+        and identity.get("model") not in {None, "", "UNKNOWN"}
+        and identity.get("effort") not in {None, "", "UNKNOWN"}
+    )
 
 
 def _atomic_text(path: Path, value: str) -> None:
@@ -151,6 +194,9 @@ def decide(manifest_path: Path, identity: dict[str, Any] | None = None) -> dict[
         "reason": "exact_input_cache_miss",
         "cached_result": "",
     }
+    if not _identity_verified(identity):
+        result["reason"] = "unverified_identity"
+        return result
     if manifest.get("scope_ambiguous") is not False:
         result["reason"] = "ambiguous_scope"
         return result
@@ -190,6 +236,8 @@ def mark(manifest_path: Path, result_value: str, *, identity: dict[str, Any] | N
         raise ValueError("cache mark requires completed validated read-only result")
     manifest = load_json(manifest_path)
     validate_manifest(manifest)
+    if not _identity_verified(identity):
+        raise ValueError("unverified Codex identity is not reusable")
     if manifest.get("scope_ambiguous") is not False:
         raise ValueError("ambiguous context scope is not reusable")
     _verify_current(manifest)
@@ -253,22 +301,63 @@ def normalize_usage(events: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def effective_identity(profile: str, model: str, effort: str, expectation: str) -> dict[str, Any]:
-    user = Path.home() / ".codex/config.toml"
-    layer = Path.home() / f".codex/{profile}.config.toml"
+    codex_home = _codex_home()
+    user = codex_home / "config.toml"
+    layer = codex_home / f"{profile}.config.toml"
     project = ROOT / ".codex/config.toml"
-    base = tomllib.loads(user.read_text(encoding="utf-8")) if user.is_file() else {}
-    selected = tomllib.loads(layer.read_text(encoding="utf-8")) if layer.is_file() else {}
-    local = tomllib.loads(project.read_text(encoding="utf-8")) if project.is_file() else {}
+    system = Path("/etc/codex/config.toml")
+    system_values = _read_toml(system)
+    base = _read_toml(user)
+    selected = _read_toml(layer)
+    trusted = _project_is_trusted(base)
+    local = _read_toml(project) if trusted else {}
+    resolved_model = (
+        model
+        or local.get("model")
+        or selected.get("model")
+        or base.get("model")
+        or system_values.get("model")
+    )
+    resolved_effort = (
+        effort
+        or local.get("model_reasoning_effort")
+        or selected.get("model_reasoning_effort")
+        or base.get("model_reasoning_effort")
+        or system_values.get("model_reasoning_effort")
+    )
+    config_paths = [system, user, layer, *([project] if trusted else [])]
+    instruction = codex_home / "AGENTS.md"
+    verified = bool(
+        isinstance(resolved_model, str) and resolved_model.strip()
+        and isinstance(resolved_effort, str) and resolved_effort.strip()
+    )
     return {
         "profile": profile,
-        "model": model or local.get("model") or selected.get("model") or base.get("model") or "UNKNOWN",
-        "effort": effort or local.get("model_reasoning_effort") or selected.get("model_reasoning_effort") or base.get("model_reasoning_effort") or "UNKNOWN",
-        "config_digest": _digest([_sha256(user) if user.is_file() else "",
-                                  _sha256(layer) if layer.is_file() else "",
-                                  _sha256(project) if project.is_file() else ""]),
+        "model": resolved_model or "UNKNOWN",
+        "effort": resolved_effort or "UNKNOWN",
+        "verified": verified,
+        "codex_home_digest": hashlib.sha256(str(codex_home).encode()).hexdigest(),
+        "config_digest": _digest([
+            f"{path}:{_sha256(path) if path.is_file() else 'MISSING'}"
+            for path in config_paths
+        ]),
+        "instruction_digest": _sha256(instruction) if instruction.is_file() else "MISSING",
         "success_condition_digest": hashlib.sha256(expectation.encode()).hexdigest(),
-        "generator": 2,
+        "generator": 3,
     }
+
+
+def codex_exec_argv(args: argparse.Namespace) -> list[str]:
+    argv = ["codex", "exec", "--json", "--profile", args.profile]
+    if args.cacheable:
+        argv += ["--ephemeral", "--sandbox", "read-only"]
+        for override in CACHEABLE_CODEX_OVERRIDES:
+            argv += ["--config", override]
+    if args.model:
+        argv += ["--model", args.model]
+    if args.effort:
+        argv += ["--config", f"model_reasoning_effort={args.effort}"]
+    return [*argv, "-"]
 
 
 def run_task(args: argparse.Namespace) -> int:
@@ -317,12 +406,7 @@ def run_task(args: argparse.Namespace) -> int:
         measurement["estimated_avoided_input_tokens"] = data["estimated_input_tokens"]
         _atomic_text(metrics, json.dumps(measurement, sort_keys=True) + "\n")
         return 0
-    argv = ["codex", "exec", "--json", "--profile", args.profile]
-    if args.model:
-        argv += ["--model", args.model]
-    if args.effort:
-        argv += ["-c", f"model_reasoning_effort={args.effort}"]
-    argv += ["-"]
+    argv = codex_exec_argv(args)
     prompt = (ROOT / pack).read_text(encoding="utf-8")
     try:
         proc = subprocess.run(argv, input=prompt, text=True, cwd=ROOT, capture_output=True,
@@ -361,7 +445,7 @@ def run_task(args: argparse.Namespace) -> int:
     measurement["duration_seconds"] = round(time.monotonic() - start, 3)
     if final:
         print(final)
-    if (args.cacheable and args.expect and succeeded and not used_tools
+    if (args.cacheable and _identity_verified(identity) and args.expect and succeeded and not used_tools
             and data.get("scope_ambiguous") is False and not data.get("truncated")):
         result_path = ROOT / f"{stem}.result.txt"
         _atomic_text(result_path, final)
@@ -381,6 +465,11 @@ def parse_args() -> argparse.Namespace:
     m.add_argument("--result", required=True)
     m.add_argument("--validated", action="store_true")
     m.add_argument("--read-only", action="store_true")
+    for cache_command in (d, m):
+        cache_command.add_argument("--profile", default="ecommerce-minimal")
+        cache_command.add_argument("--model", default="")
+        cache_command.add_argument("--effort", default="")
+        cache_command.add_argument("--expect", default="")
     r = sub.add_parser("run")
     r.add_argument("--task", required=True)
     r.add_argument("--paths", nargs="*", default=[])
@@ -402,10 +491,18 @@ def main() -> int:
     manifest = Path(args.manifest)
     if not manifest.is_absolute():
         manifest = ROOT / manifest
+    identity = effective_identity(args.profile, args.model, args.effort, args.expect)
+    identity["scope"] = "local-static-read-only"
     if args.command == "decide":
-        print(json.dumps(decide(manifest), sort_keys=True))
+        print(json.dumps(decide(manifest, identity), sort_keys=True))
         return 0
-    marker = mark(manifest, args.result, validated=args.validated, read_only=args.read_only)
+    marker = mark(
+        manifest,
+        args.result,
+        identity=identity,
+        validated=args.validated,
+        read_only=args.read_only,
+    )
     print(marker.relative_to(ROOT))
     return 0
 
