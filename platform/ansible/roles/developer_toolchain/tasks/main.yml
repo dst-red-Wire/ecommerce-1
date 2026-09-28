@@ -11,6 +11,10 @@
     - "{{ local_cache }}"
   tags: [toolchain, agent_tools, artifact_transport, gh, node, go, templ, cgo, sqlc, context_tools, docker_buildx, skopeo, packer, trivy, gitleaks, gosec, govulncheck, cosign, kubectl, helm, opentofu, kustomize, conftest, opa, k6, nuclei, hubble, pint, ansible_lint, pre_commit, quality_tools, ruff, oxfmt, oxlint]
 
+- name: Reconcile repository-managed Codex profiles
+  ansible.builtin.import_tasks: codex_profiles.yml
+  tags: [toolchain, agent_tools, context_tools, codex]
+
 - name: Reconcile forbidden legacy IaC artifacts
   ansible.builtin.import_tasks: opentofu_cleanup.yml
   tags: [toolchain, opentofu]
@@ -1021,18 +1025,6 @@
   when: "'all' in ansible_run_tags or item.tag in ansible_run_tags"
   tags: [helm, kustomize]
 
-- name: Download pinned kubectl
-  ansible.builtin.get_url:
-    url: "https://dl.k8s.io/release/v{{ kubectl_version }}/bin/linux/amd64/kubectl"
-    dest: "{{ local_share }}/tools/kubectl-{{ kubectl_version }}"
-    checksum: "sha256:{{ kubectl_sha256 }}"
-    mode: '0755'
-  tags: [kubectl]
-
-- name: Link kubectl into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/kubectl-{{ kubectl_version }}"
-    dest: "{{ local_bin }}/kubectl"
-    state: link
-    force: true
+- name: Reconcile pinned kubectl
+  ansible.builtin.import_tasks: kubectl.yml
   tags: [kubectl]

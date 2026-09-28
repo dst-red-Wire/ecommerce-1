@@ -329,16 +329,17 @@ qualification: qualification-proof ## Run exact-SHA qualification from the canon
 
 qualification-proof: workspace-check ## Run one exact-SHA qualification plus its performance audit
 	@$(PYTHON) scripts/repoctl.py qualification-proof --base "$${BASE:-origin/main}"
-.PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
+.PHONY: context diff-context failure-context review-budget codex-run codex-budget codex-budget-mark nx-graph bazel-verify pr-monitor
 
-context: ## Build bounded task-aware context pack; use TASK="..."
-	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
+context: ## Build task-delta context pack; optional SINCE/PATHS/STAGED/WORKING_TREE/PRINT
+	@test -n "$(TASK)" || { printf '%s\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
+	@$(PYTHON) scripts/context-pack.py --task "$(TASK)" $(if $(SINCE),--since "$(SINCE)",) $(if $(PATHS),--paths $(PATHS),) $(if $(STAGED),--staged,) $(if $(WORKING_TREE),--working-tree,) $(if $(PRINT),--print,)
 
-diff-context: ## Build compact diff-only context pack
+diff-context: ## Build compact diff-only context pack (hard-capped by codex-token-budget)
 	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-origin/main}"
 
-failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
-	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
+failure-context: ## Capture causal output; use GATE=... or COMPONENT=service:product
+	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)" $(if $(RERUN),--rerun,)
 
 pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handoffs; PR/OWNER/REPO required
 	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
@@ -347,6 +348,17 @@ review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNA
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
 	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
 	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
+
+codex-run: ## Governed CLI invocation; CACHEABLE=1 EXPECT=<literal success criterion> for static read-only reuse
+	@test -n "$(TASK)" || { printf '%s\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
+	@$(PYTHON) scripts/codex_budget.py run --task "$(TASK)" --profile "$${PROFILE:-ecommerce-minimal}" $(if $(PATHS),--paths $(PATHS),) $(if $(SINCE),--since "$(SINCE)",) $(if $(STAGED),--staged,) $(if $(CACHEABLE),--cacheable,) $(if $(EXPECT),--expect "$(EXPECT)",)
+
+codex-budget: ## Decide whether the exact current context can reuse a marked Codex result
+	@$(PYTHON) scripts/codex_budget.py decide --manifest "$${MANIFEST:-.context/codex-context.json}"
+
+codex-budget-mark: ## Mark RESULT=.context/... reusable only for the exact current context key
+	@test -n "$(RESULT)" || { printf '%s\n' 'ERROR: RESULT=.context/<result> is required'; exit 2; }
+	@$(PYTHON) scripts/codex_budget.py mark --manifest "$${MANIFEST:-.context/codex-context.json}" --result "$(RESULT)" $(if $(VALIDATED),--validated,) $(if $(READ_ONLY),--read-only,)
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph

@@ -723,7 +723,7 @@ class PRLoopHandoffTests(unittest.TestCase):
         self.assertIn(f'"current_head":"{self.HEAD}"', handoff)
         self.assertIn('"review_kind":"CODE"', handoff)
         self.assertIn('"changed_files":["a.py","z.py"]', handoff)
-        self.assertLessEqual(len(handoff.encode()), 16 * 1024)
+        self.assertLessEqual(len(handoff.encode()), json.loads((ROOT / "config/contracts/codex-token-budget.json").read_text())["review_handoff_max_bytes"])
         self.assertEqual(
             ["git", "diff", "--name-only", "-z", f"{self.BASE}..{self.HEAD}"],
             run.call_args.args[0],

@@ -3,6 +3,10 @@ status: exact
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
 
+coverage:
+  global_min_percent: 80
+  critical_code_min_percent: 90
+
 principles:
   source_mutation_during_qualification: forbidden
   formatter_drift: advisory

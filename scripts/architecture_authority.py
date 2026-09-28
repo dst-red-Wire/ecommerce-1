@@ -1578,7 +1578,7 @@ def validate(root):
             or pr_loop.get("chatgpt_handoff", {}).get("helper")
             != "scripts/pr_monitor.py#chatgpt_review_handoff"
             or pr_loop.get("chatgpt_handoff", {}).get("payload") != "required"
-            or pr_loop.get("chatgpt_handoff", {}).get("payload_budget_bytes") != 16384
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_budget_bytes") != 8192
             or pr_loop.get("chatgpt_handoff", {}).get("payload_fields")
             != [
                 "pr",
@@ -1790,40 +1790,16 @@ def validate(root):
         readiness = (root / "docs/project/TECHNICAL_READINESS.md").read_text()
         if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
-        handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
-        mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
-        for key in ("resilience_governance", "security_trust_zones"):
-            relative = lock["machine_contracts"][key]
-            if f"`{relative}`" not in mandatory_handoffs:
-                errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
-        m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m5 = m5_match.group(0) if m5_match else ""
-        checkout_flow = (
-            "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
-        )
-        if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
-            errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
-        m4_match = re.search(r"^## M4 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m4 = m4_match.group(0) if m4_match else ""
-        m4_order_match = re.search(r"^Order:\s*\n`([^`]+)`\.\s*$", m4, re.M)
-        approved_m4_order = [
-            "RKE2",
-            "Cilium/Hubble",
-            "Fleet",
-            "Argo Rollouts",
-            "Kyverno/Pod Security",
-            "SPIRE",
-            "Istio",
-            "OpenBao/ESO",
-            "Harbor",
-            "Tekton + cert-manager",
-            "Kratix/Kustomize/Helm",
-            "observability/security logging",
-            "stateful platform",
-        ]
-        rendered_m4_order = [item.strip() for item in m4_order_match.group(1).split("->")] if m4_order_match else []
-        if rendered_m4_order != approved_m4_order:
-            errors.append("CODEX_HANDOFFS.md M4 order must match the approved platform schedule")
+        # The removed milestone prompts are not an authority. Check their live
+        # invariants against the current plan and machine contracts instead.
+        m4_plan = plan.split("### M4 — Platform Baseline", 1)[-1].split("### M5", 1)[0]
+        if "Fleet -> Argo Rollouts -> Kyverno" not in m4_plan:
+            errors.append("MASTER_EXECUTION_PLAN.md M4 must preserve Argo Rollouts order")
+        m5_plan = plan.split("### M5 — Vertical Slice", 1)[-1].split("### M6", 1)[0]
+        if ("Cart -> Checkout -> Order -> Payment" not in m5_plan
+            or "Fulfillment -> Shipping -> Tracking" not in m5_plan
+            or "Pricing, Tax, Inventory, Fraud/Risk" not in m5_plan):
+            errors.append("MASTER_EXECUTION_PLAN.md M5 must preserve autonomous domain sequencing")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
         if waves != V5_DEPLOYMENT_WAVES:
             errors.append("deployment-waves.yaml must match the complete approved V5 schedule")
@@ -1924,38 +1900,16 @@ def validate(root):
                     or positions[component] <= positions[dependency]
                 ):
                     errors.append(f"deployment ordering requires {component} after MLOps dependency {dependency}")
-        m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m7 = m7_match.group(0) if m7_match else ""
-        if not re.search(r">=\s*80%\s+global coverage", m7, re.I):
-            errors.append("CODEX_HANDOFFS.md M7 must require >=80% global coverage")
-        if not re.search(r">=\s*90%\s+critical-code coverage", m7, re.I):
-            errors.append("CODEX_HANDOFFS.md M7 must require >=90% critical-code coverage")
-        handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        handoff = handoff_match.group(0) if handoff_match else ""
+        source_quality = load_yaml(root / "config/contracts/source-quality-policy.yaml")
+        coverage = source_quality.get("coverage", {})
+        if coverage.get("global_min_percent") != 80 or coverage.get("critical_code_min_percent") != 90:
+            errors.append("source-quality policy must preserve M7 coverage thresholds")
         roadmap = load_yaml(root / lock["machine_contracts"]["roadmap_policy"])
         roadmap_m25 = next(
-            (
-                item
-                for item in roadmap.get("milestones", [])
-                if isinstance(item, dict) and str(item.get("id")) == "M2.5"
-            ),
-            None,
-        )
-        roadmap_m25_tracker = roadmap_m25.get("tracker") if isinstance(roadmap_m25, dict) else None
-        if type(roadmap_m25_tracker) is not int or roadmap_m25_tracker <= 0:
+            (item for item in roadmap.get("milestones", [])
+             if isinstance(item, dict) and str(item.get("id")) == "M2.5"), None)
+        if not isinstance(roadmap_m25, dict) or type(roadmap_m25.get("tracker")) is not int or roadmap_m25["tracker"] <= 0:
             errors.append("roadmap policy must declare a positive M2.5 tracker")
-            roadmap_m25_tracker = -1
-        handoff_requirements = (
-            "## M2.5 prompt",
-            "M2-5-persistent-mgmt-bootstrap",
-            "Entry gate: M1 PROVEN",
-            f"Tracker: `#{roadmap_m25_tracker}`",
-            "Evidence required for M2.5 PROVEN",
-            "Exit gate:",
-            "That PROVEN state enables M3",
-        )
-        if any(requirement not in handoff for requirement in handoff_requirements):
-            errors.append("CODEX_HANDOFFS.md must define the executable M2.5 entry, evidence, and M3 exit contract")
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]
