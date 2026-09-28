@@ -1,37 +1,81 @@
-# Agent-efficiency and Ansible-first execution model
+# Agent efficiency and Codex token budget
 
-The repository remains the source of truth. Tekton is the sole CI authority; Rancher Fleet remains GitOps/CD authority. Ansible owns repeatable state reconciliation for the developer workstation and local toolchain. Bazel, Nx and Turborepo remain local accelerators only.
+The repository optimizes for deterministic work before model reasoning. Tekton remains CI authority, Fleet remains GitOps/CD authority, and Ansible owns repeatable workstation state.
 
-## Fast path before AI
+## Fast path
 
-`contracts -> affected classifier -> native deterministic gates -> bounded context -> Codex only for unresolved reasoning -> exact-SHA evidence -> delivery`
+task -> exact task delta -> affected/native checks -> bounded context -> model only if reasoning remains -> exact evidence -> delivery
 
-Run `make verify-change BASE=origin/main` before delegating a failure. Use `make failure-context COMPONENT=service:product` for an affected component and `make context TASK="..."` only after local tools have reduced the problem.
+Codex must not begin by reading the repository, full PR history, or broad architecture documentation. Project instructions are capped at 4 KiB and AGENTS.md is only a router.
 
-## Automation ownership
+## Automatic Codex context
 
-- Ansible: packages, verified Node/Corepack/Go/sqlc/context tooling, Docker readiness, Git-local reconciliation, hooks, repeatable bootstrap and generation/reconciliation workflows.
-- `scripts/repoctl.py`: fast stateless repository orchestration, affected-only dispatch, evidence, validation, delivery and diagnostics.
-- Ruby/Python/Go helpers: specialized validators, generators and graph/context algorithms when they provide distinct deterministic logic.
-- Make/Tekton: stable entrypoints that invoke these owners directly.
-- Shell: forbidden in tracked repository sources. Do not add `*.sh`; migrate stateful logic to Ansible and stateless logic to native Python/Ruby/Go/PNPM/Make/Tekton entrypoints.
+Trusted Codex workspaces load .codex/config.toml. Its UserPromptSubmit hook prepares .context/codex-context.md and .context/codex-context.json before a prompt without blocking the prompt if the optimization is unavailable.
 
-This split is intentional: starting Ansible for every lint/test would be slower. Ansible handles state; native tools handle stateless checks.
+The hook injects only a small routing summary. The full pack stays on disk and is read only when the task needs repository context. The hook does not claim an avoided model call.
 
-## Accelerator roles
+Governed maximum context sizes:
 
-- Bazel: pinned local verification entrypoint; it does not replace Tekton.
-- Nx: renders a derived dependency graph from canonical contracts; generated graph state is ignored and non-authoritative.
-- Turborepo: schedules/caches frontend tasks inside the existing PNPM workspace.
+- L0 local implementation/test: 4 KiB
+- L1 domain/API/service contract: 8 KiB
+- L2 architecture/security/platform/control plane: 12 KiB
 
-## Generated contracts
+make context TASK="<task>" is the manual equivalent. It prints a one-line summary by default; PRINT=1 explicitly prints the pack.
 
-`make api-generate` produces versioned Go transport bindings from `config/contracts/public-api-contracts.yaml`. Before generation, `repoctl` deterministically bundles only the registry-declared `common_components` document into each service specification, rewrites those local `$ref`s to internal refs, rejects any undeclared/remote external reference, and runs Go generation from the owning service module so `oapi-codegen` resolves the correct `go.mod`. Canonical source contracts remain split and unchanged. Contract gates regenerate bindings when OpenAPI changes, so exact-SHA verification detects codegen drift. `BASE=... make contracts` performs compatibility checks.
+Default scope selects only dirty paths that match the task. Use PATHS=<exact paths> if the task name is ambiguous, STAGED=1 for the index, or SINCE=<sha> for the committed delta through HEAD. Scope selection only controls AI context; canonical gates and risk classification use their own complete inputs.
 
-## Evidence and delivery
+Examples:
 
-`make verify-change` writes bounded JSON evidence. Committed verification binds evidence to the exact SHA; pre-push reuses a matching PASS rather than replaying the same gates. `make deliver` builds PR validation from that evidence and never approves or merges.
+    make context TASK="fix product validation"
+    make context TASK="review PR correction" SINCE=<last-reviewed-sha>
+    make context TASK="inspect staged change" STAGED=1
+    make context TASK="show pack" PRINT=1
 
-## Hook/runtime optimization
+Canonical documents are pointers by default. Their contents are not copied into the context pack unless an explicit bounded excerpt is requested. Service ownership/dependency/public-API fragments are still routed when a service is identified.
 
-The pre-commit configuration has one affected-only worktree gate and one exact-SHA pre-push gate. Repository-owned `make publish` skips only the duplicate worktree hook because it immediately runs the stronger exact-SHA gate before push. Hot-path service/frontend checks first validate pinned local state and start Ansible only when reconciliation is actually required.
+## Review and failure context
+
+make diff-context BASE=<last-reviewed-sha> is capped at 12 KiB and uses a low-context unified diff.
+
+make failure-context GATE=<gate> or COMPONENT=<component> keeps at most 80 causal lines / 12 KiB around deterministic error markers.
+
+ChatGPT review handoffs are capped at 8 KiB. Exact-SHA review cache hits do not trigger another AI review.
+
+## Pre-invocation Codex budget
+
+`make codex-run TASK="<bounded task>" PATHS="<exact paths>"` prepares a fresh pack, records preflight byte and non-authoritative token estimates, and uses the central budget decision before `codex exec --json`. A default run is not reusable. For a deterministic local read-only answer, pass `CACHEABLE=1 EXPECT="<literal completion criterion>"`. Only a completed answer matching that criterion with no tool, file-change, web, or MCP event is marked reusable. An eligible HIT prints the verified local result with zero Codex calls.
+
+The cache revalidates current HEAD/base, selected paths, index/worktree state, instructions, contracts, pack digest and result digest. It does not grant gate PASS, CODE/SECURITY review, owner authorization, or merge authority. External-state requests, PR status, CVE scans, code edits, and side-effecting operations are not eligible for reuse.
+
+The run's local `.context/codex-budget/metrics/<id>.json` records the effective profile/model/effort, context bytes, HIT/MISS, call count, duration, success, and usage from supported JSONL events. Cached input is part of input tokens and reasoning is part of output tokens. Missing counters remain null. The interactive CLI and VS Code extension cannot be intercepted before their model calls through UserPromptSubmit; their calls are outside this avoided-call measurement.
+
+Direct `make codex-budget` is a diagnostic check against a fresh context manifest. Manual `make codex-budget-mark RESULT=.context/<result> VALIDATED=1 READ_ONLY=1` requires an explicit completed, validated read-only result.
+
+## MCP profiles
+
+Repository-managed user profiles are installed by Ansible under ~/.codex/ without overwriting the user's base config.toml:
+
+- ecommerce-minimal: no repository-owned MCP enabled.
+- ecommerce-openai: enables only the public OpenAI developer-docs MCP owned by this repository profile.
+
+Run Codex with --profile ecommerce-minimal by default and select the OpenAI profile only for OpenAI/Codex/API documentation work. Unrelated user-global MCP servers remain user-owned and should be disabled in their own profile when not needed.
+
+The project-local Codex configuration caps AGENTS.md ingestion to 4096 bytes, the available-skills catalog to 1200 tokens, and every generic tool/function output retained in history to 4096 tokens. The OpenAI Docs profile allow-lists only `search_openai_docs` and `fetch_openai_doc`, with a 2048-token output budget for each.
+
+## Historical prompts
+
+Old bootstrap/design prompts were removed from the current tree. Git history retains their original blobs. A local provenance list is stored under .context/legacy-prompts-provenance.tsv on the migration workstation.
+
+## Acceptance measurement protocol
+
+Freeze the sample before computing a reduction: two new small local changes, one new service/contract task, one governance task, one diagnostic failure, one current-PR follow-up, and two repeats of previously completed read-only local tasks. Report new versus repeated tasks and cold versus warm cache separately. The repeat share may be adjusted only from observed normal workflow frequency, never to manufacture HITs.
+
+For each task record equivalent expected outcome, model and effort, required gates, baseline and optimized Codex JSONL usage, retries, failures and success criteria. Sum `input_tokens + output_tokens` across actual invocations; `cached_input_tokens` is a subset of input and `reasoning_output_tokens` is a subset of output. Keep missing values UNKNOWN. Calculate `1 - after / before` only when both sides are complete and comparable. Context-byte reduction, avoided CLI invocations, token reduction and quality are separate results. If the baseline or sample is incomplete, report MESURE_INSUFFISANTE.
+
+## Ownership
+
+- Ansible: repeatable workstation state and Codex profile installation.
+- scripts/repoctl.py: stateless repository orchestration and bounded diagnostics.
+- scripts/context-pack.py: task-delta routing and context manifests.
+- scripts/codex_budget.py: exact-input result reuse decision.
+- .codex/hooks/user_prompt_submit.py: non-authoritative pre-prompt context preparation.

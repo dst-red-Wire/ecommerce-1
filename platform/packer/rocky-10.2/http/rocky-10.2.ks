@@ -11,11 +11,40 @@ sshkey --username=packer "${build_ssh_public_key}"
 selinux --enforcing
 firewall --disabled
 services --enabled=sshd,chronyd,NetworkManager
-bootloader --location=mbr --append="quiet console=tty0"
+bootloader --location=mbr --append="${bootloader_kernel_arguments}"
 zerombr
-clearpart --all --initlabel --disklabel=gpt
-autopart --type=lvm
+clearpart --all --initlabel --disklabel=${partition_table}
+part biosboot --size=${bios_boot_mib}
+part /boot --fstype=${root_filesystem} --size=${boot_mib}
+part / --fstype=${root_filesystem} --size=${root_min_mib} --grow
 reboot
+
+%pre --erroronfail
+if [ -c /dev/ttyS0 ]; then
+    printf 'ECOMMERCE_MILESTONE T3_KICKSTART_START\n' > /dev/ttyS0
+fi
+if ! ip -4 -o address show scope global | grep -q ' inet '; then
+    printf 'Kickstart network is not ready\n' >&2
+    exit 1
+fi
+if [ -c /dev/ttyS0 ]; then
+    printf 'ECOMMERCE_MILESTONE T4_NETWORK_READY\n' > /dev/ttyS0
+    printf 'ECOMMERCE_MILESTONE T5_RPM_INSTALLATION_START\n' > /dev/ttyS0
+    (
+        while :; do
+            for name in anaconda storage program packaging; do
+                log="/tmp/$name.log"
+                if [ -f "$log" ]; then
+                    printf 'ECOMMERCE_INSTALLER_LOG %s BEGIN\n' "$name"
+                    tail -n 8 "$log"
+                    printf 'ECOMMERCE_INSTALLER_LOG %s END\n' "$name"
+                fi
+            done
+            sleep 60
+        done
+    ) > /dev/ttyS0 2>&1 < /dev/null &
+fi
+%end
 
 %packages
 @^minimal-environment
@@ -28,10 +57,14 @@ kernel-modules-extra
 NetworkManager
 openssh-server
 python3
+cloud-init
 sudo
 %end
 
 %post --erroronfail
+if [ -c /dev/ttyS0 ]; then
+    printf 'ECOMMERCE_MILESTONE T6_RPM_INSTALLATION_END\n' > /dev/ttyS0
+fi
 echo 'packer ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/packer
 chmod 0440 /etc/sudoers.d/packer
 install -d -m 0700 -o packer -g packer /home/packer/.ssh
@@ -70,4 +103,40 @@ systemctl disable --now firewalld 2>/dev/null || true
 dnf -y remove firewalld || true
 
 systemctl enable sshd chronyd NetworkManager
+
+cat > /etc/systemd/system/packer-milestone-t8.service <<'EOF'
+[Unit]
+Description=Packer installed operating system boot milestone
+DefaultDependencies=no
+After=local-fs.target
+Before=sshd.service
+ConditionPathExists=/dev/ttyS0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c "printf 'ECOMMERCE_MILESTONE T8_INSTALLED_OS_BOOT\n' > /dev/ttyS0"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/packer-milestone-t9.service <<'EOF'
+[Unit]
+Description=Packer SSH readiness milestone
+After=network-online.target sshd.service
+Wants=network-online.target
+ConditionPathExists=/dev/ttyS0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/bash -c "printf 'ECOMMERCE_MILESTONE T9_SSHD_READY\n' > /dev/ttyS0"
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable packer-milestone-t8.service packer-milestone-t9.service
+if [ -c /dev/ttyS0 ]; then
+    printf 'ECOMMERCE_MILESTONE T7_FIRST_REBOOT\n' > /dev/ttyS0
+fi
 %end

@@ -176,6 +176,37 @@ class RemoteEvidenceTests(unittest.TestCase):
                     RD.fetch_evidence(root, root / ".context", requested)
 
 
+class TrustedPRBindingTests(unittest.TestCase):
+    def test_uses_rest_base_and_head_even_if_cli_sha_fields_disagree(self):
+        base_sha, head_sha = "a" * 40, "b" * 40
+        payload = {
+            "number": 166, "state": "open", "draft": False,
+            "base": {"ref": "main", "sha": base_sha},
+            "head": {
+                "ref": "feat/sync", "sha": head_sha,
+                "repo": {"full_name": "owner/repo"},
+            },
+            "baseRefOid": "c" * 40,
+            "headRefOid": "d" * 40,
+        }
+        with mock.patch.object(RD, "_output", return_value=json.dumps(payload)) as output:
+            binding = RD._github_pr_binding(ROOT, "gh", "owner/repo", 166)
+        output.assert_called_once_with(
+            ["gh", "api", "repos/owner/repo/pulls/166"], cwd=ROOT
+        )
+        self.assertEqual(base_sha, binding["base_sha"])
+        self.assertEqual(head_sha, binding["head_sha"])
+
+    def test_cli_only_sha_fields_cannot_authorize_transition(self):
+        payload = {
+            "number": 166, "state": "open", "draft": False,
+            "baseRefOid": "a" * 40, "headRefOid": "b" * 40,
+        }
+        with mock.patch.object(RD, "_output", return_value=json.dumps(payload)):
+            with self.assertRaisesRegex(RuntimeError, "REST pull request base/head"):
+                RD._github_pr_binding(ROOT, "gh", "owner/repo", 166)
+
+
 class BundleDeliveryTests(unittest.TestCase):
     def git(self, cwd: Path, *args: str) -> str:
         return subprocess.check_output(["git", *args], cwd=cwd, text=True).strip()
@@ -184,9 +215,16 @@ class BundleDeliveryTests(unittest.TestCase):
         subprocess.run(["git", "init", "-b", "main", str(path)], check=True, capture_output=True, text=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=path, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=path, check=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=path, check=True)
         (path / "README.md").write_text("base\n", encoding="utf-8")
         subprocess.run(["git", "add", "README.md"], cwd=path, check=True)
-        subprocess.run(["git", "commit", "-m", "base"], cwd=path, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "commit", "-m", "base"],
+            cwd=path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
 
     def test_bundle_branch_requires_exact_unique_feature_head(self):
         with tempfile.TemporaryDirectory() as td:
@@ -195,7 +233,13 @@ class BundleDeliveryTests(unittest.TestCase):
             subprocess.run(["git", "switch", "-c", "feat/proof"], cwd=root, check=True, capture_output=True, text=True)
             (root / "feature.txt").write_text("x\n", encoding="utf-8")
             subprocess.run(["git", "add", "feature.txt"], cwd=root, check=True)
-            subprocess.run(["git", "commit", "-m", "feature"], cwd=root, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+                cwd=root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             head = self.git(root, "rev-parse", "HEAD")
             bundle = Path(td) / "change.bundle"
             subprocess.run(["git", "bundle", "create", str(bundle), "feat/proof"], cwd=root, check=True)
@@ -218,7 +262,13 @@ class BundleDeliveryTests(unittest.TestCase):
             )
             (source / "feature.txt").write_text("x\n", encoding="utf-8")
             subprocess.run(["git", "add", "feature.txt"], cwd=source, check=True)
-            subprocess.run(["git", "commit", "-m", "feature"], cwd=source, check=True, capture_output=True, text=True)
+            subprocess.run(
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "feature"],
+                cwd=source,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             head = self.git(source, "rev-parse", "HEAD")
             bundle = td / "change.bundle"
             subprocess.run(["git", "bundle", "create", str(bundle), "feat/proof"], cwd=source, check=True)
@@ -247,6 +297,106 @@ class BundleDeliveryTests(unittest.TestCase):
             self.assertNotEqual(source, seen["cwd"])
             self.assertIn(str(trusted), seen["cmd"])
             self.assertEqual(str(trusted), seen["env"]["REPOCTL_TRUSTED_CONTROLLER"])
+            self.assertEqual("isolated-delivery", seen["env"]["ECOMMERCE_EXECUTION_SCOPE"])
+
+    def test_trusted_pr_transition_ignores_head_wrapper_and_controller(self):
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            trusted = td / "trusted"
+            self.init_repo(trusted)
+            (trusted / "scripts").mkdir()
+            trusted_wrapper = trusted / "scripts/repository_delivery.py"
+            trusted_controller = trusted / "scripts/repoctl.py"
+            trusted_wrapper.write_text("# trusted wrapper\n", encoding="utf-8")
+            trusted_controller.write_text(
+                "print('OWNER_AUTH_REQUIRED')\nraise SystemExit(1)\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "scripts"], cwd=trusted, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "trusted delivery boundary"],
+                cwd=trusted,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            base_sha = self.git(trusted, "rev-parse", "HEAD")
+
+            target = td / "target"
+            subprocess.run(
+                ["git", "clone", str(trusted), str(target)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"], cwd=target, check=True
+            )
+            subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "switch", "-c", "feat/tamper"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            marker = target / "head-controller-ran"
+            (target / "scripts/repository_delivery.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('wrapper')\n",
+                encoding="utf-8",
+            )
+            (target / "scripts/repoctl.py").write_text(
+                f"from pathlib import Path\nPath({str(marker)!r}).write_text('controller')\n",
+                encoding="utf-8",
+            )
+            subprocess.run(["git", "add", "scripts"], cwd=target, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "tamper with head delivery"],
+                cwd=target,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            head_sha = self.git(target, "rev-parse", "HEAD")
+            binding = {
+                "number": 162,
+                "state": "OPEN",
+                "draft": False,
+                "base_sha": base_sha,
+                "head_sha": head_sha,
+                "head_repository": "owner/repo",
+            }
+            seen = {}
+            real_run = RD._run
+
+            def recording_run(cmd, *, cwd, check=True, capture=False, env=None):
+                if str(trusted_controller) in cmd:
+                    seen["cmd"] = list(cmd)
+                    seen["cwd"] = Path(cwd)
+                    seen["env"] = dict(env or {})
+                return real_run(cmd, cwd=cwd, check=check, capture=capture, env=env)
+
+            with (
+                mock.patch.object(RD, "__file__", str(trusted_wrapper)),
+                mock.patch.object(RD, "require_command", return_value="gh"),
+                mock.patch.object(RD, "_github_pr_binding", return_value=binding),
+                mock.patch.object(RD, "_github_repository", return_value="owner/repo"),
+                mock.patch.object(RD, "_run", side_effect=recording_run),
+            ):
+                rc = RD.trusted_pr_transition(
+                    trusted,
+                    target,
+                    162,
+                    "python3",
+                )
+
+            self.assertEqual(1, rc)
+            self.assertFalse(marker.exists(), "the PR-head delivery code must never execute")
+            self.assertEqual(target, seen["cwd"])
+            self.assertEqual(str(trusted_controller), seen["cmd"][2])
+            self.assertEqual(base_sha, seen["env"]["REPOCTL_TRUSTED_BASE_SHA"])
+            self.assertEqual(head_sha, seen["env"]["REPOCTL_TRUSTED_HEAD_SHA"])
 
 
 class RemoteStatusTests(unittest.TestCase):
@@ -277,6 +427,41 @@ class RemoteStatusTests(unittest.TestCase):
         self.assertTrue(captured["url"].endswith(f"/statuses/{sha}"))
         self.assertEqual(RD.REMOTE_STATUS_CONTEXT, captured["payload"]["context"])
         self.assertEqual("success", captured["payload"]["state"])
+
+    def test_gitea_https_profile_derives_api_without_enabling_status_by_itself(self):
+        with mock.patch.dict(
+            RD.os.environ, {"GITEA_HTTPS_URL": "https://gitea.ecommerce.local/"}, clear=True
+        ):
+            self.assertIsNone(RD._gitea_config())
+        with mock.patch.dict(
+            RD.os.environ,
+            {
+                "GITEA_HTTPS_URL": "https://gitea.ecommerce.local/",
+                "GITEA_REPOSITORY": "dst-red-Wire/ecommerce-1",
+                "GITEA_TOKEN": "secret",
+            },
+            clear=True,
+        ):
+            self.assertEqual(
+                (
+                    "https://gitea.ecommerce.local/api/v1",
+                    "dst-red-Wire/ecommerce-1",
+                    "secret",
+                ),
+                RD._gitea_config(),
+            )
+
+    def test_gitea_endpoint_conflict_is_rejected(self):
+        with mock.patch.dict(
+            RD.os.environ,
+            {
+                "GITEA_HTTPS_URL": "https://gitea.ecommerce.local/",
+                "GITEA_API_URL": "https://other.example/api/v1",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "contradicts"):
+                RD._gitea_config()
 
     def test_dual_forge_status_configuration_is_rejected(self):
         env = {

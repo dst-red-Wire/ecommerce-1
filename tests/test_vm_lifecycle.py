@@ -58,6 +58,8 @@ class LifecycleTests(unittest.TestCase):
         (self.directory / "vars.pkr.hcl").write_text("# test\n")
         self.runner = FakeRunner()
         self.controller = vm.Reconciler(ROOT, self.config, self.runner)
+        # Method shards run concurrently; keep each fake VM's evidence in its own fixture.
+        self.controller.root = self.directory
         self.controller.state_dir = self.directory / "state"
         self.controller.preflight = lambda: "iso-digest"
         self.controller.vm_state = lambda: "running"

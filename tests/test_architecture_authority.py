@@ -337,6 +337,7 @@ graph LR
             contract["transverse_rule_contract"]["consumer_changes"],
         )
         authorization = contract["owner_authorization"]
+        self.assertEqual("risk-based", authorization["mode"])
         self.assertEqual(
             "/owner-authorization approve scope=<scope> sha=<exact-head-sha>",
             authorization["syntax"],
@@ -347,7 +348,32 @@ graph LR
         self.assertEqual("exact", authorization["sha_binding"])
         self.assertEqual("exact", authorization["scope_binding"])
         self.assertEqual("authorization-expired", authorization["head_change"])
-        self.assertEqual("block", authorization["absence_or_mismatch"])
+        self.assertEqual("block-when-required", authorization["absence_or_mismatch"])
+        self.assertEqual("forbidden", authorization["automatic_generation"])
+        self.assertEqual(
+            [
+                "governance",
+                "delivery-authority",
+                "branch-protection",
+                "infrastructure-apply",
+                "destructive-operation",
+                "state-migration",
+                "iam",
+                "secrets",
+                "network",
+                "dns",
+                "signing-or-provenance-policy",
+                "security-policy",
+                "artifact-publication-authority",
+            ],
+            authorization["required_for"],
+        )
+        self.assertEqual(
+            {"authorization": "not-required-by-policy"}, authorization["low_risk"]
+        )
+        self.assertEqual(
+            {"authorization": "explicit-repository-owner"}, authorization["sensitive"]
+        )
 
     def test_owner_authorization_is_exact_and_fail_closed(self):
         head = "a" * 40
@@ -597,20 +623,19 @@ graph LR
             lock.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_mandatory_handoffs_include_machine_governance_contracts(self):
+    def test_router_retains_machine_governance_contracts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
-            handoff = root / "docs/project/CODEX_HANDOFFS.md"
-            original = handoff.read_text()
+            router = root / "config/context/router.yaml"
+            original = router.read_text()
             for relative in (
                 "config/contracts/resilience-governance.yaml",
                 "config/contracts/security-trust-zones.yaml",
             ):
                 with self.subTest(relative=relative):
-                    handoff.write_text(original.replace(f"- `{relative}`\n", "", 1))
+                    router.write_text(original.replace(f"    - {relative}\n", "", 1))
                     self.assertTrue(any(relative in error for error in authority.validate(root)))
-                    handoff.write_text(original)
-                    self.assertEqual([], authority.validate(root))
+                    router.write_text(original)
 
     def test_operational_service_counts_are_not_topology_claims(self):
         self.assertEqual([], authority.documentation_errors("Incident impact: 17 services were unavailable."))
@@ -623,9 +648,24 @@ graph LR
         shutil.copytree(ROOT / "config", root / "config")
         shutil.copytree(ROOT / "contracts", root / "contracts")
         shutil.copytree(ROOT / "docs", root / "docs")
-        shutil.copytree(ROOT / "instruction", root / "instruction")
+        projection = Path("platform/local-services/endpoints.env.example")
+        (root / projection.parent).mkdir(parents=True, exist_ok=True)
+        shutil.copy2(ROOT / projection, root / projection)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         return root
+
+    def test_local_management_endpoint_projection_drift_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            projection = root / "platform/local-services/endpoints.env.example"
+            projection.write_text(
+                projection.read_text().replace(
+                    "GITEA_ACCOUNT=dst-red-Wire", "GITEA_ACCOUNT=wrong-account"
+                )
+            )
+            self.assertTrue(
+                any("endpoint projection" in error for error in authority.validate(root))
+            )
 
     def test_mutated_lock_is_rejected(self):
         mutations = {
@@ -988,7 +1028,7 @@ graph LR
             )
             self.assertTrue(any("gate M3" in error for error in authority.validate(root)))
 
-    def test_readiness_and_m25_handoff_mutations_are_rejected(self):
+    def test_readiness_and_m25_roadmap_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
             readiness = root / "docs/project/TECHNICAL_READINESS.md"
@@ -997,20 +1037,11 @@ graph LR
                 readiness.write_text(original.replace("M2.5 PROVEN", replacement))
                 self.assertTrue(any("TECHNICAL_READINESS" in error for error in authority.validate(root)))
                 readiness.write_text(original)
-            handoff = root / "docs/project/CODEX_HANDOFFS.md"
-            original_handoff = handoff.read_text()
-            roadmap = authority.load_yaml(root / "config/contracts/roadmap-policy.yaml")
-            m25 = next(item for item in roadmap["milestones"] if item["id"] == "M2.5")
-            for required in (
-                "## M2.5 prompt",
-                f"Tracker: `#{m25['tracker']}`",
-                "Entry gate: M1 PROVEN",
-                "Evidence required for M2.5 PROVEN",
-                "That PROVEN state enables M3",
-            ):
-                handoff.write_text(original_handoff.replace(required, "removed", 1))
-                self.assertTrue(any("executable M2.5" in error for error in authority.validate(root)))
-                handoff.write_text(original_handoff)
+            roadmap = root / "config/contracts/roadmap-policy.yaml"
+            original = roadmap.read_text()
+            roadmap.write_text(original.replace("tracker: 32", "tracker: 0", 1))
+            self.assertTrue(any("M2.5 tracker" in error for error in authority.validate(root)))
+            roadmap.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_declared_topology_contract_deletions_are_rejected(self):
@@ -1066,22 +1097,19 @@ graph LR
             lock_path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_m5_autonomous_domain_handoff_mutations_are_rejected(self):
+    def test_m5_autonomous_domain_plan_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
-            handoff = root / "docs/project/CODEX_HANDOFFS.md"
-            original = handoff.read_text()
-            flow = (
-                "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
-            )
+            plan = root / "docs/project/MASTER_EXECUTION_PLAN.md"
+            original = plan.read_text()
             for before, after in (
-                (flow, flow.replace(" -> Tax", " -> Order -> Tax")),
-                (flow, flow.replace(" -> Fraud/Risk", " -> Order -> Fraud/Risk")),
-                ("Fulfillment -> Shipping", "Shipping"),
+                ("Cart -> Checkout -> Order -> Payment", "Cart -> Order -> Payment"),
+                ("Fulfillment -> Shipping -> Tracking", "Shipping -> Tracking"),
+                ("Pricing, Tax, Inventory, Fraud/Risk", "Pricing, Inventory"),
             ):
-                handoff.write_text(original.replace(before, after, 1))
+                plan.write_text(original.replace(before, after, 1))
                 self.assertTrue(any("M5 must preserve" in error for error in authority.validate(root)))
-                handoff.write_text(original)
+                plan.write_text(original)
             self.assertEqual([], authority.validate(root))
 
     def test_deployment_wave_service_coverage_mutations_are_rejected(self):
@@ -1153,15 +1181,13 @@ graph LR
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
-    def test_m4_handoff_order_includes_argo_rollouts_exactly_once(self):
+    def test_m4_plan_order_includes_argo_rollouts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
-            path = root / "docs/project/CODEX_HANDOFFS.md"
+            path = root / "docs/project/MASTER_EXECUTION_PLAN.md"
             original = path.read_text()
-            path.write_text(original.replace(" -> Argo Rollouts", "", 1))
-            self.assertIn(
-                "CODEX_HANDOFFS.md M4 order must match the approved platform schedule", authority.validate(root)
-            )
+            path.write_text(original.replace("Fleet -> Argo Rollouts -> Kyverno", "Fleet -> Kyverno", 1))
+            self.assertIn("MASTER_EXECUTION_PLAN.md M4 must preserve Argo Rollouts order", authority.validate(root))
             path.write_text(original)
             self.assertEqual([], authority.validate(root))
 
@@ -1531,19 +1557,16 @@ graph LR
     def test_m7_coverage_threshold_mutations_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)
-            handoff = root / "docs/project/CODEX_HANDOFFS.md"
-            original = handoff.read_text()
+            policy = root / "config/contracts/source-quality-policy.yaml"
+            original = policy.read_text()
             for before, after in (
-                (">=80% global coverage", ""),
-                (">=80% global coverage", "79% global coverage"),
-                (">=90% critical-code coverage", ""),
-                (">=90% critical-code coverage", "89% critical-code coverage"),
+                ("global_min_percent: 80", "global_min_percent: 79"),
+                ("critical_code_min_percent: 90", "critical_code_min_percent: 89"),
             ):
-                with self.subTest(mutation=f"{before} -> {after}"):
-                    handoff.write_text(original.replace(before, after, 1))
-                    self.assertTrue(any("coverage" in error for error in authority.validate(root)))
-                    handoff.write_text(original)
-                    self.assertEqual([], authority.validate(root))
+                policy.write_text(original.replace(before, after, 1))
+                self.assertTrue(any("coverage" in error for error in authority.validate(root)))
+                policy.write_text(original)
+            self.assertEqual([], authority.validate(root))
 
     def test_management_plane_mutations_are_rejected(self):
         mutations = (

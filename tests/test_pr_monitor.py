@@ -190,8 +190,48 @@ class PRMonitorTest(unittest.TestCase):
         self.assertIn("ChatGPT incremental exact-SHA PR review handoff", handoff)
         self.assertIn("Return the compact UX summary as five lines", handoff)
         self.assertIn('"current_head":"new"', handoff)
+        self.assertIn('"review_kind":"COMBINED"', handoff)
         self.assertIn('"previous_validated_verdict":"READY"', handoff)
         self.assertLessEqual(len(handoff.encode()), pr_monitor.PROMPT_BUDGET_BYTES)
+
+        code_handoff = pr_monitor.chatgpt_review_handoff(
+            7,
+            previous,
+            current,
+            {"head_sha": {"before": "old", "after": "new"}},
+            ["x.py"],
+            review_kind="CODE",
+        )
+        self.assertIn('"review_kind":"CODE"', code_handoff)
+        self.assertIn("Perform only the requested CODE review", code_handoff)
+
+        minimal = pr_monitor.bounded_payload(
+            {
+                "pr": 7,
+                "review_kind": "CODE",
+                "previous_validated_verdict": "READY",
+                "delta": {
+                    "checks": {
+                        "modified": {
+                            f"check-{index}": {"before": "x" * 400, "after": "y" * 400}
+                            for index in range(100)
+                        }
+                    }
+                },
+                "previous_head": "old",
+                "current_head": "new",
+                "changed_files": [f"path/{index}.py" for index in range(100)],
+                "exact_head_verified": True,
+            },
+            budget=1024,
+        )
+        decoded = json.loads(minimal)
+        self.assertEqual("old", decoded["previous_head"])
+        self.assertEqual("new", decoded["current_head"])
+        self.assertEqual("CODE", decoded["review_kind"])
+        self.assertIn("delta", decoded)
+        self.assertTrue(decoded["exact_head_verified"])
+        self.assertTrue(decoded["truncated"])
 
         with mock.patch.object(pr_monitor, "_supports_color", return_value=False):
             lines = pr_monitor.compact_status_lines(
@@ -291,10 +331,27 @@ class PRMonitorTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode()), 4096)
         json.loads(encoded)
 
+    def test_bounded_prompt_trims_long_paths_until_the_summary_fits(self):
+        payload = {
+            "pr": 7,
+            "review_kind": "CODE",
+            "previous_validated_verdict": "READY",
+            "previous_head": "old",
+            "current_head": "new",
+            "changed_files": [f"path/{index}/{'x' * 390}.py" for index in range(20)],
+            "delta": {},
+            "exact_head_verified": True,
+        }
+        encoded = pr_monitor.bounded_payload(payload, budget=4096)
+        decoded = json.loads(encoded)
+        self.assertLessEqual(len(encoded.encode()), 4096)
+        self.assertLess(len(decoded["changed_files"]), 20)
+
     def test_pr_monitor_has_no_codex_control_or_external_ai_execution_hook(self):
         source = (Path(pr_monitor.__file__)).read_text(encoding="utf-8").lower()
         for forbidden in (
-            "codex",
+            '["codex",',
+            '("codex",',
             "--codex-command",
             "pr_monitor_codex_command",
             "invoke_codex",

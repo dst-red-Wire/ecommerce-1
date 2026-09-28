@@ -50,6 +50,7 @@ V5_ROOT_KEYS = frozenset(
         "business",
         "platform",
         "management_plane",
+        "local_management_services",
         "stateful",
         "dns",
         "observability",
@@ -69,9 +70,53 @@ V5_SECTION_KEYS = {
     "repository_governance": frozenset(
         {
             "scope",
+            "automation_signing",
+            "windows_workspace",
+            "canonical_workspace",
             "transverse_rule_contract",
             "owner_authorization",
         }
+    ),
+    "repository_governance.canonical_workspace": frozenset(
+        {
+            "version",
+            "kind",
+            "status",
+            "canonical_path",
+            "repository",
+            "additional_clones",
+            "additional_worktrees",
+            "execution_outside_canonical_path",
+            "execution_scope_environment",
+            "noncanonical_execution_scopes",
+            "publication_scopes",
+            "command_allowlist",
+            "fail_closed",
+            "required_before",
+            "evidence",
+        }
+    ),
+    "repository_governance.windows_workspace": frozenset(
+        {"status", "execution", "repository_filesystem", "windows_mounts", "scope"}
+    ),
+    "repository_governance.automation_signing": frozenset(
+        {"version", "kind", "status", "repository", "personal_signing", "automation_key", "rotation"}
+    ),
+    "repository_governance.automation_signing.personal_signing": frozenset(
+        {"fingerprint", "passphrase_required", "automation_use"}
+    ),
+    "repository_governance.automation_signing.rotation": frozenset(
+        {"enabled", "validity_days", "info_days_before_expiry", "warning_days_before_expiry",
+         "delivery_block_days_before_expiry", "expired_key_use", "overlapping_keys_allowed",
+         "overlap_max_days", "remote_verification_required_before_activation",
+         "revocation_certificate_required", "old_key_retirement_requires_replacement_proven"}
+    ),
+    "repository_governance.automation_signing.automation_key": frozenset(
+        {"fingerprint", "pending_fingerprint", "pending_expires_at", "rotation_status",
+         "previous_fingerprint", "uid", "algorithm", "signing_required", "passphrase",
+         "expiration_days_max", "warning_days_before_expiration", "local_git_config_only",
+         "revocation_certificate_required", "private_key_in_repository", "private_key_export",
+         "global_git_configuration", "forge_identity"}
     ),
     "repository_governance.transverse_rule_contract": frozenset(
         {
@@ -84,6 +129,7 @@ V5_SECTION_KEYS = {
     ),
     "repository_governance.owner_authorization": frozenset(
         {
+            "mode",
             "syntax",
             "decision_authority",
             "recording_agent",
@@ -92,6 +138,10 @@ V5_SECTION_KEYS = {
             "scope_binding",
             "head_change",
             "absence_or_mismatch",
+            "automatic_generation",
+            "required_for",
+            "low_risk",
+            "sensitive",
         }
     ),
     "business": frozenset({"services", "frontends", "frontend_runtime", "forbidden_services"}),
@@ -148,12 +198,24 @@ V5_SECTION_KEYS = {
             "gate_executable_inventory",
             "container",
             "machine_images",
+            "local_vm_image_pipeline",
             "iac",
             "security",
             "secrets",
             "performance",
             "forbidden_authorities",
         }
+    ),
+    "local_management_services": frozenset(
+        {"status", "endpoint_profile", "endpoint_override_policy", "identities",
+         "endpoints", "automation_signing_fingerprint", "gpg_registration_gate"}
+    ),
+    "local_management_services.identities": frozenset(
+        {"gitea_human", "gitea_automation", "harbor_project",
+         "harbor_automation_account"}
+    ),
+    "local_management_services.endpoints": frozenset(
+        {"gitea_https_url", "harbor_url"}
     ),
     "management_plane": frozenset(
         {
@@ -1305,6 +1367,38 @@ def validate(root):
             errors.append("developer_platform must match the approved V5 PR-driven platform contract")
         if lock.get("platform", {}).get("infrastructure_api") != "crossplane":
             errors.append("platform.infrastructure_api must remain crossplane")
+        local = lock["local_management_services"]
+        if local != {
+            "status": "active",
+            "endpoint_profile": "local",
+            "endpoint_override_policy": "environment-only",
+            "identities": {
+                "gitea_human": "dst-red-Wire",
+                "gitea_automation": "dst-red-Wire",
+                "harbor_project": "ecommerce",
+                "harbor_automation_account": "ecommerce-ci",
+            },
+            "endpoints": {
+                "gitea_https_url": "https://gitea.ecommerce.local/",
+                "harbor_url": "https://harbor.ecommerce.local/",
+            },
+            "automation_signing_fingerprint":
+                lock["repository_governance"]["automation_signing"]["automation_key"]["fingerprint"],
+            "gpg_registration_gate": "post-windows-reboot-proof-pass",
+        }:
+            errors.append("local_management_services must match the approved local contract")
+        endpoint_projection = root / "platform/local-services/endpoints.env.example"
+        expected_endpoint_projection = (
+            "# Public local profile; override URLs for a remote environment.\n"
+            f"GITEA_HTTPS_URL={local['endpoints']['gitea_https_url']}\n"
+            f"GITEA_ACCOUNT={local['identities']['gitea_automation']}\n"
+            f"HARBOR_URL={local['endpoints']['harbor_url']}\n"
+            f"HARBOR_PROJECT={local['identities']['harbor_project']}\n"
+            f"HARBOR_AUTOMATION_ACCOUNT={local['identities']['harbor_automation_account']}\n"
+        )
+        if (not endpoint_projection.is_file()
+                or endpoint_projection.read_text() != expected_endpoint_projection):
+            errors.append("local management endpoint projection differs from architecture.lock.yaml")
         if lock.get("management_plane", {}).get("developer_portal") != "backstage":
             errors.append("management_plane.developer_portal must remain backstage")
         if lock.get("dns", {}).get("critical_ttl_seconds") != 60:
@@ -1421,6 +1515,148 @@ def validate(root):
                 "and forbid Codex review workflows"
             )
 
+        pr_loop = review_policy.get("repository_delivery", {}).get("pr_loop", {})
+        owner_boundary = pr_loop.get("owner_boundary", {})
+        risk_classification = pr_loop.get("risk_classification", {})
+        required_risk_capabilities = [
+            "governance",
+            "delivery-authority",
+            "branch-protection",
+            "infrastructure-apply",
+            "destructive-operation",
+            "state-migration",
+            "iam",
+            "secrets",
+            "network",
+            "dns",
+            "signing-or-provenance-policy",
+            "security-policy",
+            "artifact-publication-authority",
+        ]
+        if (
+            pr_loop.get("schema_version") != 2
+            or pr_loop.get("controller") != "scripts/repository_delivery.py"
+            or pr_loop.get("controller_source") != "exact-pr-base-sha"
+            or pr_loop.get("command") != "trusted-pr-transition"
+            or pr_loop.get("target_worktree") != "exact-pr-head-clean-checkout"
+            or pr_loop.get("direct_head_controller") != "forbidden"
+            or pr_loop.get("bootstrap_without_controller")
+            != "explicit-repository-owner"
+            or pr_loop.get("state_persistence") != "forbidden"
+            or pr_loop.get("transition_order")
+            != [
+                "exact-pr-head",
+                "sync-pr-base-if-required",
+                "qualification",
+                "chatgpt-code",
+                "chatgpt-security",
+                "deterministic-risk-classification",
+                "owner-authorization-if-required",
+                "merge-requirements",
+                "finish-pr",
+                "merge-verification",
+                "post-merge-cleanup",
+            ]
+            or pr_loop.get("exact_sha", {}).get("prior_sha_evidence") != "historical-only"
+            or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_head_change")
+            != "abandon-and-restart"
+            or pr_loop.get("exact_sha", {}).get("in_flight_transition_on_base_change")
+            != "abandon-and-restart-from-current-exact-base"
+            or pr_loop.get("base_change")
+            != {
+                "detection": "github-rest-base-sha-or-origin-main-differs-from-trusted-base-sha",
+                "state": "BASE_CHANGED",
+                "next_action": "RESTART_EXACT_BASE_CONTROLLER",
+                "stop_before": ["sync-pr-base", "qualification", "git-push", "finish-pr"],
+                "restart_controller": "fresh-checkout-at-current-exact-base-sha",
+            }
+            or pr_loop.get("chatgpt_handoff", {}).get("verdict_authority") != "ChatGPT-only"
+            or pr_loop.get("chatgpt_handoff", {}).get("event") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("state") != "CHATGPT_REVIEW_REQUIRED"
+            or pr_loop.get("chatgpt_handoff", {}).get("trigger")
+            != "canonical-bounded-handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("helper")
+            != "scripts/pr_monitor.py#chatgpt_review_handoff"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload") != "required"
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_budget_bytes") != 8192
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_fields")
+            != [
+                "pr",
+                "review_kind",
+                "previous_validated_verdict",
+                "delta",
+                "previous_head",
+                "current_head",
+                "changed_files",
+                "exact_head_verified",
+            ]
+            or pr_loop.get("chatgpt_handoff", {}).get("payload_digest") != "sha256"
+            or pr_loop.get("chatgpt_handoff", {}).get("fail_if_payload_unavailable") is not True
+            or pr_loop.get("chatgpt_handoff", {}).get("review_kinds") != ["CODE", "SECURITY"]
+            or pr_loop.get("chatgpt_handoff", {}).get("consumer") != "external-automatic"
+            or pr_loop.get("chatgpt_handoff", {}).get("invocation_binding")
+            != "exact-pr-and-head-sha"
+            or pr_loop.get("chatgpt_handoff", {}).get("rerun_after_valid_marker") != "required"
+            or pr_loop.get("chatgpt_handoff", {}).get("controller_may_emit_verdict") is not False
+            or pr_loop.get("chatgpt_handoff", {}).get("security_requires_code_marker")
+            != {
+                "provider": "ChatGPT",
+                "kind": "code",
+                "status": "PASS",
+                "blocking_findings": 0,
+                "exact_head_sha": "required",
+            }
+            or pr_loop.get("comment_evidence")
+            != {
+                "ordering": "immutable-created-at-then-id",
+                "updated_at_authority": "forbidden",
+                "owner_authorization_match": "whole-trimmed-comment",
+            }
+            or owner_boundary.get("mode") != "risk-based"
+            or owner_boundary.get("automatic_generation") != "forbidden"
+            or owner_boundary.get("unique_human_interruption") is not True
+            or owner_boundary.get("automatic_rerun_after_authorization")
+            != "required"
+            or owner_boundary.get("revocation")
+            != "/owner-authorization revoke scope=<scope> sha=<exact-head-sha>"
+            or owner_boundary.get("required_for") != required_risk_capabilities
+            or owner_boundary.get("low_risk")
+            != {"authorization": "not-required-by-policy"}
+            or owner_boundary.get("sensitive")
+            != {"authorization": "explicit-repository-owner"}
+            or risk_classification.get("authority") != "repository-policy"
+            or risk_classification.get("implementation")
+            != "scripts/merge_risk.py#classify_merge_risk"
+            or risk_classification.get("controller_source") != "exact-pr-base-sha"
+            or risk_classification.get("bootstrap_without_controller") != "sensitive"
+            or risk_classification.get("head_controller_execution") != "forbidden"
+            or risk_classification.get("policy_source") != "exact-pr-base-sha"
+            or risk_classification.get("model") != "deterministic-capabilities-and-paths"
+            or risk_classification.get("llm_decision") != "forbidden"
+            or risk_classification.get("self_modification") != "sensitive"
+            or risk_classification.get("unknown_or_ambiguous") != "sensitive"
+            or risk_classification.get("partial_analysis") != "sensitive"
+            or risk_classification.get("git_error") != "sensitive"
+            or risk_classification.get("classifications") != ["LOW_RISK", "SENSITIVE"]
+            or set(
+                (risk_classification.get("sensitive", {}).get("capabilities") or {}).keys()
+            )
+            != set(required_risk_capabilities)
+            or pr_loop.get("merge_delegation", {}).get("state") != "MERGE_READY"
+            or pr_loop.get("merge_delegation", {}).get("command") != "finish-pr"
+            or pr_loop.get("merge_delegation", {}).get("direct_merge") != "forbidden"
+            or pr_loop.get("merge_delegation", {}).get("nonzero_exit")
+            != "reread-github-before-result"
+            or pr_loop.get("merge_delegation", {}).get("post_exit_merge_authority")
+            != "github-current-pr-exact-head"
+            or pr_loop.get("post_merge_cleanup", {}).get("command") != "branch-cleanup"
+            or pr_loop.get("post_merge_cleanup", {}).get("automatic_after_merge") != "required"
+            or pr_loop.get("post_merge_cleanup", {}).get("separate_result") != "required"
+        ):
+            errors.append(
+                "review policy must define the stateless exact-SHA pr-loop and preserve authority boundaries"
+            )
+
         active_review_automation = {
             "Makefile": ("CODEX_COMMAND", "--codex-command"),
             "scripts/pr_monitor.py": (
@@ -1457,7 +1693,7 @@ def validate(root):
             "codex_output_role": "evidence-for-chatgpt",
             "code_security_review_authority": "ChatGPT-only",
             "merge_readiness_authority": "ChatGPT-only",
-            "merge_decision_authority": "repository-owner",
+            "merge_decision_authority": "repository-policy-with-sensitive-owner-boundary",
             "codex_review_markers": "forbidden",
             "codex_merge_decision": "forbidden",
         }:
@@ -1554,40 +1790,16 @@ def validate(root):
         readiness = (root / "docs/project/TECHNICAL_READINESS.md").read_text()
         if not re.search(r"M3: dependency-gated by M2\.5 PROVEN", readiness):
             errors.append("TECHNICAL_READINESS.md must gate M3 on M2.5 PROVEN")
-        handoffs = (root / "docs/project/CODEX_HANDOFFS.md").read_text()
-        mandatory_handoffs = handoffs.split("## Mandatory exact architecture contracts", 1)[-1].split("\n## ", 1)[0]
-        for key in ("resilience_governance", "security_trust_zones"):
-            relative = lock["machine_contracts"][key]
-            if f"`{relative}`" not in mandatory_handoffs:
-                errors.append(f"CODEX_HANDOFFS.md mandatory contracts must include {relative}")
-        m5_match = re.search(r"^## M5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m5 = m5_match.group(0) if m5_match else ""
-        checkout_flow = (
-            "Cart -> Checkout -> Pricing/final totals -> Tax -> Fraud/Risk -> delivery-context validation -> Order"
-        )
-        if checkout_flow not in m5 or "Fulfillment -> Shipping" not in m5:
-            errors.append("CODEX_HANDOFFS.md M5 must preserve autonomous Checkout and Fulfillment domain sequencing")
-        m4_match = re.search(r"^## M4 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m4 = m4_match.group(0) if m4_match else ""
-        m4_order_match = re.search(r"^Order:\s*\n`([^`]+)`\.\s*$", m4, re.M)
-        approved_m4_order = [
-            "RKE2",
-            "Cilium/Hubble",
-            "Fleet",
-            "Argo Rollouts",
-            "Kyverno/Pod Security",
-            "SPIRE",
-            "Istio",
-            "OpenBao/ESO",
-            "Harbor",
-            "Tekton + cert-manager",
-            "Kratix/Kustomize/Helm",
-            "observability/security logging",
-            "stateful platform",
-        ]
-        rendered_m4_order = [item.strip() for item in m4_order_match.group(1).split("->")] if m4_order_match else []
-        if rendered_m4_order != approved_m4_order:
-            errors.append("CODEX_HANDOFFS.md M4 order must match the approved platform schedule")
+        # The removed milestone prompts are not an authority. Check their live
+        # invariants against the current plan and machine contracts instead.
+        m4_plan = plan.split("### M4 — Platform Baseline", 1)[-1].split("### M5", 1)[0]
+        if "Fleet -> Argo Rollouts -> Kyverno" not in m4_plan:
+            errors.append("MASTER_EXECUTION_PLAN.md M4 must preserve Argo Rollouts order")
+        m5_plan = plan.split("### M5 — Vertical Slice", 1)[-1].split("### M6", 1)[0]
+        if ("Cart -> Checkout -> Order -> Payment" not in m5_plan
+            or "Fulfillment -> Shipping -> Tracking" not in m5_plan
+            or "Pricing, Tax, Inventory, Fraud/Risk" not in m5_plan):
+            errors.append("MASTER_EXECUTION_PLAN.md M5 must preserve autonomous domain sequencing")
         waves = load_yaml(root / lock["machine_contracts"]["deployment_waves"])
         if waves != V5_DEPLOYMENT_WAVES:
             errors.append("deployment-waves.yaml must match the complete approved V5 schedule")
@@ -1688,38 +1900,16 @@ def validate(root):
                     or positions[component] <= positions[dependency]
                 ):
                     errors.append(f"deployment ordering requires {component} after MLOps dependency {dependency}")
-        m7_match = re.search(r"^## M7 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        m7 = m7_match.group(0) if m7_match else ""
-        if not re.search(r">=\s*80%\s+global coverage", m7, re.I):
-            errors.append("CODEX_HANDOFFS.md M7 must require >=80% global coverage")
-        if not re.search(r">=\s*90%\s+critical-code coverage", m7, re.I):
-            errors.append("CODEX_HANDOFFS.md M7 must require >=90% critical-code coverage")
-        handoff_match = re.search(r"^## M2\.5 prompt.*?(?=^## |\Z)", handoffs, re.M | re.S)
-        handoff = handoff_match.group(0) if handoff_match else ""
+        source_quality = load_yaml(root / "config/contracts/source-quality-policy.yaml")
+        coverage = source_quality.get("coverage", {})
+        if coverage.get("global_min_percent") != 80 or coverage.get("critical_code_min_percent") != 90:
+            errors.append("source-quality policy must preserve M7 coverage thresholds")
         roadmap = load_yaml(root / lock["machine_contracts"]["roadmap_policy"])
         roadmap_m25 = next(
-            (
-                item
-                for item in roadmap.get("milestones", [])
-                if isinstance(item, dict) and str(item.get("id")) == "M2.5"
-            ),
-            None,
-        )
-        roadmap_m25_tracker = roadmap_m25.get("tracker") if isinstance(roadmap_m25, dict) else None
-        if type(roadmap_m25_tracker) is not int or roadmap_m25_tracker <= 0:
+            (item for item in roadmap.get("milestones", [])
+             if isinstance(item, dict) and str(item.get("id")) == "M2.5"), None)
+        if not isinstance(roadmap_m25, dict) or type(roadmap_m25.get("tracker")) is not int or roadmap_m25["tracker"] <= 0:
             errors.append("roadmap policy must declare a positive M2.5 tracker")
-            roadmap_m25_tracker = -1
-        handoff_requirements = (
-            "## M2.5 prompt",
-            "M2-5-persistent-mgmt-bootstrap",
-            "Entry gate: M1 PROVEN",
-            f"Tracker: `#{roadmap_m25_tracker}`",
-            "Evidence required for M2.5 PROVEN",
-            "Exit gate:",
-            "That PROVEN state enables M3",
-        )
-        if any(requirement not in handoff for requirement in handoff_requirements):
-            errors.append("CODEX_HANDOFFS.md must define the executable M2.5 entry, evidence, and M3 exit contract")
         router = load_yaml(root / "config/context/router.yaml")
         l2_patterns = router["levels"]["L2"]["patterns"]
         l2_canonical = router["canonical"]["L2"]

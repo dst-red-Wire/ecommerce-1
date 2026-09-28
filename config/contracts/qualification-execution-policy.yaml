@@ -12,6 +12,108 @@ principles:
   exact_sha_evidence_remains_authoritative: true
   dynamic_state_must_be_fresh: true
 
+execution_context:
+  wsl2_only_reconcile_tags: [docker, workstation]
+  detection:
+    owner: scripts/runtime_orchestration.py
+    side_effects: forbidden
+    precedence: [wsl2_developer, linux_container, native_linux, unknown]
+    signals:
+      wsl2_developer: [WSL_INTEROP, WSL_DISTRO_NAME, /proc/version-microsoft]
+      linux_container: [/.dockerenv, /run/.containerenv, /proc/1/cgroup-container-marker, /proc/1/mountinfo-overlay-root]
+      native_linux: [linux-platform-without-wsl-or-container-signals]
+  environments:
+    linux_container:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: not_applicable
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+    wsl2_developer:
+      host_mutation: governed
+      docker_rootless_reconciliation: allowed
+      ip_forward_mutation: governed
+      virtualbox_mutation: governed-windows-interop
+    native_linux:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: not_applicable
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+    unknown:
+      host_mutation: forbidden
+      docker_rootless_reconciliation: forbidden
+      ip_forward_mutation: forbidden
+      virtualbox_mutation: forbidden
+  statuses:
+    PASS: gate-executed-and-satisfied
+    OUT_OF_SCOPE: capability-explicitly-excluded-by-selected-profile
+    BLOCKED_RUNTIME: capability-required-but-environment-cannot-safely-satisfy-it
+    FAIL: gate-executed-and-not-satisfied
+
+qualification_profiles:
+  static:
+    purpose: portable-non-mutating-global-and-affected-qualification
+    merge_authoritative: false
+    allowed_environments: [linux_container, wsl2_developer, native_linux]
+    mutation_classes: [none]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: out_of_scope
+      ip-forward: out_of_scope
+      testcontainers: out_of_scope
+      wsl-windows-interop: out_of_scope
+      virtualbox-runtime-available: out_of_scope
+      vagrant-runtime: out_of_scope
+      memory-capacity: out_of_scope
+      cpu-capacity: out_of_scope
+      disk-capacity: out_of_scope
+      ansible-runtime: out_of_scope
+      opentofu-runtime: out_of_scope
+      kubernetes-context: out_of_scope
+      container-registry-auth: out_of_scope
+      harbor-readiness: out_of_scope
+      tekton-readiness: out_of_scope
+      production-context: out_of_scope
+  tekton:
+    purpose: container-safe-ci-gates
+    merge_authoritative: false
+    allowed_environments: [linux_container]
+    mutation_classes: [none]
+    affected_only: true
+    runtime_capabilities:
+      ansible-runtime: required_when_affected
+      opentofu-runtime: required_when_affected
+      testcontainers: out_of_scope
+  developer-wsl2:
+    purpose: governed-local-developer-runtime-qualification
+    merge_authoritative: false
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+  runtime:
+    purpose: gate-driven-runtime-qualification
+    merge_authoritative: false
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+  full:
+    purpose: merge-authoritative-static-and-runtime-qualification
+    merge_authoritative: true
+    allowed_environments: [wsl2_developer]
+    mutation_classes: [none, local-ephemeral, local-virtualization, external-governed]
+    affected_only: true
+    runtime_capabilities:
+      docker-runtime: required_when_affected
+      ip-forward: required_when_affected
+      testcontainers: required_when_affected
+
 runtime_orchestration:
   enabled: true
   single_authority: true
@@ -70,6 +172,21 @@ runtime_orchestration:
     recapture_current_state: required
     restore_from_prior_session: forbidden
   capabilities:
+    local-virtualization-serialization:
+      handler: dependency
+      requires: []
+      mutation_class: local-virtualization
+      timeout_seconds: 1
+      privilege: none
+      global_lock: true
+      operations:
+        detector: dependency-closure
+        preflight: dependency-closure
+        prepare: none
+        verify: dependency-closure
+        restore: no-host-resource-created
+        verify_restore: no-host-resource-created
+      evidence_fields: [satisfied]
     docker-runtime:
       handler: docker-rootless
       requires: [ansible-runtime]
@@ -358,6 +475,7 @@ qualification_lifecycle:
     - evidence
   evidence:
     root: .context
+    machine_image_root: .artifacts/packer
     tracked: false
     exact_sha_binding_required: true
     source_mutation_for_evidence: forbidden
@@ -808,6 +926,64 @@ workflows:
     merge_authoritative: true
     runtime_capabilities:
       inherit_from_selected_gates: true
+  rocky_image_virtualbox:
+    owner: platform-image-engineering
+    purpose: build and qualify the exact Rocky Linux 10.2 VirtualBox box through the Windows-native local image pipeline
+    entrypoint: make image-rocky-windows-release
+    phase_entrypoints:
+      preflight: make image-rocky-windows-preflight
+      build: make image-rocky-windows-build
+      qualification: make image-rocky-windows-qualify
+      release: make image-rocky-windows-release
+      native_prepare: make image-rocky-windows-native-prepare
+      native_reboot: make image-rocky-windows-native-reboot
+      native_import: make image-rocky-windows-native-import
+      native_recover: make image-rocky-windows-native-recover
+    exit_criteria:
+      - exact-windows-tool-versions-pass
+      - virtualbox-native-vtx-runtime-backend-pass-and-nem-absent
+      - exact-sha-windows-staging-and-one-shot-normal-return-pass
+      - packer-init-fmt-validate-pass
+      - checksum-locked-offline-inputs-pass
+      - packer-build-pass
+      - exact-artifact-sha256-pass
+      - vagrant-boot-and-ssh-pass
+      - rocky-systemd-network-rke2-prerequisite-smoke-pass
+      - owned-vm-box-and-ephemeral-key-cleanup-pass
+      - exact-artifact-release-evidence-pass
+    evidence:
+      build: .context/evidence/rocky-image/rocky-10.2/windows/build.json
+      qualification: .context/evidence/rocky-image/rocky-10.2/windows/qualification.json
+      release: .context/evidence/rocky-image/rocky-10.2/windows/release.json
+    merge_authoritative: false
+    state_changing: true
+    mutation_class: local-virtualization
+  rocky_image_qemu_kvm:
+    owner: platform-image-engineering
+    purpose: build and qualify the exact Rocky Linux 10.2 qcow2 through the native-Linux QEMU/KVM image pipeline
+    entrypoint: make image-rocky-linux-release
+    phase_entrypoints:
+      preflight: make image-rocky-linux-preflight
+      build: make image-rocky-linux-build
+      qualification: make image-rocky-linux-qualify
+      release: make image-rocky-linux-release
+    exit_criteria:
+      - exact-native-linux-tool-versions-and-kvm-pass
+      - packer-init-fmt-validate-pass
+      - checksum-locked-offline-inputs-pass
+      - packer-qemu-build-pass
+      - exact-qcow2-sha256-pass
+      - bounded-qemu-boot-and-ssh-pass
+      - rocky-systemd-network-rke2-prerequisite-smoke-pass
+      - owned-overlay-process-and-ephemeral-key-cleanup-pass
+      - exact-artifact-release-evidence-pass
+    evidence:
+      build: .context/evidence/rocky-image/rocky-10.2/linux/build.json
+      qualification: .context/evidence/rocky-image/rocky-10.2/linux/qualification.json
+      release: .context/evidence/rocky-image/rocky-10.2/linux/release.json
+    merge_authoritative: false
+    state_changing: true
+    mutation_class: local-virtualization
   rke2_local_virtualbox:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary

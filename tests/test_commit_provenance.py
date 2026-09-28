@@ -57,6 +57,11 @@ class CommitProvenanceTests(unittest.TestCase):
     def test_delivery_checks_exact_commit_provenance(self):
         publish_source = inspect.getsource(REPOCTL.publish)
         deliver_source = inspect.getsource(REPOCTL.deliver)
+        self.assertIn('"scripts/check_automation_signing.py"', publish_source)
+        self.assertLess(
+            publish_source.index('"scripts/check_automation_signing.py"'),
+            publish_source.index('"git", "fetch"'),
+        )
         self.assertIn(
             'commit_provenance_check(base_ref, "WORKTREE", include_local_identity=True)',
             publish_source,
@@ -67,7 +72,7 @@ class CommitProvenanceTests(unittest.TestCase):
         )
         self.assertLess(
             deliver_source.index("remote_commit_provenance_check"),
-            deliver_source.index('"pr",\n            "list"'),
+            deliver_source.index("_delivery_open_prs"),
         )
 
     def test_finish_pr_blocks_unverified_required_commit(self):

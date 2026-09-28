@@ -1,141 +1,46 @@
-# Repository agent guide
+# ecommerce-1 agent guide
 
-## Scope
+These rules apply repository-wide. architecture.lock.yaml — the single canonical architecture authority. Read only the sections and contracts needed for the task.
 
-These rules apply to the whole repository.
+## Environment and ownership
 
-## Authoritative architecture
+- On Windows, work in the canonical WSL2 Linux checkout, such as /home/dev/ecommerce-1, never /mnt/c.
+- Application runtime: Go, server-rendered HTML, templ and HTMX. Node is developer tooling only.
+- Tekton owns CI; Rancher Fleet owns GitOps/CD; Argo Rollouts owns progressive delivery.
+- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs. Application telemetry: Rotel -> ClickHouse -> HyperDX. Security-only logs: Data Prepper -> OpenSearch -> Wazuh.
+- Repeatable or stateful workstation and host changes belong to Ansible. Stateless repository orchestration belongs to `scripts/repoctl.py`. Specialized validators may use native tools.
+- Parallelize only independent work.
+- No tracked *.sh automation. Preserve domain ownership and top-level structure; avoid duplicate authorities, pipelines and helpers.
+- Services own their persistence. No direct reads of another service database.
+- Pin tool and image versions; never promote mutable latest tags.
+- Never expose or commit secrets, credentials, kubeconfigs, Terraform state, private keys, generated evidence, caches, binaries, archives or scanner output unless registered as source.
 
-Before changing code or structure, read:
+## Bounded context
 
-1. `architecture.lock.yaml` — the single canonical architecture authority
-2. `docs/architecture/EXACT_TOPOLOGY_V5.md` — a derived index subordinate to the lock
-3. relevant ADRs and domain documentation
+- Start from the task, selected paths, relevant tests and smallest applicable contract. Do not preload broad docs, PR history or full logs.
+- Hooks prepare .context/codex-context.md at L0/L1/L2 ceilings of 4/8/12 KiB. Read it only when repository context is needed. Manual: make context TASK="<task>" PATHS="<paths>"; PRINT=1 displays the pack.
+- Reviews: make diff-context BASE=<last-reviewed-sha>. Failures: make failure-context GATE=<gate> or COMPONENT=<component>.
+- Context selection does not narrow canonical gate selection or risk classification.
 
-Validated architecture is not to be redesigned during implementation unless an explicit contradiction is found and routed back to architecture governance.
+## Validation and delivery
 
-## Repository rules
+- Use affected deterministic checks. Reuse strictly valid exact-input/exact-SHA PASS evidence.
+- Publish through make deliver TITLE="..."; no force-push, governance bypass or direct-push delivery claim.
+- PRs state owner, scope, relevant contract, tests/evidence and rollback. Detailed rules: config/contracts/review-policy.yaml.
 
-- Do not recreate, rename or move top-level architecture arbitrarily.
-- Do not create a new domain when an existing owner can hold the responsibility.
-- Keep shared libraries minimal; do not centralize domain logic.
-- Every backend service owns its `go.mod`, migrations, tests and container build.
-- REST and gRPC transports call the same application use cases.
-- No service reads another service's database directly.
-- `cart`, `checkout`, `order`, `payment` and `fulfillment` are separate autonomous domains; do not collapse their lifecycle or persistence ownership.
+## Review authority
 
-## Active platform choices
+ChatGPT alone issues CODE and SECURITY reviews bound to the published exact SHA. Codex must not trigger Codex reviews, emit verdicts or merge-readiness markers. A head change invalidates prior final reviews. Gates support review but cannot replace it; sensitive merges retain the repository-owner boundary.
 
-- CI: Tekton.
-- GitOps CD: Rancher Fleet.
-- Progressive delivery: Argo Rollouts.
-- Registry: Harbor.
-- Object storage target: SeaweedFS S3.
-- Telemetry collection: OpenTelemetry Collector.
-- Metrics: vmagent + VictoriaMetrics; Prometheus is protocol/format compatibility only, not the primary TSDB/server authority.
-- Infrastructure logs: OpenTelemetry Collector -> VictoriaLogs.
-- Application telemetry/logs: Rotel -> ClickHouse -> HyperDX.
-- Security-only pipeline: Data Prepper + OpenSearch + Wazuh.
-- HyperDX metadata store: `mongodb-oss-self-hosted`.
-
-Do not introduce these superseded defaults into new implementation:
-
-- Superseded: FluxCD
-- Superseded: Flagger
-- Superseded: MinIO Community Edition / MinIO Operator
-- Superseded: Loki as the logging baseline
-- Superseded: Fluent Bit as the general logging pipeline
-- Superseded: Splunk as the SIEM baseline
-
-Historical references may remain only when explicitly labelled superseded.
-
-## Development
-
-- Repeatable or stateful workstation and host changes belong to Ansible.
-- Stateless repository orchestration belongs to `scripts/repoctl.py`.
-- Specialized deterministic validation belongs to Python, Ruby, Go, or a native CLI.
-- CI belongs to Tekton; GitHub/Gitea are forge and review transports, not CI authorities.
-- Do not add repository Shell automation: no tracked `*.sh` files are permitted.
-- A missing optional project area must be reported as `SKIP`, not treated as a failure.
-- Never print secrets, credentials, kubeconfigs, Terraform state, private keys or local environment files.
-- Never commit generated reports, caches, binaries, archives or scanner output unless the repository explicitly defines them as source artifacts.
-- Never use mutable image tags such as `latest`; pin versions and use digests for promoted artifacts.
-- Run `make ci` before submitting CI-related changes.
-
-## Change discipline
-
-Each implementation PR must state:
-
-- owning domain;
-- scope and files changed;
-- relevant contract/ADR;
-- tests added or changed;
-- rollback path;
-- expected evidence.
-
-Prefer small reviewable PRs over monolithic changes.
+Use .agents/skills/chatgpt-exact-sha-review/ for exact-SHA reviews and .agents/skills/pr-recovery-guided/ for stale or dirty PR recovery. Read their references only for those workflows.
 
 ## Build sequence
 
-Do not implement the 19 services in parallel from empty scaffolding. Follow:
+M0 architecture sync -> M1 bootstrap -> M2 golden product and M2.5 persistent MGMT; M2.5 -> M3 PREPROD infra -> M4 platform; M2 + M4 -> M5 vertical slice -> M6 application -> M7 qualification -> M8 certification -> M9 PROD.
 
-`M0 architecture sync -> M1 bootstrap -> (M2 golden product service and M2.5 persistent MGMT bootstrap); M2.5 -> M3 PREPROD infra -> M4 platform; M2 + M4 -> M5 vertical slice -> M6 remaining application -> M7 qualification -> M8 certification -> M9 PROD`.
+## On-demand references
 
-The `product` service is the first golden backend implementation and must validate the shared engineering conventions before they are replicated.
-## Token-efficient agent context
-
-Do not dump the repository, full CI logs, or broad architecture documentation into an agent prompt by default.
-
-Before implementation, use `make context TASK="<bounded task>"`. The generated `.context/codex-context.md` is the preferred handoff: it routes changes through repository contracts and enforces a bounded byte budget.
-
-Use `make diff-context` for review-oriented work and `make failure-context GATE=<gate>` for deterministic failures. Give the agent the reduced artifact plus the exact failing file/test, not the raw full log.
-
-Context escalation is automatic: L0 for local implementation, L1 for domain/contract work, and L2 for architecture/control-plane work. Do not manually escalate to broader context unless the reduced pack is insufficient or an exact contract requires it.
-
-
-## CODE and SECURITY review authority
-
-ChatGPT is the repository's sole AI authority for CODE and SECURITY review.
-
-- Do not trigger, request, rerun, poll, or depend on Codex reviews for merge readiness. This includes `@codex review`, `@codex security review`, and equivalent automated Codex review workflows.
-- Historical Codex findings may be used as input evidence, but they are not current review authority and must not cause a new Codex invocation.
-- Every ChatGPT CODE review and SECURITY review must be bound to the PR's exact published head SHA. Record that full SHA in the review result.
-- If the PR head SHA changes, the previous final review is not valid for the new head. Review the bounded delta, re-run relevant deterministic evidence, then issue final CODE and SECURITY conclusions for the new exact SHA.
-- CODE review covers correctness, regressions, repository contracts, architecture adherence, tests, operational behavior, and failure handling.
-- SECURITY review covers secrets, authentication and authorization, trust boundaries, input validation, network exposure, privilege, supply chain, artifact integrity, unsafe defaults, and destructive behavior.
-- Findings must identify severity, path or owning component, concrete risk, and the exact SHA reviewed.
-- A finding may be resolved only after the correction exists on a published SHA and supporting deterministic evidence is available.
-- Merge readiness requires exact-SHA qualification plus completed ChatGPT CODE and SECURITY review for that same SHA, with no unresolved blocking finding.
-- Deterministic gates and tests are evidence for the review; they do not replace ChatGPT CODE or SECURITY review.
-- Final ChatGPT review results are recorded on the PR with `chatgpt-exact-sha-review:v1` machine markers for `code` and `security`; both must bind the current full head SHA and be PASS with zero blocking findings.
-- `finish-pr` consumes only those ChatGPT markers. Codex comments, reactions, summaries, statuses, and completed reviews are ignored for merge readiness.
-- Codex may be used only as a narrowly scoped execution fallback when a required task cannot be performed with ChatGPT's available capabilities. The reason must be explicit, the scope must be minimal, and Codex output is evidence returned to ChatGPT.
-- Codex must never become CODE/SECURITY review authority, emit merge-readiness markers, decide merge readiness, or make merge decisions. ChatGPT performs the final exact-SHA CODE/SECURITY review; the repository owner retains merge decision authority.
-
-## Automated delivery
-
-Use `make deliver TITLE="..."` for routine feature-branch handoff. It may run local gates, commit, push without force, generate bounded diff context, and create or refresh a GitHub pull request. It must never merge, auto-approve, bypass branch protection, or act as release authority.
-
-## Automatic stale-branch cleanup
-
-Use `make branch-cleanup` for repository branch hygiene. `make git-sync` invokes the same cleanup automatically after fetch/prune and fast-forward, and `finish-pr` performs a final sweep after a successful merge.
-
-A local or `origin` branch may be deleted only when the central `repository_delivery.cleanup` policy proves one of these conditions:
-
-- the branch HEAD is already an ancestor of `origin/main`; or
-- a GitHub PR into `main` is merged and its recorded head SHA exactly equals the branch's current HEAD.
-
-Never delete the default branch, `master`, the current branch, or any branch checked out by an active worktree. If a branch has advanced after its merged PR, preserve it. Missing GitHub CLI/API evidence disables only the merged-PR criterion; ancestry-based cleanup may still proceed. Use `make branch-cleanup DRY_RUN=1` to inspect the exact deletion plan without mutating refs.
-<!-- BEGIN ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->
-## Ansible-first developer automation
-
-Use Ansible as the default owner of repeatable or stateful developer/workstation automation: package installation, toolchain reconciliation, Docker readiness, Git-local reconciliation, host/OS configuration, and repeatable bootstrap/generation workflows.
-
-Do not add repository Shell automation. No tracked `*.sh` file is allowed. Prefer direct Make/Tekton invocation of Ansible, Python, Ruby, Go, PNPM, Terraform, scanners, or other native tools. Stateful/repeatable workflows belong to Ansible; stateless fast checks belong to native tools or `scripts/repoctl.py`.
-
-When touching an existing Shell helper, migrate its stateful workflow to Ansible or its stateless algorithm to the repository controller in the same tranche. Tekton remains the sole CI authority; Ansible is an execution/reconciliation mechanism, not CI/CD.
-
-Optimize for fewer files and lower process overhead: consolidate stateless repository orchestration in `scripts/repoctl.py` and keep specialized Ruby/Python/Go validators/generators only where they add distinct deterministic logic.
-
-Parallelize only independent work. Use Ansible forks for multi-host fan-out, `strategy: free` where host ordering is irrelevant, `serial` for rolling/sensitive changes, `throttle` for heavy tasks, and `async` + `poll: 0` for independent localhost work. Keep dependency chains sequential: toolchain before tests, OpenAPI generation before drift/compatibility checks, sqlc/migrations before DB tests, and generation before consumers.
-<!-- END ANSIBLE-FIRST-DEVELOPER-AUTOMATION -->
+- Agent efficiency: docs/engineering/agent-efficiency.md
+- Qualification: config/contracts/qualification-execution-policy.yaml
+- Review and delivery: config/contracts/review-policy.yaml
+- Security scanning: config/contracts/security-scan-policy.yaml

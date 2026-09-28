@@ -5,7 +5,15 @@ PYTHON := $(if $(wildcard $(QUALIFICATION_PYTHON)),$(QUALIFICATION_PYTHON),pytho
 ifneq ($(wildcard $(QUALIFICATION_PYTHON)),)
 export PATH := $(QUALIFICATION_BIN):$(PATH)
 endif
-.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check security-datasets-sync engineering-metrics experiment
+NATIVE_WORKSPACE := $(shell $(PYTHON) scripts/native_workspace.py --quiet >/dev/null 2>&1 && printf PASS)
+ifneq ($(NATIVE_WORKSPACE),PASS)
+$(error Repository operations require a WSL2 checkout on the native Linux filesystem, such as /home/dev/ecommerce-1)
+endif
+.PHONY: workspace-check
+workspace-check:
+	@$(PYTHON) scripts/repoctl.py workspace-check
+
+.PHONY: help toolchain-closure seed bootstrap bootstrap-runtime env-check env-check-runtime ci ci-full ci-global governance runtime-efficiency contracts automation signing-check lint format format-check test security qualification-tools qualification-tools-smoke opentofu ansible system qce-status qce-check execution-properties execution-properties-matrix capabilities security-datasets-sync engineering-metrics experiment
 
 toolchain-closure: ## Validate the fail-closed central toolchain registry
 	@$(PYTHON) scripts/repoctl.py toolchain-closure
@@ -31,24 +39,47 @@ help: ## Show the available checks
 	@$(PYTHON) scripts/repoctl.py --help
 	@printf '\nAgent efficiency:\n  make review-budget PR=<n> SNAPSHOT=<json> [REVIEW_KIND=combined] [FINAL_CANDIDATE=1]\n'
 
-ci: ## Run global + affected repository CI and cache promotable worktree evidence
-	@$(PYTHON) scripts/repoctl.py verify-change --base "$${BASE:-origin/main}" --head WORKTREE
+ci: workspace-check signing-rotation-check ## Run the portable non-mutating static profile over global + affected gates
+	@$(PYTHON) scripts/repoctl.py verify-change --profile static --base "$${BASE:-origin/main}" --head WORKTREE
 
-ci-full: ci-global lint test opentofu ansible ## Run exhaustive portable repository CI checks
+ci-full: ## Run merge-authoritative full qualification (WSL2 runtime required when affected)
+	@$(PYTHON) scripts/repoctl.py verify-change --profile full --base "$${BASE:-origin/main}" --head WORKTREE
 
 ci-global: ## Run canonical global gates through the central execution planner
 	@$(PYTHON) scripts/repoctl.py global-check --base "$${BASE:-origin/main}" --head "$${HEAD:-WORKTREE}"
-governance: runtime-efficiency ## Validate canonical architecture and all registered governance contracts
+governance: workspace-check runtime-efficiency ## Validate canonical architecture and all registered governance contracts
 	@$(PYTHON) scripts/repoctl.py governance
 
 runtime-efficiency: ## Validate measured resource, autoscaling, image and runtime efficiency policy
 	@$(PYTHON) scripts/repoctl.py runtime-efficiency
 
-contracts: ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
+contracts: workspace-check ## Validate OpenAPI and cross-registry contracts; BASE enables compatibility checks
 	@$(PYTHON) scripts/repoctl.py contracts $(if $(BASE),--base $(BASE),) $(if $(HEAD),--head $(HEAD),)
 
 automation: ## Enforce Ansible-first and zero repository Shell scripts
 	@$(PYTHON) scripts/repoctl.py automation-policy
+
+signing-check: signing-rotation-check ## Verify local automation signing isolation, validity and rotation window
+	@$(PYTHON) scripts/check_automation_signing.py
+
+.PHONY: signing-rotation-check signing-rotation-status signing-rotate signing-rotation-verify-remote signing-rotation-activate signing-rotation-retire-old
+signing-rotation-check: ## Read-only rotation status and delivery gate
+	@$(PYTHON) scripts/signing_rotation.py rotation-check
+
+signing-rotation-status: ## Show read-only rotation status
+	@$(PYTHON) scripts/signing_rotation.py rotation-status
+
+signing-rotate: ## Prepare the replacement key without activating it
+	@$(PYTHON) scripts/signing_rotation.py rotate
+
+signing-rotation-verify-remote: ## Verify public registration on GitHub and Gitea
+	@$(PYTHON) scripts/signing_rotation.py verify-remote
+
+signing-rotation-activate: ## Activate only after both forge registrations are proven
+	@$(PYTHON) scripts/signing_rotation.py activate
+
+signing-rotation-retire-old: ## Retire old registration after exact replacement proofs
+	@$(PYTHON) scripts/signing_rotation.py retire-old
 
 lint: automation ## Lint Go, Python and frontend sources with declared toolchains
 	@$(PYTHON) scripts/repoctl.py lint
@@ -80,6 +111,15 @@ qce-status: ## Render the derived nine-sector QCE status projection
 qce-check: ## Validate QCE traceability, closed statuses and derived labels
 	@$(PYTHON) scripts/repoctl.py qce-check
 
+execution-properties: ## Validate the canonical execution-properties authority and implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties
+
+execution-properties-matrix: ## Render the execution-properties matrix from the implementation registry
+	@$(PYTHON) scripts/repoctl.py execution-properties --matrix
+
+capabilities: ## Resolve scoped effective tool capabilities from exact-SHA evidence
+	@$(PYTHON) scripts/repoctl.py capabilities
+
 security-datasets-sync: ## Explicitly refresh verified KEV/EPSS snapshots outside qualification
 	@$(PYTHON) scripts/repoctl.py security-datasets-sync --output "$${OUTPUT:-.context/security-datasets}"
 
@@ -95,10 +135,105 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-clean
+.PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
+
+local-services-up: workspace-check ## Start pinned local Gitea/Harbor on native WSL storage
+	@$(PYTHON) platform/local-services/manage.py up
+
+local-services-provision: workspace-check ## Create dedicated local Gitea/Harbor identities
+	@$(PYTHON) platform/local-services/manage.py gitea-users
+	@$(PYTHON) platform/local-services/manage.py harbor-robot
+
+local-gpg-register: workspace-check ## Register public automation key on Gitea only after reboot proof
+	@$(PYTHON) platform/local-services/manage.py register-gpg
+
+local-services-proof: workspace-check ## Verify TLS, DNS, identities, GPG and Harbor robot login
+	@$(PYTHON) platform/local-services/manage.py proof
+
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"
+
+image-rocky-preflight: image-rocky-windows-preflight ## Default profile: verify the native Windows image toolchain
+
+image-rocky-build: image-rocky-windows-build ## Default profile: build the Windows/VirtualBox artifact
+
+image-rocky-qualify: image-rocky-windows-qualify ## Default profile: qualify the Windows/VirtualBox artifact
+
+image-rocky-release: image-rocky-windows-release ## Default profile: release-check the Windows artifact
+
+image-rocky-windows-preflight: ## Verify exact native Windows Packer, VirtualBox and Vagrant versions without starting a VM
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-preflight
+
+image-rocky-windows-build: ## Build the checksum-locked Rocky Linux 10.2 VirtualBox box with native Windows Packer
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-build $(if $(OFFLINE),--offline,)
+
+image-rocky-windows-qualify: ## Boot and smoke-test the exact Rocky box through isolated native Windows Vagrant state
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-qualify
+
+image-rocky-windows-release: ## Verify exact Windows build and qualification evidence without remote publication
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-release
+
+image-rocky-windows-native-prepare: ## Prepare exact-SHA Windows staging, guarded BCD entry and one-shot task; does not reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-prepare $(if $(OFFLINE),--offline,)
+
+image-rocky-windows-native-reboot: ## Explicitly authorize the one-shot native VT-x boot and automatic return
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-reboot
+
+image-rocky-windows-native-import: ## Import exact-SHA native VT-x build and smoke evidence after WSL2 returns
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-import
+
+image-rocky-windows-native-recover: ## Arm the normal Windows boot and remove the temporary task while preserving the native entry
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-recover
+
+image-rocky-windows-native-self-test: ## Test BCD parsing, backend classification, integrity and stale-evidence rejection without reboot
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-self-test
+
+lab-ssh-key: ## Explicitly create or verify the persistent Windows-native Rocky smoke SSH identity
+	@$(PYTHON) scripts/repoctl.py lab-ssh-key
+
+packer-box: ## Verify and reuse the local immutable Rocky box matching current Packer inputs
+	@$(PYTHON) scripts/repoctl.py packer-box $(if $(BOX_PATH),--box "$(BOX_PATH)",)
+
+lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box without running Packer
+	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+
+lab-clean: ## Destroy the explicitly preserved network-smoke VM for CAMPAIGN_ID
+	@$(PYTHON) scripts/repoctl.py lab-clean --campaign-id "$(CAMPAIGN_ID)"
+
+image-rocky-linux-preflight: ## Verify exact Packer/QEMU versions and KVM access on a native Linux host
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-preflight
+
+image-rocky-linux-static-validate: ## Validate QEMU Packer source/plugins through Windows without claiming KVM runtime
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-static-validate
+
+image-rocky-linux-build: ## Build the checksum-locked Rocky Linux 10.2 qcow2 with native Linux Packer/QEMU
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-build $(if $(OFFLINE),--offline,)
+
+image-rocky-linux-qualify: ## Boot and smoke-test the exact qcow2 through bounded native QEMU/KVM
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-qualify
+
+image-rocky-linux-release: ## Verify exact Linux build and qualification evidence without remote publication
+	@$(PYTHON) scripts/repoctl.py image-rocky-linux-release
+
+image-rocky-oras-push: ## Push PROFILE=windows|linux release to ORAS_REPOSITORY and report its immutable digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-push --profile "$${PROFILE:-windows}" --repository "$${ORAS_REPOSITORY:-}"
+
+image-rocky-oras-pull: ## Pull PROFILE=windows|linux from immutable ORAS_REF=repository@sha256:digest
+	@$(PYTHON) scripts/repoctl.py image-rocky-oras-pull --profile "$${PROFILE:-windows}" --reference "$${ORAS_REF:-}"
+
+local-services-assets: ## Materialize exact Gitea, Harbor and Docker offline inputs
+	@$(PYTHON) scripts/repoctl.py local-services-assets $(if $(OFFLINE),--offline,)
+
+local-services-capabilities: ## Observe WSL2, Ansible, SSH and Windows VirtualBox runtime prerequisites
+	@$(PYTHON) scripts/repoctl.py local-services-capabilities
+
+local-services-qualify: ## Qualify Gitea, Harbor and ORAS on the exact released Rocky box
+	@$(PYTHON) scripts/repoctl.py local-services-qualify $(if $(OFFLINE),--offline,)
+
+local-services-recover: ## Stop only owned local service VMs while preserving their disks
+	@$(PYTHON) scripts/repoctl.py local-services-recover
 
 .PHONY: affected verify-change frontend-check frontend-storefront frontend-admin service-check
 
@@ -125,7 +260,7 @@ service-check: ## Run generic Go service gate; use SERVICE=product
 tekton-trigger-readiness: ## Read-only live proof of all Gitea -> Tekton trigger runtime prerequisites; set RUNTIME_CONFIG=...
 	@$(PYTHON) scripts/repoctl.py tekton-trigger-readiness --runtime-config "$(RUNTIME_CONFIG)" --evidence "$${EVIDENCE:-.context/runtime/tekton-trigger-readiness.json}"
 
-.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync publish publish-change deliver finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
+.PHONY: workstation-doctor workstation-bootstrap quality-tools agent-tools context-tools product-bootstrap-persistence git-local-reconcile git-sync branch-cleanup roadmap-check roadmap-sync deliver pr-loop finish-pr bundle-deliver evidence-publish evidence-fetch evidence-compare perf-audit perf-campaign qualification-proof
 
 workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
@@ -160,17 +295,16 @@ roadmap-check: ## Check GitHub-backed milestone/tracker state against the genera
 roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from GitHub
 	@$(PYTHON) scripts/repoctl.py roadmap-sync
 
-publish: ## Commit, exact-SHA verify and push current feature branch
-	@$(PYTHON) scripts/repoctl.py publish --base "$${BASE:-origin/main}" --message "$(MSG)"
-
-publish-change: ## Canonical alias: qualify, commit and push the current feature branch
-	@$(PYTHON) scripts/repoctl.py publish-change --base "$${BASE:-origin/main}" --message "$(MSG)"
-
-deliver: ## Exact-SHA validate, publish and create/update GitHub PR
+deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, push and create/update exact-SHA GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-finish-pr: ## Merge exact reviewed PR, clean branches, check roadmap and publish sync PR on drift
-	@$(PYTHON) scripts/repoctl.py finish-pr --base "$${BASE:-main}"
+pr-loop: ## Run from TRUSTED_ROOT checked out cleanly at the PR BASE_SHA; PR required
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@$(PYTHON) "$(TRUSTED_ROOT)/scripts/repository_delivery.py" trusted-pr-transition --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+
+finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
+	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2
+	@exit 1
 
 bundle-deliver: ## Deliver a Git bundle from an isolated checkout; BUNDLE/EXPECTED_HEAD/TITLE required
 	@$(PYTHON) scripts/repoctl.py bundle-deliver --bundle "$(BUNDLE)" --expected-head "$(EXPECTED_HEAD)" --title "$(TITLE)" --base "$${BASE:-main}"
@@ -190,18 +324,22 @@ perf-audit: ## Audit critical path, reuse/cache hit ratio and Amdahl priorities 
 perf-campaign: ## Run the repository-defined statistical performance campaign
 	@$(PYTHON) scripts/repoctl.py perf-campaign --base "$${BASE:-origin/main}" $(if $(PERF_CAMPAIGN_OUTPUT),--output "$(PERF_CAMPAIGN_OUTPUT)",)
 
-qualification-proof: ## Run one exact-SHA qualification plus its performance audit
+.PHONY: qualification
+qualification: qualification-proof ## Run exact-SHA qualification from the canonical workspace
+
+qualification-proof: workspace-check ## Run one exact-SHA qualification plus its performance audit
 	@$(PYTHON) scripts/repoctl.py qualification-proof --base "$${BASE:-origin/main}"
-.PHONY: context diff-context failure-context review-budget nx-graph bazel-verify pr-monitor
+.PHONY: context diff-context failure-context review-budget codex-run codex-budget codex-budget-mark nx-graph bazel-verify pr-monitor
 
-context: ## Build bounded task-aware context pack; use TASK="..."
-	@$(PYTHON) scripts/repoctl.py context "$(TASK)"
+context: ## Build task-delta context pack; optional SINCE/PATHS/STAGED/WORKING_TREE/PRINT
+	@test -n "$(TASK)" || { printf '%s\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
+	@$(PYTHON) scripts/context-pack.py --task "$(TASK)" $(if $(SINCE),--since "$(SINCE)",) $(if $(PATHS),--paths $(PATHS),) $(if $(STAGED),--staged,) $(if $(WORKING_TREE),--working-tree,) $(if $(PRINT),--print,)
 
-diff-context: ## Build compact diff-only context pack
+diff-context: ## Build compact diff-only context pack (hard-capped by codex-token-budget)
 	@$(PYTHON) scripts/repoctl.py diff-context --base "$${BASE:-origin/main}"
 
-failure-context: ## Capture actionable output; use GATE=... or COMPONENT=service:product
-	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)"
+failure-context: ## Capture causal output; use GATE=... or COMPONENT=service:product
+	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)" $(if $(RERUN),--rerun,)
 
 pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handoffs; PR/OWNER/REPO required
 	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
@@ -210,6 +348,17 @@ review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNA
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
 	@test -n "$(SNAPSHOT)" || { printf '%s\n' 'ERROR: SNAPSHOT=<json-path> is required'; exit 2; }
 	@$(PYTHON) scripts/review_budget.py decide --pr "$(PR)" --snapshot "$(SNAPSHOT)" --review-kind "$${REVIEW_KIND:-combined}" $(if $(FINAL_CANDIDATE),--final-candidate,)
+
+codex-run: ## Governed CLI invocation; CACHEABLE=1 EXPECT=<literal success criterion> for static read-only reuse
+	@test -n "$(TASK)" || { printf '%s\n' 'ERROR: TASK=<bounded task> is required'; exit 2; }
+	@$(PYTHON) scripts/codex_budget.py run --task "$(TASK)" --profile "$${PROFILE:-ecommerce-minimal}" $(if $(PATHS),--paths $(PATHS),) $(if $(SINCE),--since "$(SINCE)",) $(if $(STAGED),--staged,) $(if $(CACHEABLE),--cacheable,) $(if $(EXPECT),--expect "$(EXPECT)",)
+
+codex-budget: ## Decide whether the exact current context can reuse a marked Codex result
+	@$(PYTHON) scripts/codex_budget.py decide --manifest "$${MANIFEST:-.context/codex-context.json}"
+
+codex-budget-mark: ## Mark RESULT=.context/... reusable only for the exact current context key
+	@test -n "$(RESULT)" || { printf '%s\n' 'ERROR: RESULT=.context/<result> is required'; exit 2; }
+	@$(PYTHON) scripts/codex_budget.py mark --manifest "$${MANIFEST:-.context/codex-context.json}" --result "$(RESULT)" $(if $(VALIDATED),--validated,) $(if $(READ_ONLY),--read-only,)
 
 nx-graph: ## Render Nx dependency graph derived from canonical YAML contracts
 	@$(PYTHON) scripts/repoctl.py nx-graph

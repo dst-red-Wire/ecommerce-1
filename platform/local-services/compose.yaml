@@ -1,0 +1,32 @@
+name: ecommerce-local-management
+services:
+  gitea:
+    image: docker.gitea.com/gitea@sha256:1c17ecaead42eb3b5391553d8708103a4beb0e86edf5b9ebc1eb269c318845f2
+    restart: unless-stopped
+    environment:
+      GITEA__server__ROOT_URL: ${GITEA_HTTPS_URL}
+      GITEA__server__DOMAIN: gitea.ecommerce.local
+      GITEA__server__SSH_DOMAIN: gitea.ecommerce.local
+      GITEA__server__SSH_PORT: "2222"
+      GITEA__server__START_SSH_SERVER: "true"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__service__DISABLE_REGISTRATION: "true"
+      GITEA__security__INSTALL_LOCK: "true"
+    volumes:
+      - gitea-data:/var/lib/gitea
+      - gitea-config:/etc/gitea
+    ports:
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:2222:2222"
+  edge:
+    image: caddy@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ${LOCAL_TLS_DIR}/ca.crt:/certs/ca.crt:ro
+      - ${LOCAL_TLS_DIR}/server.crt:/certs/server.crt:ro
+      - ${LOCAL_TLS_DIR}/server.key:/certs/server.key:ro
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+volumes:
+  gitea-data:
+  gitea-config:

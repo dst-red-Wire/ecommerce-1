@@ -890,6 +890,24 @@ def qce_status(
         freshness_time,
         canonical_validator=_canonical_qualification_validator(root, head),
     )
+    # QCE consumes the canonical resolver API.  Tool/configuration presence is
+    # never interpreted here as proof of an execution capability.
+    import capability_resolver
+
+    try:
+        effective_capabilities = capability_resolver.resolve(
+            root,
+            source_sha=head,
+            evidence_path=root / ".context" / "evidence" / "capabilities",
+        )
+        qce_verification = effective_capabilities["tools"]["qce"]["capabilities"]["verification"]
+    except capability_resolver.ResolutionError:
+        effective_capabilities = {
+            "source_sha": head,
+            "toolchain_digest": "unverified",
+        }
+        qce_verification = {"status": "unsupported"}
+    resolver_proven = qce_verification["status"] == "proven"
     milestones = {str(item["id"]): item for item in roadmap["milestones"]}
     result_sectors: list[dict[str, Any]] = []
     selected = [sector] if sector else sectors
@@ -954,7 +972,7 @@ def qce_status(
             if blocker:
                 capability_status = "BLOCKED"
                 sector_blockers.append(blocker)
-            elif proven:
+            elif proven and resolver_proven:
                 capability_status = "PROVEN"
             elif implemented:
                 capability_status = "IMPLEMENTED"
@@ -964,6 +982,8 @@ def qce_status(
                 capability_status = "PARTIAL"
             else:
                 capability_status = "CONTRACTED"
+            if proven and not resolver_proven:
+                missing_evidence.append("effective-capabilities:qce.verification:not-proven")
             if proof["kind"] == "qualification-gates" and not proven:
                 missing_evidence.extend(
                     gate for gate in required_gates if gate_evidence.get(gate) != "PASS"
@@ -1036,6 +1056,11 @@ def qce_status(
         },
         "generated_at": _iso(generated_at),
         "evidence_state": evidence_problem or "fresh-exact-sha",
+        "effective_capabilities": {
+            "source_sha": effective_capabilities["source_sha"],
+            "toolchain_digest": effective_capabilities["toolchain_digest"],
+            "qce_verification": qce_verification["status"],
+        },
         "sectors": result_sectors,
     }
 

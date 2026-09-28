@@ -1,5 +1,13 @@
 # Ansible testing policy
 
+On Windows, the complete checkout must reside on the WSL2 native Linux filesystem.
+The repository blocks Make and controller operations from Windows-mounted paths
+including `/mnt/c`. The canonical rule is
+`architecture.lock.yaml#repository_governance.windows_workspace`. Ansible
+collections remain project-owned in `.ansible/collections` and are checked
+against the central toolchain lock. Once installed, the pinned local collections
+remain available without Galaxy network access after WSL or Windows restarts.
+
 The central lifecycle in `config/contracts/toolchain-lock.json` currently marks Molecule,
 `molecule-plugins[docker]`, and pytest-testinfra as `deferred`. They are not installed by
 bootstrap, expected by doctor, or required by a gate because the repository has no honest

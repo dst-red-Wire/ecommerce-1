@@ -1,0 +1,11 @@
+---
+- name: Restart Docker for local Harbor
+  ansible.builtin.systemd_service:
+    name: docker
+    state: restarted
+    daemon_reload: true
+
+- name: Refresh local Harbor certificate trust
+  ansible.builtin.command:
+    argv: [update-ca-trust, extract]
+  changed_when: true
