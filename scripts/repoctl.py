@@ -8733,15 +8733,18 @@ def derive_pr_loop_state(
         return "BLOCKED", "MARK_READY_FOR_REVIEW"
     if pr.get("base") != "main":
         return "BLOCKED", "RETARGET_MAIN"
+    current_head = pr.get("head_sha")
+    if qualification.get("head_sha") != current_head:
+        return "QUALIFICATION_REQUIRED", "QUALIFICATION"
     if qualification.get("status") == "FAIL":
         return "QUALIFICATION_FAILED", "FIX_QUALIFICATION"
     if qualification.get("status") != "PASS":
         return "QUALIFICATION_REQUIRED", "QUALIFICATION"
-    if code_review.get("status") == "MISSING":
+    if code_review.get("head_sha") != current_head or code_review.get("status") == "MISSING":
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"
     if not _review_result_is_pass(code_review):
         return "CODE_FAILED", "FIX_CODE_FINDINGS"
-    if security_review.get("status") == "MISSING":
+    if security_review.get("head_sha") != current_head or security_review.get("status") == "MISSING":
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
     if not _review_result_is_pass(security_review):
         return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
@@ -9910,6 +9913,35 @@ def _pr_loop_merge_requirements(
 
 
 def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
+    # GitHub can advance the PR while a transition is in flight. The JSON
+    # envelope must describe the newest observed head, never the old snapshot.
+    current_head = result.get("current_head_sha") or result.get("head_sha")
+    if isinstance(current_head, str) and len(current_head) == 40:
+        head_changed = current_head != result.get("head_sha")
+        if head_changed:
+            result["head_sha"] = current_head
+            result["state"] = "HEAD_CHANGED"
+            result["next_action"] = "QUALIFICATION"
+            result["merge_ready"] = False
+            result.pop("review_request", None)
+        stale = 0
+        for field in ("qualification", "code_review", "security_review"):
+            proof = result.get(field)
+            if not isinstance(proof, dict) or proof.get("head_sha") != current_head:
+                stale += 1
+                result[field] = {
+                    "status": "MISSING",
+                    "head_sha": current_head,
+                    "source": "none",
+                }
+        result["stale_results_rejected"] = stale
+        if stale and not head_changed and result.get("merge_result") != "PASS" and result.get("state") not in {
+            "HEAD_CHANGED", "GITHUB_UNAVAILABLE", "BLOCKED"
+        }:
+            result["state"] = "BLOCKED"
+            result["next_action"] = "RECHECK_EXACT_HEAD"
+            result["merge_ready"] = False
+            result.pop("review_request", None)
     if json_output:
         result["output_contract"] = "PASS"
         try:

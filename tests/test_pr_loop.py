@@ -42,9 +42,8 @@ class PRLoopStateTests(unittest.TestCase):
         value.update(overrides)
         return value
 
-    @staticmethod
-    def qualification(status="PASS"):
-        return {"status": status, "source": "reused"}
+    def qualification(self, status="PASS"):
+        return {"status": status, "source": "reused", "head_sha": self.SHA}
 
     def review(self, status="PASS", blockers=0, sha=None):
         return {
@@ -95,6 +94,40 @@ class PRLoopStateTests(unittest.TestCase):
             self.owner(owner),
             merge,
             risk=self.risk(risk),
+        )
+
+    def test_prior_sha_fail_and_deferred_require_new_qualification_and_reviews(self):
+        previous, current = "a" * 40, "b" * 40
+        pr = self.pr(head_sha=current)
+        old_qualification = {"status": "PASS", "head_sha": previous}
+        current_qualification = {"status": "PASS", "head_sha": current}
+        old_code = self.review("FAIL", 1, previous)
+        old_security = self.review("DEFERRED", 0, previous)
+        self.assertEqual(
+            ("QUALIFICATION_REQUIRED", "QUALIFICATION"),
+            REPOCTL.derive_pr_loop_state(
+                pr, old_qualification, old_code, old_security, self.owner()
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, old_code, old_security, self.owner()
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, self.review(sha=current), old_security,
+                self.owner(),
+            ),
+        )
+        self.assertEqual(
+            ("CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"),
+            REPOCTL.derive_pr_loop_state(
+                pr, current_qualification, self.review(sha=previous),
+                self.review(sha=previous), self.owner(),
+            ),
         )
 
     def test_transition_order_and_failure_states(self):
@@ -382,7 +415,7 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
         self.assertIn("delivery-authority", result["matched_capabilities"], result)
         state = REPOCTL.derive_pr_loop_state(
             PRLoopStateTests().pr(base_sha=base_sha, head_sha=head_sha),
-            {"status": "PASS"},
+            {"status": "PASS", "head_sha": head_sha},
             {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
             {"status": "PASS", "blocking_findings": 0, "head_sha": head_sha},
             {"status": "MISSING"},
@@ -396,9 +429,9 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
         pr = PRLoopStateTests().pr(head_sha=self.HEAD_B)
         state = REPOCTL.derive_pr_loop_state(
             pr,
-            {"status": "PASS"},
-            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
-            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+            {"status": "PASS", "head_sha": self.HEAD_B},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_B},
+            {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_B},
             {"status": "NOT_REQUIRED_BY_POLICY"},
             {name: True for name in REPOCTL._PR_LOOP_MERGE_REQUIREMENTS},
             risk=prior,
@@ -422,9 +455,9 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
                         "base_sha": self.BASE,
                         "head_sha": self.HEAD_A,
                     },
-                    {"status": "PASS"},
-                    {"status": "PASS", "blocking_findings": 0},
-                    {"status": "PASS", "blocking_findings": 0},
+                    {"status": "PASS", "head_sha": self.HEAD_A},
+                    {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
+                    {"status": "PASS", "blocking_findings": 0, "head_sha": self.HEAD_A},
                     {"status": "MISSING"},
                     risk=result,
                 )
@@ -773,7 +806,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(
@@ -838,7 +871,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=authorities
         ), mock.patch.object(
@@ -862,7 +895,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(
@@ -884,7 +917,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
         ), mock.patch.object(REPOCTL, "run", return_value=self.completed()) as run:
@@ -917,7 +950,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         patches = self.common()
         qualification_results = [
             {"status": "MISSING", "source": "none"},
-            {"status": "PASS", "source": "reused"},
+            {"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ]
         with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
             REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
@@ -984,7 +1017,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL,
             "pull_request_authority_evidence",
@@ -1032,7 +1065,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1085,7 +1118,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ) as snapshot, mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1130,7 +1163,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1392,7 +1425,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL,
             "_pr_loop_qualification",
-            return_value={"status": "PASS", "source": "reused"},
+            return_value={"status": "PASS", "source": "reused", "head_sha": self.SHA_A},
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", return_value=pass_authorities
         ), mock.patch.object(
@@ -1411,6 +1444,48 @@ class PRLoopOrchestrationTests(unittest.TestCase):
 
 
 class PRLoopSourceContractTests(unittest.TestCase):
+    def test_json_head_change_rejects_old_sha_conclusions(self):
+        old_sha, current_sha = "a" * 40, "b" * 40
+        result = REPOCTL._pr_loop_empty_result(164)
+        result.update({
+            "head_sha": old_sha,
+            "current_head_sha": current_sha,
+            "state": "HEAD_CHANGED",
+            "qualification": {"status": "PASS", "head_sha": old_sha},
+            "code_review": {"status": "FAIL", "head_sha": old_sha},
+            "security_review": {"status": "DEFERRED", "head_sha": old_sha},
+        })
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            REPOCTL._emit_pr_loop_result(result, json_output=True)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(current_sha, payload["head_sha"])
+        for kind in ("qualification", "code_review", "security_review"):
+            self.assertEqual(current_sha, payload[kind]["head_sha"])
+            self.assertEqual("MISSING", payload[kind]["status"])
+        self.assertEqual("HEAD_CHANGED", payload["state"])
+
+    def test_json_cannot_report_old_review_as_current_fail_or_pass(self):
+        current_sha, old_sha = "b" * 40, "a" * 40
+        for old_status in ("PASS", "FAIL"):
+            with self.subTest(old_status=old_status):
+                result = REPOCTL._pr_loop_empty_result(164)
+                result.update({
+                    "head_sha": current_sha,
+                    "state": "CODE_FAILED" if old_status == "FAIL" else "MERGE_READY",
+                    "qualification": {"status": "PASS", "head_sha": current_sha},
+                    "code_review": {"status": old_status, "head_sha": old_sha},
+                    "security_review": {"status": "MISSING", "head_sha": current_sha},
+                })
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    REPOCTL._emit_pr_loop_result(result, json_output=True)
+                payload = json.loads(output.getvalue())
+                self.assertEqual("MISSING", payload["code_review"]["status"])
+                self.assertEqual(current_sha, payload["code_review"]["head_sha"])
+                self.assertEqual("BLOCKED", payload["state"])
+                self.assertFalse(payload["merge_ready"])
+
     def test_json_cli_preflight_failure_still_emits_one_document(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
