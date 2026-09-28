@@ -331,6 +331,22 @@ class PRMonitorTest(unittest.TestCase):
         self.assertLessEqual(len(encoded.encode()), 4096)
         json.loads(encoded)
 
+    def test_bounded_prompt_trims_long_paths_until_the_summary_fits(self):
+        payload = {
+            "pr": 7,
+            "review_kind": "CODE",
+            "previous_validated_verdict": "READY",
+            "previous_head": "old",
+            "current_head": "new",
+            "changed_files": [f"path/{index}/{'x' * 390}.py" for index in range(20)],
+            "delta": {},
+            "exact_head_verified": True,
+        }
+        encoded = pr_monitor.bounded_payload(payload, budget=4096)
+        decoded = json.loads(encoded)
+        self.assertLessEqual(len(encoded.encode()), 4096)
+        self.assertLess(len(decoded["changed_files"]), 20)
+
     def test_pr_monitor_has_no_codex_control_or_external_ai_execution_hook(self):
         source = (Path(pr_monitor.__file__)).read_text(encoding="utf-8").lower()
         for forbidden in (

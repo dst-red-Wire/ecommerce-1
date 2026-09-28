@@ -95,6 +95,24 @@ class CodexBudgetTest(unittest.TestCase):
         self.assertEqual(1, len(metrics))
         self.assertEqual(0, json.loads(metrics[0].read_text())["calls"])
 
+    def test_completion_protocol_requires_exact_trailing_marker(self):
+        marker = codex_budget._completion_marker("criterion")
+        prompt = codex_budget._prompt_with_completion_protocol("context", "criterion")
+        self.assertIn('Completion criterion (JSON string): "criterion"', prompt)
+        self.assertIn(marker, prompt)
+        self.assertEqual(
+            (False, "the criterion was not met"),
+            codex_budget._validated_completion("the criterion was not met", "criterion"),
+        )
+        self.assertEqual(
+            (False, f"{marker}\ntrailing prose"),
+            codex_budget._validated_completion(f"{marker}\ntrailing prose", "criterion"),
+        )
+        self.assertEqual(
+            (True, "validated answer"),
+            codex_budget._validated_completion(f"validated answer\n{marker}\n", "criterion"),
+        )
+
     def test_cacheable_entrypoint_overrides_permissive_config_and_blocks_side_effects(self):
         import os
         import subprocess
@@ -131,14 +149,16 @@ class CodexBudgetTest(unittest.TestCase):
             fake = bin_dir / "codex"
             fake.write_text(
                 f"#!{__import__('sys').executable}\n"
-                "import json, os, pathlib, sys\n"
+                "import hashlib, json, os, pathlib, sys\n"
                 "args=sys.argv[1:]\n"
                 "if 'mcp' in args and 'list' in args:\n"
                 " overrides={args[i+1] for i,v in enumerate(args[:-1]) if v in ('--config','-c')}\n"
                 " disabled='mcp_servers={\\\"side_effect\\\"={enabled=false}}' in overrides\n"
                 " print(json.dumps([{'name':'side_effect','enabled':not disabled}]))\n"
                 " raise SystemExit(0)\n"
-                "sys.stdin.read()\n"
+                "prompt=sys.stdin.read()\n"
+                "marker='CODEX_BUDGET_COMPLETE:'+hashlib.sha256(b'answer').hexdigest()\n"
+                "response='answer\\n'+marker if marker in prompt else 'answer'\n"
                 "pathlib.Path(os.environ['FAKE_CODEX_ARGV']).write_text(json.dumps(args))\n"
                 "overrides={args[i+1] for i,v in enumerate(args[:-1]) if v in ('--config','-c')}\n"
                 "required={'approval_policy=\\\"never\\\"','web_search=\\\"disabled\\\"',"
@@ -153,7 +173,7 @@ class CodexBudgetTest(unittest.TestCase):
                 "p.write_text(str(int(p.read_text() or '0')+1) if p.exists() else '1')\n"
                 "for event in ["
                 "{'type':'turn.started'},"
-                "{'type':'item.completed','item':{'type':'agent_message','text':'answer'}},"
+                "{'type':'item.completed','item':{'type':'agent_message','text':response}},"
                 "{'type':'turn.completed','usage':{'input_tokens':100,'cached_input_tokens':20,'output_tokens':10}}"
                 "]: print(json.dumps(event))\n",
                 encoding="utf-8",
@@ -268,13 +288,15 @@ class CodexBudgetTest(unittest.TestCase):
             fake_codex = binary / "codex"
             fake_codex.write_text(
                 f"#!{sys.executable}\n"
-                "import json, sys\n"
-                "sys.stdin.read()\n"
+                "import hashlib, json, sys\n"
                 "if 'mcp' in sys.argv and 'list' in sys.argv:\n"
                 " print('[]')\n"
                 " raise SystemExit(0)\n"
+                "prompt=sys.stdin.read()\n"
+                "marker='CODEX_BUDGET_COMPLETE:'+hashlib.sha256(b'answer').hexdigest()\n"
+                "response='answer\\n'+marker if marker in prompt else 'answer'\n"
                 "for event in ({'type':'turn.started'},"
-                "{'type':'item.completed','item':{'type':'agent_message','text':'answer'}},"
+                "{'type':'item.completed','item':{'type':'agent_message','text':response}},"
                 "{'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}):"
                 " print(json.dumps(event))\n",
                 encoding="utf-8",

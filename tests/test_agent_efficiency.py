@@ -112,6 +112,10 @@ class AgentEfficiencyContractTest(unittest.TestCase):
             budget["hook_additional_context_max_bytes"],
         )
         self.assertIn("user_prompt_submit.py", hook["command"])
+        hook_source = (ROOT / ".codex/hooks/user_prompt_submit.py").read_text(encoding="utf-8")
+        self.assertIn(".context/codex-hook-context.md", hook_source)
+        self.assertIn(".context/codex-hook-context.json", hook_source)
+        self.assertNotIn('root / ".context/codex-context.json"', hook_source)
 
     def test_agent_skills_use_progressive_disclosure(self):
         roots = (

@@ -62,8 +62,11 @@ def main() -> int:
         contract = json.loads(contract_path.read_text(encoding="utf-8"))
         limit = int(contract["hook_additional_context_max_bytes"])
 
+        pack_path = ".context/codex-hook-context.md"
+        manifest_value = ".context/codex-hook-context.json"
         p = subprocess.run(
-            [sys.executable, str(packer), "--task-stdin"],
+            [sys.executable, str(packer), "--task-stdin", "--output", pack_path,
+             "--manifest", manifest_value],
             cwd=root,
             input=prompt,
             text=True,
@@ -73,10 +76,10 @@ def main() -> int:
         )
         if p.returncode:
             return 0
-        manifest_path = root / ".context/codex-context.json"
+        manifest_path = root / manifest_value
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         message = (
-            "Bounded repo context prepared: .context/codex-context.md "
+            f"Bounded repo context prepared: {pack_path} "
             f"(route={manifest.get('route')}, bytes={manifest.get('actual_bytes')}, "
             f"est_tokens={manifest.get('estimated_input_tokens')}). "
             "Read the pack only if repository context is needed."

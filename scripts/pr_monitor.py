@@ -351,9 +351,17 @@ def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTE
         "truncated": True,
     }
     encoded = _encode_payload(summary)
-    if len(encoded.encode()) > budget:
-        raise RuntimeError("prompt budget is too small for the minimal PR delta")
-    return encoded
+    while len(encoded.encode()) > budget and summary["changed_files"]:
+        summary["changed_files"].pop()
+        encoded = _encode_payload(summary)
+    if len(encoded.encode()) <= budget:
+        return encoded
+
+    summary["previous_validated_verdict"] = ""
+    encoded = _encode_payload(summary)
+    if len(encoded.encode()) <= budget:
+        return encoded
+    raise RuntimeError("prompt budget is too small for the minimal PR delta")
 
 
 def chatgpt_review_handoff(

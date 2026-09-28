@@ -78,6 +78,36 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def _completion_marker(expectation: str) -> str:
+    digest = hashlib.sha256(expectation.encode("utf-8")).hexdigest()
+    return f"CODEX_BUDGET_COMPLETE:{digest}"
+
+
+def _prompt_with_completion_protocol(prompt: str, expectation: str) -> str:
+    if not expectation:
+        return prompt
+    marker = _completion_marker(expectation)
+    criterion = json.dumps(expectation, ensure_ascii=False)
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "## Required completion protocol\n"
+        f"Completion criterion (JSON string): {criterion}\n"
+        "Only when the criterion is satisfied, end the final response with this exact line:\n"
+        f"{marker}\n"
+        "Do not emit that line when the criterion is not satisfied.\n"
+    )
+
+
+def _validated_completion(final: str, expectation: str) -> tuple[bool, str]:
+    if not expectation:
+        return bool(final), final
+    lines = final.rstrip().splitlines()
+    if not lines or lines[-1] != _completion_marker(expectation):
+        return False, final
+    answer = "\n".join(lines[:-1]).rstrip()
+    return bool(answer), answer
+
+
 def _codex_home() -> Path:
     configured = os.environ.get("CODEX_HOME", "").strip()
     return Path(configured).expanduser().resolve() if configured else Path.home() / ".codex"
@@ -500,7 +530,9 @@ def run_task(args: argparse.Namespace) -> int:
         verified_mcp_disable_overrides(args.profile) if args.cacheable else None
     )
     argv = codex_exec_argv(args, mcp_disable_overrides=mcp_disable_overrides)
-    prompt = (ROOT / pack).read_text(encoding="utf-8")
+    prompt = _prompt_with_completion_protocol(
+        (ROOT / pack).read_text(encoding="utf-8"), args.expect or ""
+    )
     try:
         proc = subprocess.run(argv, input=prompt, text=True, cwd=ROOT, capture_output=True,
                               timeout=args.timeout)
@@ -528,7 +560,8 @@ def run_task(args: argparse.Namespace) -> int:
     final = messages[-1] if messages else ""
     policy = _context_module()
     final = policy.redact_sensitive(final, policy.yq_json(".", policy.ROUTER))
-    succeeded = completed and bool(final) and (not args.expect or args.expect in final)
+    completion_valid, validated_final = _validated_completion(final, args.expect or "")
+    succeeded = completed and completion_valid
     if not succeeded:
         measurement["errors"] += 1
     measurement["success"] = succeeded
@@ -536,12 +569,13 @@ def run_task(args: argparse.Namespace) -> int:
     measurement["event_errors"] = sum(e.get("type") in {"error", "turn.failed"} for e in events)
     measurement["errors"] += measurement["event_errors"]
     measurement["duration_seconds"] = round(time.monotonic() - start, 3)
-    if final:
-        print(final)
+    displayed_final = validated_final if completion_valid else final
+    if displayed_final:
+        print(displayed_final)
     if (args.cacheable and _identity_verified(identity) and args.expect and succeeded and not used_tools
             and data.get("scope_ambiguous") is False and not data.get("truncated")):
         result_path = ROOT / f"{stem}.result.txt"
-        _atomic_text(result_path, final)
+        _atomic_text(result_path, validated_final)
         mark(manifest_path, str(result_path.relative_to(ROOT)), identity=identity,
              validated=True, read_only=True)
     _atomic_text(metrics, json.dumps(measurement, sort_keys=True) + "\n")
