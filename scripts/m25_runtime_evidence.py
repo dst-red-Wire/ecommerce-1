@@ -139,14 +139,37 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
     release = sources["image_release"]
     native_import = sources["native_import"]
     native_result = sources["native_result"]
+    qualification_sha = build.get("source_sha")
+    _require(isinstance(qualification_sha, str)
+             and rocky_box_catalog.GIT_SHA.fullmatch(qualification_sha) is not None,
+             "M2.5 native image qualification source SHA is invalid")
+    qualification_tree = rocky_box_catalog.source_tree(qualification_sha)
     for name, payload in (("image build", build), ("image qualification", qualified),
                           ("image release", release)):
-        _require(payload.get("status") == "PASS" and payload.get("source_sha") == original_sha,
-                 f"M2.5 {name} does not belong to the original image execution")
-    _require(build.get("source_tree") == original_tree and build.get("sha256") == manifest["box_sha256"]
+        _require(payload.get("status") == "PASS" and payload.get("source_sha") == qualification_sha,
+                 f"M2.5 {name} does not belong to the native image qualification")
+    packer_mode = build.get("packer_build")
+    native_packer = native_result.get("packer")
+    _require(isinstance(native_packer, dict), "M2.5 native Packer result is absent")
+    if packer_mode == "PASS":
+        _require(qualification_sha == original_sha and native_packer.get("build") == "PASS"
+                 and native_result.get("staging_manifest_sha256") == manifest["staging_manifest_sha256"],
+                 "M2.5 original Packer execution differs from its immutable manifest")
+    elif packer_mode == "REUSED":
+        _require(qualification_sha != original_sha
+                 and build.get("reuse_source_sha") == original_sha
+                 and build.get("packer_inputs_digest") == manifest["inputs_digest"]
+                 and native_packer.get("build") == "REUSED"
+                 and native_packer.get("reuse_source_sha") == original_sha
+                 and native_packer.get("inputs_digest") == manifest["inputs_digest"],
+                 "M2.5 native image reuse has invalid original execution provenance")
+    else:
+        raise ValueError("M2.5 Packer mode is neither an original execution nor verified reuse")
+    _require(build.get("source_tree") == qualification_tree and build.get("sha256") == manifest["box_sha256"]
              and build.get("artifact") == filename and build.get("virtualbox_backend") == "NATIVE_VTX"
              and build.get("virtualbox_version") == vbox_version
-             and build.get("packer_build") == "PASS", "M2.5 original Packer execution differs")
+             and build.get("packer_build") == native_packer.get("build"),
+             "M2.5 native image qualification differs from its build result")
     required_image_checks = {"boot", "ssh", "rocky_release", "kernel", "systemd",
                              "rke2_prerequisites", "security", "cleanup", "key_cleanup",
                              "swap_absent", "rpm_profile"}
@@ -165,22 +188,23 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
                  "cleanup", "ephemeral_key_absent", "sbom", "package_manifest", "profile_inventory")),
              "M2.5 image release is incomplete")
     _require(native_import.get("status") == "PASS"
-             and native_import.get("source_git_sha") == original_sha
-             and native_import.get("source_tree_sha") == original_tree
+             and native_import.get("source_git_sha") == qualification_sha
+             and native_import.get("source_tree_sha") == qualification_tree
              and native_import.get("artifact_sha256") == manifest["box_sha256"]
+             and native_import.get("staging_manifest_sha256") == native_result.get("staging_manifest_sha256")
              and native_import.get("virtualbox_backend") == "NATIVE_VTX"
              and native_import.get("wsl2_restored") == "PASS"
              and native_import.get("bcd_restored") == "PASS",
              "M2.5 native import is incomplete")
     _require(native_result.get("status") == "PASS"
-             and native_result.get("source_git_sha") == original_sha
-             and native_result.get("source_tree_sha") == original_tree
+             and native_result.get("source_git_sha") == qualification_sha
+             and native_result.get("source_tree_sha") == qualification_tree
              and native_result.get("artifact_sha256") == manifest["box_sha256"]
-             and native_result.get("staging_manifest_sha256") == manifest["staging_manifest_sha256"]
+             and re.fullmatch(r"[0-9a-f]{64}", str(native_result.get("staging_manifest_sha256", "")))
              and native_result.get("native_vtx") == "PASS"
              and native_result.get("nem_detected") is False
              and native_result.get("virtualbox_backend") == "NATIVE_VTX"
-             and native_result.get("packer", {}).get("build") == "PASS"
+             and native_packer.get("build") == packer_mode
              and native_result.get("vagrant_smoke", {}).get("rocky_version") == "PASS"
              and "Rocky Linux release 10.2" in str(native_result.get("observations", {}).get("rocky_version", "")),
              "M2.5 original native Rocky 10.2 execution proof is invalid")

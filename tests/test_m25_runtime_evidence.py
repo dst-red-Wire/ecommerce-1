@@ -22,6 +22,8 @@ HEAD = "a" * 40
 TREE = "b" * 40
 ORIGINAL = "1" * 40
 ORIGINAL_TREE = "2" * 40
+QUALIFIED = "6" * 40
+QUALIFIED_TREE = "7" * 40
 UUID = "12345678-1234-1234-1234-123456789abc"
 BOX_SHA = "c" * 64
 INPUTS = "d" * 64
@@ -69,6 +71,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                                   "sbom", "package_manifest", "profile_inventory")}},
             "native_import": {"status": "PASS", "source_git_sha": ORIGINAL,
                               "source_tree_sha": ORIGINAL_TREE, "artifact_sha256": BOX_SHA,
+                              "staging_manifest_sha256": STAGING,
                               "virtualbox_backend": "NATIVE_VTX", "wsl2_restored": "PASS",
                               "bcd_restored": "PASS"},
             "native_result": {"status": "PASS", "source_git_sha": ORIGINAL,
@@ -152,11 +155,17 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         for name, value in (("find_matching_box", Path("/unused/box")),
                             ("verify", self.manifest),
                             ("build_inputs", {"inputs_digest": INPUTS,
-                                              "packer_template_digest": TEMPLATE}),
-                            ("source_tree", ORIGINAL_TREE)):
+                                              "packer_template_digest": TEMPLATE})):
             patcher = mock.patch.object(m25.rocky_box_catalog, name, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = mock.patch.object(
+            m25.rocky_box_catalog, "source_tree",
+            side_effect=lambda sha: {ORIGINAL: ORIGINAL_TREE, QUALIFIED: QUALIFIED_TREE,
+                                     HEAD: TREE}[sha],
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def result(self, *, now=None):
         contract = roadmap_sync.policy()["status_derivation"]["runtime_evidence_contract"]
@@ -239,6 +248,26 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             virtualbox_backend="NEM", hypervisor_present=True))
         self.rewrite_source("campaign_result", lambda value: value.update(virtualbox_backend="NEM"))
         self.assertTrue(self.result()[0])
+
+    def test_native_qualification_may_reuse_original_packer_bytes_honestly(self):
+        self.rewrite_source("image_build", lambda value: value.update(
+            source_sha=QUALIFIED, source_tree=QUALIFIED_TREE,
+            packer_build="REUSED", reuse_source_sha=ORIGINAL,
+            packer_inputs_digest=INPUTS))
+        for name in ("image_qualification", "image_release"):
+            self.rewrite_source(name, lambda value: value.update(source_sha=QUALIFIED))
+        self.rewrite_source("native_import", lambda value: value.update(
+            source_git_sha=QUALIFIED, source_tree_sha=QUALIFIED_TREE,
+            staging_manifest_sha256="8" * 64))
+        self.rewrite_source("native_result", lambda value: value.update(
+            source_git_sha=QUALIFIED, source_tree_sha=QUALIFIED_TREE,
+            staging_manifest_sha256="8" * 64,
+            packer={"build": "REUSED", "reuse_source_sha": ORIGINAL,
+                    "inputs_digest": INPUTS}))
+        self.assertTrue(self.result()[0])
+        self.rewrite_source("native_result", lambda value: value["packer"].update(
+            reuse_source_sha="f" * 40))
+        self.assertFalse(self.result()[0])
 
 
 if __name__ == "__main__":
