@@ -1039,7 +1039,17 @@ function Invoke-VagrantSmokeCommand {
             Start-Sleep -Seconds 5
         }
     }
-    Assert-ProcessSuccess -Result $result -Operation "Vagrant native smoke check $Name"
+    if ($result.ExitCode -ne 0) {
+        $diagnosticPath = Join-Path $WorkingDirectory "$Name-diagnostic.txt"
+        try {
+            $diagnostic = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', 'cloud-init status --long; printf "\nSSH_MODES\n"; stat -c "%a %U %n" ~/.ssh ~/.ssh/authorized_keys; printf "\nSSHD_PUBKEY\n"; sudo -n sshd -T | grep "^pubkeyauthentication "; printf "\nPRIVATE_KEY_PRESENT\n"; if sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; then echo yes; else echo no; fi; printf "\nCLOUD_INIT_OUTPUT\n"; sudo -n tail -n 80 /var/log/cloud-init-output.log') -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
+            [IO.File]::WriteAllText($diagnosticPath, "exit=$($diagnostic.ExitCode)`n$($diagnostic.StdOut)`n$($diagnostic.StdErr)", [Text.UTF8Encoding]::new($false))
+        }
+        catch {
+            [IO.File]::WriteAllText($diagnosticPath, "diagnostic failed: $($_.Exception.Message)", [Text.UTF8Encoding]::new($false))
+        }
+        throw "Vagrant native smoke check $Name failed with exit code $($result.ExitCode); guest diagnostic: $diagnosticPath"
+    }
     return $result.StdOut.Trim()
 }
 
