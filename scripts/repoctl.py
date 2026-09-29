@@ -9767,7 +9767,7 @@ def windows_lab_ssh_identity() -> int:
 
 
 def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_failed_vm: bool = False,
-                      global_deadline: int = 900) -> int:
+                      global_deadline: int = 900, retain_vm: bool = False) -> int:
     """Verify a retained box or stage a single exact-SHA native network smoke."""
     import rocky_box_catalog
 
@@ -9782,7 +9782,7 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
                               "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
         elif action == "prepare-smoke":
             prepared = rocky_box_catalog.prepare_smoke(
-                selected, source_sha, box_sha256, keep_failed_vm, global_deadline
+                selected, source_sha, box_sha256, keep_failed_vm, global_deadline, retain_vm
             )
             print(json.dumps(prepared, sort_keys=True))
         else:
@@ -9792,9 +9792,11 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
     return 0
 
 
-def lab_network_clean(campaign_id: str) -> int:
+def lab_network_action(action: str, campaign_id: str) -> int:
+    if action not in {"Clean", "Resume"}:
+        return fail("unsupported network-smoke action")
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
-        return fail("lab-clean requires an exact network-smoke CAMPAIGN_ID")
+        return fail("network-smoke action requires an exact CAMPAIGN_ID")
     stage = Path("/mnt/c/ecommerce-lab/network-smoke") / campaign_id
     runner = stage / "scripts/windows/LabNetworkSmoke.ps1"
     if not runner.is_file():
@@ -9804,9 +9806,57 @@ def lab_network_clean(campaign_id: str) -> int:
     runner_windows = output(["wslpath", "-w", str(runner)]).strip()
     return run(
         [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", runner_windows, "-Action", "Clean", "-StageRoot", stage_windows],
+         "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows],
         cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
     ).returncode
+
+
+def lab_network_status(campaign_id: str) -> int:
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-status requires an exact CAMPAIGN_ID")
+    evidence = Path("/mnt/c/ecommerce-lab/evidence/network-smoke") / campaign_id / "result.json"
+    if not evidence.is_file():
+        return fail(f"network-smoke result is absent: {campaign_id}")
+    result = json.loads(evidence.read_text(encoding="utf-8"))
+    if result.get("campaign_id") != campaign_id:
+        return fail("network-smoke result campaign binding differs")
+    network = result.get("network_smoke") or {}
+    vm_name = result.get("vm_name") or ""
+    vm_state = "UNKNOWN"
+    vbox = Path("/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe")
+    if vm_name and vbox.is_file():
+        try:
+            probe = subprocess.run([str(vbox), "showvminfo", vm_name, "--machinereadable"],
+                                   capture_output=True, text=True, timeout=20, check=False)
+            match = re.search(r'^VMState="([^"]+)"\s*$', probe.stdout, re.MULTILINE)
+            vm_state = match.group(1).upper() if probe.returncode == 0 and match else "ABSENT"
+        except (OSError, subprocess.TimeoutExpired):
+            vm_state = "UNKNOWN"
+    print(json.dumps({
+        "campaign_id": campaign_id,
+        "source_sha": result.get("source_git_sha"),
+        "vm_name": vm_name,
+        "vm_state": vm_state,
+        "ssh_host": network.get("address"),
+        "ssh_port": network.get("port"),
+        "ssh_user": network.get("user"),
+        "tcp_probe": network.get("tcp_22_ready"),
+        "tcp_failure_class": network.get("tcp_last_error"),
+        "ssh_handshake": network.get("ssh_auth_ready"),
+        "remote_command": network.get("remote_command_ready"),
+        "rocky_runtime": network.get("rocky_runtime"),
+        "rocky_version": network.get("rocky_version"),
+        "vagrant_ssh_wrapper": network.get("vagrant_ssh_command"),
+        "direct_openssh": network.get("remote_command_ready"),
+        "packer_rebuild": "NOT_REQUIRED" if result.get("box_digest_verified") == "PASS" else "UNVERIFIED",
+        "vm_recreate": result.get("vm_recreate"),
+        "artifacts_retained": (result.get("cleanup") or {}).get("vm_preserved"),
+        "checkpoints": result.get("checkpoints"),
+        "resume_from": result.get("resume_from"),
+        "failure_code": network.get("failure_code"),
+        "evidence": str(evidence),
+    }, sort_keys=True))
+    return 0
 
 
 def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
@@ -12597,9 +12647,14 @@ def main() -> int:
     network_smoke.add_argument("--box", default=os.environ.get("BOX_PATH", ""))
     network_smoke.add_argument("--box-sha256", default=os.environ.get("BOX_SHA256", ""))
     network_smoke.add_argument("--keep-failed-vm", action="store_true")
+    network_smoke.add_argument("--retain-vm", action="store_true")
     network_smoke.add_argument("--global-deadline", type=int, default=900)
     lab_clean = sub.add_parser("lab-clean")
     lab_clean.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_resume = sub.add_parser("lab-network-resume")
+    lab_resume.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_status = sub.add_parser("lab-network-status")
+    lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
     sub.add_parser("image-rocky-linux-static-validate")
     image_linux_build = sub.add_parser("image-rocky-linux-build")
@@ -12883,9 +12938,14 @@ def main() -> int:
             return rocky_box_command("verify", box=args.box)
         if args.cmd == "lab-network-smoke":
             return rocky_box_command("prepare-smoke", box=args.box, box_sha256=args.box_sha256,
-                                     keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline)
+                                     keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline,
+                                     retain_vm=args.retain_vm)
         if args.cmd == "lab-clean":
-            return lab_network_clean(args.campaign_id)
+            return lab_network_action("Clean", args.campaign_id)
+        if args.cmd == "lab-network-resume":
+            return lab_network_action("Resume", args.campaign_id)
+        if args.cmd == "lab-network-status":
+            return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":
             return linux_image_pipeline("preflight")
         if args.cmd == "image-rocky-linux-static-validate":

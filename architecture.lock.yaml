@@ -39,7 +39,9 @@ repository_governance:
         - image-rocky-windows-qualify
         - image-rocky-windows-release
         - lab-clean
+        - lab-network-resume
         - lab-network-smoke
+        - lab-network-status
         - lab-ssh-key
         - local-services-assets
         - local-services-capabilities

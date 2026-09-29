@@ -135,7 +135,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-clean
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-network-resume lab-network-status lab-clean
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
 local-services-up: workspace-check ## Start pinned local Gitea/Harbor on native WSL storage
@@ -197,7 +197,13 @@ packer-box: ## Verify and reuse the local immutable Rocky box matching current P
 	@$(PYTHON) scripts/repoctl.py packer-box $(if $(BOX_PATH),--box "$(BOX_PATH)",)
 
 lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box without running Packer
-	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(filter 1,$(RETAIN_VM)),--retain-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+
+lab-network-resume: ## Resume SSH and Rocky probes on the retained VM for CAMPAIGN_ID
+	@$(PYTHON) scripts/repoctl.py lab-network-resume --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
+	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"
 
 lab-clean: ## Destroy the explicitly preserved network-smoke VM for CAMPAIGN_ID
 	@$(PYTHON) scripts/repoctl.py lab-clean --campaign-id "$(CAMPAIGN_ID)"

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('Run', 'Clean')][string]$Action,
+    [Parameter(Mandatory = $true)][ValidateSet('Run', 'Resume', 'Clean')][string]$Action,
     [Parameter(Mandatory = $true)][string]$StageRoot
 )
 
@@ -48,6 +48,7 @@ if ($prepared.schema -ne 1 -or $prepared.status -ne 'PREPARED' -or
     [string]$prepared.box_sha256 -notmatch '^[0-9a-f]{64}$') {
     throw 'Network smoke prepared binding is invalid'
 }
+$retainVm = $prepared.PSObject.Properties.Name -contains 'retain_vm' -and $prepared.retain_vm -eq $true
 $smokeRoot = Join-Path $stage 'smoke-run'
 $evidenceRoot = Join-Path 'C:\ecommerce-lab\evidence\network-smoke' ([string]$prepared.campaign_id)
 $resultPath = Join-Path $evidenceRoot 'result.json'
@@ -65,13 +66,13 @@ if ($Action -eq 'Clean') {
     }
     catch [IO.IOException] { throw 'BLOCKED_RUNTIME another network smoke holds the laboratory runtime lock' }
     $result = Read-JsonFile $resultPath
-    if ($result.status -eq 'CLEANED_AFTER_DIAGNOSTIC' -and $result.cleanup.vm_preserved -eq $false -and
+    if ($result.status -in @('CLEANED_AFTER_DIAGNOSTIC','CLEANED_AFTER_RETAINED') -and $result.cleanup.vm_preserved -eq $false -and
         $result.cleanup.status -eq 'PASS') {
         $cleanLock.Dispose()
         [Console]::WriteLine("PASS lab-network-clean already-clean campaign=$($prepared.campaign_id)")
         exit 0
     }
-    if ($result.status -ne 'DIAGNOSTIC_PRESERVED' -or $result.campaign_id -ne $prepared.campaign_id -or
+    if ($result.status -notin @('DIAGNOSTIC_PRESERVED','PASS') -or $result.campaign_id -ne $prepared.campaign_id -or
         $result.cleanup.vm_preserved -ne $true -or $result.cleanup.vm_name -ne $result.vm_name -or
         $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$' -or
         $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
@@ -100,11 +101,74 @@ if ($Action -eq 'Clean') {
     $result.cleanup.vm_preserved = $false
     $result.cleanup.reason = $null
     $result.cleanup.status = 'PASS'
-    $result.status = 'CLEANED_AFTER_DIAGNOSTIC'
+    $result.status = if ($result.status -eq 'PASS') { 'CLEANED_AFTER_RETAINED' } else { 'CLEANED_AFTER_DIAGNOSTIC' }
     Write-Utf8Json -InputObject $result -Path $resultPath
     $cleanLock.Dispose()
     [Console]::WriteLine("PASS lab-network-clean campaign=$($prepared.campaign_id)")
     exit 0
+}
+
+if ($Action -eq 'Resume') {
+    $result = Read-JsonFile $resultPath
+    if ($result.campaign_id -ne $prepared.campaign_id -or
+        $result.status -notin @('DIAGNOSTIC_PRESERVED','PASS') -or
+        $result.cleanup.vm_preserved -ne $true -or
+        $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$' -or
+        $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
+        throw 'Network SSH resume requires an owned preserved VM and matching campaign'
+    }
+    if ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) {
+        throw 'BLOCKED_RUNTIME native VT-x is unavailable for network SSH resume in this Windows boot'
+    }
+    $box = [IO.Path]::GetFullPath([string]$prepared.box_path)
+    if ((Get-FileSha256 -Path $box) -ne [string]$prepared.box_sha256 -or
+        (Get-FileSha256 -Path (Join-Path (Split-Path -Parent $box) 'manifest.json')) -ne [string]$prepared.box_manifest_sha256) {
+        throw 'Network SSH resume box digest or provenance changed'
+    }
+    $runtime = Read-JsonFile (Join-Path $smokeRoot 'runtime.json')
+    if ($runtime.name -ne $result.vm_name -or $runtime.box_name -ne $result.box_name -or
+        [IO.Path]::GetFullPath([string]$runtime.private_key) -ine [IO.Path]::GetFullPath($privateKey)) {
+        throw 'Network SSH resume runtime binding changed'
+    }
+    $machines = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
+    $machineIdPath = Join-Path $smokeRoot '.vagrant\machines\default\virtualbox\id'
+    if (-not $machines.ContainsKey([string]$result.vm_name) -or
+        -not (Test-Path -LiteralPath $machineIdPath -PathType Leaf) -or
+        [IO.File]::ReadAllText($machineIdPath).Trim().Trim('{}') -ine [string]$result.cleanup.vm_id -or
+        ([string]$machines[[string]$result.vm_name]).Trim('{}') -ine [string]$result.cleanup.vm_id) {
+        throw 'Network SSH resume VM identity differs from the retained checkpoint'
+    }
+    $environment = @{ VAGRANT_HOME = (Join-Path $smokeRoot 'vagrant-home'); VAGRANT_CHECKPOINT_DISABLE = '1'; VAGRANT_DEFAULT_PROVIDER = 'virtualbox'; VAGRANT_NO_PLUGINS = '1' }
+    $status = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('status','--machine-readable') -TimeoutSeconds 45 -WorkingDirectory $smokeRoot -Environment $environment
+    if ($status.ExitCode -ne 0 -or $status.StdOut -notmatch '(?m),default,state,running\s*$') {
+        throw 'Network SSH resume VM is not running; no SSH probe was attempted'
+    }
+    $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
+    $network = New-NativeSshSmokeEvidence -VmName $result.vm_name -User 'packer' -EvidenceDirectory (Join-Path $stage "logs\ssh-resume-$attempt")
+    $network.vagrant_up_started_at = [DateTime]::UtcNow.ToString('o')
+    $network.vagrant_ready = 'PASS'
+    $network.vagrant_ready_at = $network.vagrant_up_started_at
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
+    foreach ($delay in @(2,3,5,8,10,10,10,10)) {
+        Update-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -VmName $result.vm_name -WorkingDirectory $smokeRoot -PrivateKey $privateKey -SshExecutable $ssh
+        if ($network.ssh_auth_ready -eq 'PASS' -or [DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Seconds $delay
+    }
+    Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
+    $result.network_smoke = $network
+    $result.checkpoints.'03-vm-smoke' = 'PASS'
+    $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS') { 'PASS' } else { 'FAIL' }
+    $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
+    $result.resume_from = if ($network.remote_command_ready -ne 'PASS') { '04-network-ssh' } elseif ($network.rocky_runtime -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
+    $result.vm_recreate = 'NOT_REQUIRED'
+    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } else { 'PASS' }
+    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } else { $null }
+    $result.completed_at = [DateTime]::UtcNow.ToString('o')
+    Write-Utf8Json -InputObject $result -Path $resultPath
+    [Console]::WriteLine("LAB_NETWORK_RESUME=$($result.status) campaign=$($prepared.campaign_id) evidence=$resultPath")
+    if ($result.status -eq 'PASS') { exit 0 }
+    exit 1
 }
 
 if (Test-Path -LiteralPath $resultPath -PathType Leaf) { throw 'Network smoke campaign was already attempted; prepare a new campaign' }
@@ -117,9 +181,11 @@ $result = [ordered]@{
     ssh_identity = [ordered]@{ source = 'controller_persistent'; private_key_present = $false; public_key_fingerprint = $null; private_key_in_box = $null }
     vm_name = $null; box_name = $null; virtualbox_backend = 'UNKNOWN'
     network_smoke = $null
+    checkpoints = [ordered]@{ '03-vm-smoke' = 'NOT_EXECUTED'; '04-network-ssh' = 'NOT_EXECUTED'; '05-rocky-runtime' = 'NOT_EXECUTED' }
+    resume_from = '03-vm-smoke'; vm_recreate = 'REQUIRED_MISSING_VM'
     timings = [ordered]@{ box_import_seconds = $null; vm_boot_seconds = $null; network_readiness_seconds = $null; ssh_readiness_seconds = $null; cleanup_seconds = $null }
     guest_security = 'NOT_EXECUTED'
-    cleanup = [ordered]@{ policy = if ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; vm_id = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
+    cleanup = [ordered]@{ policy = if ($retainVm) { 'retain_until_explicit_clean' } elseif ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; vm_id = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
     started_at = [DateTime]::UtcNow.ToString('o'); completed_at = $null
     error = $null
 }
@@ -202,6 +268,11 @@ try {
     }
     catch { $upError = $_.Exception.Message }
     Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $vmName -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $up
+    $result.checkpoints.'03-vm-smoke' = if ($network.vm_running -eq 'PASS' -and $network.vagrant_ready -eq 'PASS') { 'PASS' } else { 'FAIL' }
+    $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
+    $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
+    $result.resume_from = if ($network.vm_running -ne 'PASS') { '03-vm-smoke' } elseif ($network.remote_command_ready -ne 'PASS') { '04-network-ssh' } elseif ($network.rocky_runtime -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
+    $result.vm_recreate = 'EXECUTED'
     $result.timings.vm_boot_seconds = Get-NativeSshSeconds -Start $network.vagrant_up_started_at -End $network.vm_running_at
     $result.timings.network_readiness_seconds = Get-NativeSshSeconds -Start $network.vm_running_at -End $network.tcp_22_ready_at
     $result.timings.ssh_readiness_seconds = Get-NativeSshSeconds -Start $network.tcp_22_ready_at -End $network.ssh_auth_ready_at
@@ -209,7 +280,7 @@ try {
     if ($result.virtualbox_backend -ne 'NATIVE_VTX') { throw "BLOCKED_RUNTIME VirtualBox backend is $($result.virtualbox_backend)" }
     if ($upError) { throw "Network smoke vagrant up failed at $($network.failure_stage): $upError" }
     if ($up.ExitCode -ne 0 -or $network.failure_stage) { throw "Network smoke failed at $($network.failure_stage): $($network.failure_reason)" }
-    $security = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('ssh','-c','cloud-init status --wait >/dev/null && test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }') -TimeoutSeconds 120 -WorkingDirectory $smokeRoot -Environment $environment
+    $security = Invoke-NativeDirectSshProbe -SshExecutable $ssh -Address $network.address -Port $network.port -User $network.user -PrivateKey $privateKey -WorkingDirectory $smokeRoot -TimeoutSeconds 30 -Command 'test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }'
     Assert-ProcessSuccess -Result $security -Operation 'guest SSH key ownership, mode, cloud-init and sshd security'
     $result.guest_security = 'PASS'
     $result.ssh_identity.private_key_in_box = $false
@@ -248,9 +319,10 @@ finally {
         $result.status = 'FAIL'
         $result.error = "VirtualBox ownership check failed: $($_.Exception.Message); prior error: $($result.error)"
     }
-    $preserve = $result.status -eq 'FAIL' -and $prepared.keep_failed_vm -eq $true -and $vmExists -and $boxAdded
+    $preserve = (($result.status -eq 'FAIL' -and ($prepared.keep_failed_vm -eq $true -or $retainVm)) -or
+        ($result.status -eq 'PASS' -and $retainVm)) -and $vmExists -and $boxAdded
     if ($preserve) {
-        $result.status = 'DIAGNOSTIC_PRESERVED'
+        if ($result.status -eq 'FAIL') { $result.status = 'DIAGNOSTIC_PRESERVED' }
         $result.cleanup.vm_preserved = $true
         $result.cleanup.vm_name = $vmName
         $result.cleanup.vm_id = $ownedVmId

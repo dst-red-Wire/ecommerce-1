@@ -1075,11 +1075,6 @@ function Invoke-NativeBackendProbe {
     }
 }
 
-function Test-VagrantSmokeTimeout {
-    param([string]$Message, [string]$Vagrant)
-    return $Message.StartsWith("Timed out after 120s: $Vagrant; output=", [StringComparison]::Ordinal)
-}
-
 function Invoke-VagrantSmokeCommand {
     param(
         [Parameter(Mandatory = $true)][string]$Vagrant,
@@ -1088,27 +1083,28 @@ function Invoke-VagrantSmokeCommand {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string]$Name
     )
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-        try {
-            $result = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', $Command) -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
-            break
-        }
-        catch {
-            if (-not (Test-VagrantSmokeTimeout -Message $_.Exception.Message -Vagrant $Vagrant)) { throw }
-            if ($attempt -eq 2) { throw "Vagrant native smoke check $Name timed out after 2 bounded attempts; last_error=$($_.Exception.Message)" }
-            Start-Sleep -Seconds 5
-        }
+    $targetPath = Join-Path (Split-Path -Parent $WorkingDirectory) 'logs\ssh-smoke\ssh-target.json'
+    $target = Read-JsonFile $targetPath
+    if ($target.host -ne '127.0.0.1' -or $target.user -ne 'packer' -or
+        [int]$target.port -lt 1 -or [int]$target.port -gt 65535 -or
+        -not (Test-Path -LiteralPath ([string]$target.identity_file) -PathType Leaf)) {
+        throw "Native smoke check $Name has no verified direct SSH target"
     }
+    $ssh = Resolve-WindowsTool -Name 'ssh.exe' -FallbackPaths @((Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'))
+    try {
+        $result = Invoke-NativeDirectSshProbe -SshExecutable $ssh -Address $target.host -Port $target.port -User $target.user -PrivateKey $target.identity_file -WorkingDirectory $WorkingDirectory -Command $Command -TimeoutSeconds 60
+    }
+    catch { throw "Native direct SSH smoke check $Name failed within 60 seconds: $($_.Exception.Message)" }
     if ($result.ExitCode -ne 0) {
         $diagnosticPath = Join-Path $WorkingDirectory "$Name-diagnostic.txt"
         try {
-            $diagnostic = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', 'cloud-init status --long; printf "\nSSH_MODES\n"; stat -c "%a %U %n" ~/.ssh ~/.ssh/authorized_keys; printf "\nSSHD_PUBKEY\n"; sudo -n sshd -T | grep "^pubkeyauthentication "; printf "\nPRIVATE_KEY_PRESENT\n"; if sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; then echo yes; else echo no; fi; printf "\nCLOUD_INIT_OUTPUT\n"; sudo -n tail -n 80 /var/log/cloud-init-output.log') -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment
+            $diagnostic = Invoke-NativeDirectSshProbe -SshExecutable $ssh -Address $target.host -Port $target.port -User $target.user -PrivateKey $target.identity_file -WorkingDirectory $WorkingDirectory -Command 'cloud-init status --long; printf "\nSSH_MODES\n"; stat -c "%a %U %n" ~/.ssh ~/.ssh/authorized_keys; printf "\nSSHD_PUBKEY\n"; sudo -n sshd -T | grep "^pubkeyauthentication "; printf "\nPRIVATE_KEY_PRESENT\n"; if sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; then echo yes; else echo no; fi; printf "\nCLOUD_INIT_OUTPUT\n"; sudo -n tail -n 80 /var/log/cloud-init-output.log' -TimeoutSeconds 30
             [IO.File]::WriteAllText($diagnosticPath, "exit=$($diagnostic.ExitCode)`n$($diagnostic.StdOut)`n$($diagnostic.StdErr)", [Text.UTF8Encoding]::new($false))
         }
         catch {
             [IO.File]::WriteAllText($diagnosticPath, "diagnostic failed: $($_.Exception.Message)", [Text.UTF8Encoding]::new($false))
         }
-        throw "Vagrant native smoke check $Name failed with exit code $($result.ExitCode); guest diagnostic: $diagnosticPath"
+        throw "Native direct SSH smoke check $Name failed with exit code $($result.ExitCode); guest diagnostic: $diagnosticPath"
     }
     return $result.StdOut.Trim()
 }
@@ -1122,7 +1118,8 @@ function Invoke-NativeSshInventory {
         [Parameter(Mandatory = $true)][string]$Command,
         [Parameter(Mandatory = $true)][string]$Name
     )
-    if ($SshEvidence.ssh_auth_ready -ne 'PASS' -or $SshEvidence.vagrant_ssh_command -ne 'PASS' -or
+    if ($SshEvidence.ssh_auth_ready -ne 'PASS' -or $SshEvidence.remote_command_ready -ne 'PASS' -or
+        $SshEvidence.rocky_runtime -ne 'PASS' -or
         $SshEvidence.address -ne '127.0.0.1' -or $SshEvidence.user -ne 'packer' -or
         [int]$SshEvidence.port -lt 1 -or [int]$SshEvidence.port -gt 65535) {
         throw "Native SSH inventory $Name requires verified Vagrant SSH readiness and loopback forwarding"
@@ -1749,7 +1746,7 @@ function Invoke-Import {
         if ($result.vagrant_smoke.$field -ne 'PASS') { throw "Native Vagrant smoke field is not PASS: $field" }
     }
     if ($null -eq $result.ssh_smoke) { throw 'Native SSH smoke evidence is absent' }
-    foreach ($field in @('vm_running','ip_ready','tcp_22_ready','ssh_auth_ready','vagrant_ready','vagrant_ssh_command')) {
+    foreach ($field in @('vm_running','ip_ready','tcp_22_ready','ssh_auth_ready','vagrant_ready','ssh_config','remote_command_ready','rocky_runtime')) {
         if ($result.ssh_smoke.$field -ne 'PASS') { throw "Native SSH smoke field is not PASS: $field" }
     }
     if (-not $result.ssh_smoke.guest_ip -or -not $result.ssh_smoke.address -or -not $result.ssh_smoke.port) {
@@ -2406,12 +2403,9 @@ function Invoke-Resume {
 }
 
 function Invoke-SelfTest {
-    $vagrantFixture = 'C:\Program Files\Vagrant\bin\vagrant.exe'
-    if (-not (Test-VagrantSmokeTimeout -Message "Timed out after 120s: $vagrantFixture; output=34359738368" -Vagrant $vagrantFixture)) {
-        throw 'Vagrant smoke timeout with captured guest output was not retried'
-    }
-    if (Test-VagrantSmokeTimeout -Message "Timed out after 120s: $vagrantFixture-other; output=34359738368" -Vagrant $vagrantFixture) {
-        throw 'Vagrant smoke timeout from another executable was accepted'
+    if ((Get-NativeSshFailureCode -Stage 'remote_command_ready' -Detail 'timeout') -ne 'REMOTE_COMMAND_FAILED' -or
+        (Get-NativeSshFailureCode -Stage 'rocky_runtime' -Detail 'wrong OS') -ne 'ROCKY_RUNTIME_INVALID') {
+        throw 'Direct SSH and Rocky runtime failure stages are not distinct'
     }
     $normal = '{11111111-1111-1111-1111-111111111111}'
     $native = '{22222222-2222-2222-2222-222222222222}'

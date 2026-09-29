@@ -381,21 +381,41 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertNotIn("Native Vagrant SSH readiness failed", self.native)
         self.assertNotIn("for ($attempt = 1; $attempt -le 12; $attempt++)", self.native)
 
+    def test_network_checkpoint_resumes_without_recreating_the_vm(self):
+        policy = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text(encoding="utf-8"))["step_qualification"]
+        self.assertEqual("forbidden", policy["monolithic_network_timeout"])
+        self.assertEqual("required", policy["bounded_backoff"])
+        self.assertTrue(policy["checkpointed"] and policy["resumable"])
+        network = (WINDOWS / "LabNetworkSmoke.ps1").read_text(encoding="utf-8")
+        resume = network.split("if ($Action -eq 'Resume') {", 1)[1].split("if (Test-Path -LiteralPath $resultPath", 1)[0]
+        self.assertIn("$result.cleanup.vm_preserved -ne $true", resume)
+        self.assertIn("Get-FileSha256 -Path $box", resume)
+        self.assertIn("Get-VBoxMachines", resume)
+        self.assertIn("Complete-NativeSshSmokeEvidence", resume)
+        self.assertNotIn("@('up'", resume)
+        self.assertNotIn("@('destroy'", resume)
+        self.assertIn("$result.checkpoints.'04-network-ssh'", resume)
+        probe = (WINDOWS / "NativeVagrantSshSmoke.ps1").read_text(encoding="utf-8")
+        self.assertIn("$Evidence.vagrant_ssh_command = 'FAIL_NON_BLOCKING'", probe)
+        self.assertNotIn("-TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment", probe)
+
     def test_standard_vagrant_ssh_retry_remains_bounded(self):
         self.assertIn("$attempt -le 12", self.qualify)
         self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", self.qualify)
 
     def test_vagrant_guest_probe_timeout_is_named_and_retried_only_once(self):
-        for source in (self.native, self.qualify):
-            self.assertIn('$attempt -le 2', source)
-            self.assertIn('timed out after 2 bounded attempts', source)
-            self.assertIn('Start-Sleep -Seconds 5', source)
-        self.assertIn('Test-VagrantSmokeTimeout -Message $_.Exception.Message -Vagrant $Vagrant', self.native)
+        self.assertIn('Invoke-NativeDirectSshProbe -SshExecutable $ssh', self.native)
+        self.assertIn('-Command $Command -TimeoutSeconds 60', self.native)
+        self.assertNotIn("@('ssh', '-c', $Command)", self.native)
+        self.assertIn('$attempt -le 2', self.qualify)
+        self.assertIn('timed out after 2 bounded attempts', self.qualify)
+        self.assertIn('Start-Sleep -Seconds 5', self.qualify)
         self.assertIn('Timed out after ${TimeoutSeconds}s: $script:vagrant; output=', self.qualify)
         self.assertIn('Timed out after 60s: $vagrant; output=', self.qualify)
 
     def test_large_native_inventories_use_verified_direct_ssh(self):
-        self.assertIn("$SshEvidence.vagrant_ssh_command -ne 'PASS'", self.native)
+        self.assertIn("$SshEvidence.remote_command_ready -ne 'PASS'", self.native)
+        self.assertIn("$SshEvidence.rocky_runtime -ne 'PASS'", self.native)
         self.assertIn("'StrictHostKeyChecking=yes'", self.native)
         self.assertIn("'packer@127.0.0.1', $Command", self.native)
         self.assertIn("-SshEvidence $sshSmoke -Name 'rpm-profile'", self.native)

@@ -62,10 +62,10 @@ def _windows_commands() -> list[tuple[str, str]]:
             command = match.group(1).replace("''", "'").replace("{0}", "34359738368")
             commands.append((owner, command))
     network = ROOT / "scripts/windows/LabNetworkSmoke.ps1"
-    security = [line for line in network.read_text(encoding="utf-8").splitlines() if "-Arguments @('ssh','-c'," in line]
+    security = [line for line in network.read_text(encoding="utf-8").splitlines() if "Invoke-NativeDirectSshProbe" in line and "-Command " in line]
     if len(security) != 1:
         raise GuestSmokePreflightError("network-only guest security command inventory changed")
-    match = re.search(r"-Arguments @\('ssh','-c','((?:''|[^'])*)'\)", security[0])
+    match = re.search(r"-Command '((?:''|[^'])*)'", security[0])
     if match is None:
         raise GuestSmokePreflightError("network-only guest security command is not a PowerShell literal")
     commands.append(("LabNetworkSmoke.ps1:guest-security", match.group(1).replace("''", "'")))
