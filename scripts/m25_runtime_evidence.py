@@ -22,6 +22,7 @@ VM_NAME = re.compile(r"^ecommerce-mgmt-test-[a-z0-9-]+$")
 UUID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 OUTPUT = Path(".context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json")
 IMAGE = Path(".context/evidence/rocky-image/rocky-10.2/windows")
+NETWORK_SMOKE = Path(".context/evidence/network-smoke/current.json")
 
 
 def _paths(vm_name: str) -> dict[str, Path]:
@@ -35,6 +36,7 @@ def _paths(vm_name: str) -> dict[str, Path]:
         "native_import": IMAGE / "native-import.json",
         "native_result": IMAGE / "native-result.json",
         "image_reuse": IMAGE / "reuse.json",
+        "current_network_smoke": NETWORK_SMOKE,
         "backend_probe": state / "backend-probe.json",
         "vm_preflight": state / "preflight.json",
         "server_source": state / "server-source.json",
@@ -134,6 +136,41 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
                  "input_digest": manifest["inputs_digest"],
                  "artifact_digest": manifest["box_sha256"],
              }, "M2.5 current image reuse has invalid execution provenance")
+    smoke = sources["current_network_smoke"]
+    smoke_checks = smoke.get("network_smoke")
+    smoke_packer = smoke.get("packer")
+    smoke_cleanup = smoke.get("cleanup")
+    smoke_checkpoints = smoke.get("checkpoints")
+    smoke_vm = smoke.get("vm_name")
+    _require(isinstance(smoke.get("campaign_id"), str)
+             and re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", smoke["campaign_id"]) is not None
+             and isinstance(smoke_vm, str)
+             and re.fullmatch(r"ecommerce-rocky-10-2-smoke-[0-9a-f]{12}", smoke_vm) is not None
+             and smoke.get("resume_runner_source_sha") == head
+             and smoke.get("status") == "PASS"
+             and smoke.get("virtualbox_backend") == "NATIVE_VTX"
+             and smoke.get("box_digest_verified") == "PASS"
+             and smoke.get("box_digest") == manifest["box_sha256"]
+             and isinstance(smoke_packer, dict)
+             and smoke_packer.get("inputs_digest") == manifest["inputs_digest"]
+             and smoke.get("guest_security") == "PASS"
+             and smoke.get("vm_recreate") == "NOT_REQUIRED"
+             and isinstance(smoke_cleanup, dict)
+             and smoke_cleanup.get("vm_preserved") is True
+             and smoke_cleanup.get("vm_name") == smoke_vm
+             and isinstance(smoke_cleanup.get("vm_id"), str)
+             and UUID.fullmatch(smoke_cleanup["vm_id"]) is not None
+             and isinstance(smoke_checkpoints, dict)
+             and all(smoke_checkpoints.get(name) == "PASS" for name in (
+                 "03-vm-smoke", "04-network-ssh", "05-rocky-runtime"))
+             and isinstance(smoke_checks, dict)
+             and smoke_checks.get("vm_name") == smoke_vm
+             and smoke_checks.get("tcp_22_ready") == "PASS"
+             and smoke_checks.get("ssh_auth_ready") == "PASS"
+             and smoke_checks.get("remote_command_ready") == "PASS"
+             and smoke_checks.get("rocky_runtime") == "PASS"
+             and smoke_checks.get("rocky_version") == "10.2",
+             "M2.5 current-head native network and guest-security smoke is incomplete")
     build = sources["image_build"]
     qualified = sources["image_qualification"]
     release = sources["image_release"]
@@ -239,7 +276,9 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and type(backend_probe.get("host_logical_processors")) is int
              and backend_probe["host_logical_processors"] >= 4
              and backend_probe.get("vm_cpus") == 4
-             and backend_probe.get("vm_memory_mib") == 4096
+             and type(campaign.get("vm_memory_mib")) is int
+             and 4096 <= campaign["vm_memory_mib"] <= 16384
+             and backend_probe.get("vm_memory_mib") == campaign["vm_memory_mib"]
              and re.fullmatch(r"[0-9a-f]{64}", str(backend_probe.get("virtualbox_log_sha256", ""))),
              "M2.5 observed RKE2 VirtualBox backend or host capacity is invalid")
     _require(source.get("git_sha") == head, "M2.5 RKE2 source SHA differs")
@@ -249,7 +288,7 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and preflight.get("selinux") == "Enforcing"
              and preflight.get("online_cpus") == 4
              and type(preflight.get("memory_kib")) is int
-             and preflight["memory_kib"] >= 3500000
+             and preflight["memory_kib"] >= campaign["vm_memory_mib"] * 1024 * 85 // 100
              and preflight.get("nft_policies") == {"output": "drop", "forward": "drop"}
              and preflight.get("public_connect_errno") == 101
              and preflight.get("cold_artifact_target") is True,
@@ -294,6 +333,23 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
     _require([item.get("install_required") for item in servers] == [True, False, True]
              and all(item.get("vm_uuid") == identity["id"] for item in servers),
              "M2.5 RKE2 replay is not idempotent on the same VM")
+    max_age = yaml.safe_load((root / "config/contracts/roadmap-policy.yaml").read_text(encoding="utf-8"))[
+        "status_derivation"]["evidence_max_age_seconds"]
+    campaign_epoch = campaign.get("created_at_epoch")
+    current_epoch = int(datetime.now(timezone.utc).timestamp())
+    _require(type(max_age) is int and max_age > 0
+             and type(campaign_epoch) is int
+             and evidence.get("created_at_epoch") == campaign_epoch
+             and 0 <= current_epoch - campaign_epoch <= max_age,
+             "M2.5 source campaign is stale or has been re-dated")
+    try:
+        smoke_time = datetime.fromisoformat(str(smoke.get("completed_at", "")).replace("Z", "+00:00"))
+        _require(smoke_time.tzinfo is not None, "M2.5 current smoke completion time lacks timezone")
+        smoke_epoch = int(smoke_time.timestamp())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("M2.5 current smoke completion time is invalid") from exc
+    _require(campaign_epoch - max_age <= smoke_epoch <= campaign_epoch,
+             "M2.5 current smoke is stale or later than the RKE2 campaign")
 
 
 def create(root: Path, head: str, tree: str, vm_name: str) -> Path:
@@ -301,11 +357,12 @@ def create(root: Path, head: str, tree: str, vm_name: str) -> Path:
     refs = {name: {"path": path.as_posix(), "sha256": _digest(root / path)}
             for name, path in paths.items()}
     role = json.loads((root / paths["role_result"]).read_text(encoding="utf-8"))
+    campaign = json.loads((root / paths["campaign_result"]).read_text(encoding="utf-8"))
     manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
     payload = {
         "schema_version": 1, "status": "PASS", "exact_commit_evidence": True,
         "runtime_execution": True, "head_sha": head, "head_tree_sha": tree,
-        "created_at_epoch": int(datetime.now(timezone.utc).timestamp()),
+        "created_at_epoch": campaign["created_at_epoch"],
         "milestone": "M2.5", "environment": "lab",
         "runtime_identity": {"kind": "virtualbox-vm", "id": role["vm_uuid"]},
         "outcome": "PASS", "vm_name": vm_name, "source_evidence": refs,

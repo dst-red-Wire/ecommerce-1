@@ -9837,10 +9837,20 @@ def lab_network_action(action: str, campaign_id: str) -> int:
                "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows]
     if action == "Resume":
         command.extend(["-RunnerSourceSha", runner_source_sha])
-    return run(
+    started_at = time.time()
+    completed = run(
         command,
         cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
-    ).returncode
+    )
+    if action == "Resume":
+        result_path = Path("/mnt/c/ecommerce-lab/evidence/network-smoke") / campaign_id / "result.json"
+        if result_path.is_file() and result_path.stat().st_mtime >= started_at:
+            result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+            if result.get("resume_runner_source_sha") == runner_source_sha:
+                retained = ROOT / ".context/evidence/network-smoke/current.json"
+                retained.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(result_path, retained)
+    return completed.returncode
 
 
 def lab_network_status(campaign_id: str) -> int:
@@ -10665,6 +10675,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "box_sha256": verified_box["vm_box_sha256"],
         "virtualbox_backend": backend_probe["virtualbox_backend"] if backend_probe else None,
         "manifest_sha256": approved_manifest,
+        "vm_memory_mib": int(input_values["vm_memory"]),
         "created_at_epoch": int(time.time()), "actions": observed_actions,
     }
     (vm_state / "campaign-result.json").write_text(

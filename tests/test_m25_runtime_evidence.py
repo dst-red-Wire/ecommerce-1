@@ -39,6 +39,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.root = Path(directory.name)
         for relative in ("config/contracts/machine-image-lock.yaml",
                          "config/contracts/qualification-execution-policy.yaml",
+                         "config/contracts/roadmap-policy.yaml",
                          "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -52,6 +53,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             "rocky_version": "10.2", "virtualbox_version": "7.2.18",
             "native_vtx": "PASS", "nem_detected": False,
         }
+        self.campaign_epoch = int(datetime.now(timezone.utc).timestamp())
         source_payloads = {
             "image_build": {"status": "PASS", "source_sha": ORIGINAL, "source_tree": ORIGINAL_TREE,
                             "sha256": BOX_SHA, "artifact": "rocky-10.2-rke2-virtualbox.box",
@@ -87,6 +89,23 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                 status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
                 reused_from={"source_sha": ORIGINAL, "input_digest": INPUTS,
                              "artifact_digest": BOX_SHA}),
+            "current_network_smoke": {
+                "status": "PASS", "resume_runner_source_sha": HEAD,
+                "campaign_id": "20260929T163821Z-9da62296f3d5",
+                "vm_name": "ecommerce-rocky-10-2-smoke-4e935faff986",
+                "virtualbox_backend": "NATIVE_VTX", "box_digest_verified": "PASS",
+                "box_digest": BOX_SHA, "packer": {"inputs_digest": INPUTS},
+                "guest_security": "PASS", "vm_recreate": "NOT_REQUIRED",
+                "cleanup": {"vm_preserved": True,
+                            "vm_name": "ecommerce-rocky-10-2-smoke-4e935faff986", "vm_id": UUID},
+                "checkpoints": {name: "PASS" for name in (
+                    "03-vm-smoke", "04-network-ssh", "05-rocky-runtime")},
+                "network_smoke": {"vm_name": "ecommerce-rocky-10-2-smoke-4e935faff986",
+                                  "tcp_22_ready": "PASS", "ssh_auth_ready": "PASS",
+                                  "remote_command_ready": "PASS", "rocky_runtime": "PASS",
+                                  "rocky_version": "10.2"},
+                "completed_at": datetime.fromtimestamp(self.campaign_epoch, timezone.utc).isoformat(),
+            },
             "backend_probe": {"schema_version": 1, "status": "PASS",
                               "head_sha": HEAD, "head_tree_sha": TREE,
                               "box_sha256": BOX_SHA, "vm_uuid": UUID,
@@ -116,6 +135,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                 "schema_version": 1, "status": "PASS", "head_sha": HEAD,
                 "head_tree_sha": TREE, "vm_uuid": UUID, "box_sha256": BOX_SHA,
                 "virtualbox_backend": "NATIVE_VTX",
+                "vm_memory_mib": 4096, "created_at_epoch": self.campaign_epoch,
                 "manifest_sha256": self.manifest_sha,
                 "actions": [
                     {"action": action, "status": "PASS", "duration_seconds": 1.0,
@@ -137,7 +157,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.evidence = {
             "schema_version": 1, "status": "PASS", "exact_commit_evidence": True,
             "runtime_execution": True, "head_sha": HEAD, "head_tree_sha": TREE,
-            "created_at_epoch": int(datetime.now(timezone.utc).timestamp()),
+            "created_at_epoch": self.campaign_epoch,
             "milestone": "M2.5", "environment": "lab", "outcome": "PASS",
             "runtime_identity": {"kind": "virtualbox-vm", "id": UUID},
             "vm_name": VM, "source_evidence": refs,
@@ -248,6 +268,46 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             virtualbox_backend="NEM", hypervisor_present=True))
         self.rewrite_source("campaign_result", lambda value: value.update(virtualbox_backend="NEM"))
         self.assertTrue(self.result()[0])
+
+    def test_current_runner_and_guest_security_must_have_native_smoke_proof(self):
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
+            resume_runner_source_sha=ORIGINAL))
+        self.assertFalse(self.result()[0])
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
+            resume_runner_source_sha=HEAD, guest_security="NOT_EXECUTED"))
+        self.assertFalse(self.result()[0])
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
+            guest_security="PASS", status="BLOCKED_RUNTIME", virtualbox_backend="NEM"))
+        self.assertFalse(self.result()[0])
+
+    def test_stale_source_campaign_cannot_be_refreshed_by_new_wrapper(self):
+        old_epoch = self.campaign_epoch - 90000
+        self.rewrite_source("campaign_result", lambda value: value.update(created_at_epoch=old_epoch))
+        self.evidence["created_at_epoch"] = int(datetime.now(timezone.utc).timestamp())
+        self.write()
+        self.assertFalse(self.result()[0])
+        self.evidence["created_at_epoch"] = old_epoch
+        self.write()
+        self.assertFalse(self.result()[0])
+
+    def test_created_proof_uses_source_campaign_time(self):
+        campaign_epoch = self.campaign_epoch - 300
+        self.rewrite_source("campaign_result", lambda value: value.update(created_at_epoch=campaign_epoch))
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
+            completed_at=datetime.fromtimestamp(campaign_epoch - 1, timezone.utc).isoformat()))
+        self.evidence["created_at_epoch"] = campaign_epoch
+        self.write()
+        m25.create(self.root, HEAD, TREE, VM)
+        created = json.loads(self.destination.read_text(encoding="utf-8"))
+        self.assertEqual(campaign_epoch, created["created_at_epoch"])
+
+    def test_supported_higher_memory_profile_and_mismatch(self):
+        self.rewrite_source("campaign_result", lambda value: value.update(vm_memory_mib=8192))
+        self.rewrite_source("backend_probe", lambda value: value.update(vm_memory_mib=8192))
+        self.rewrite_source("vm_preflight", lambda value: value.update(memory_kib=7800000))
+        self.assertTrue(self.result()[0])
+        self.rewrite_source("backend_probe", lambda value: value.update(vm_memory_mib=4096))
+        self.assertFalse(self.result()[0])
 
     def test_native_qualification_may_reuse_original_packer_bytes_honestly(self):
         self.rewrite_source("image_build", lambda value: value.update(

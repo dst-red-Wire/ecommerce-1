@@ -111,6 +111,8 @@ Canonical tracker: GitHub issue `#32`.
 
 Bootstrap the persistent management plane from the canonical V5 contracts. M2.5 must be PROVEN before M3 starts.
 
+The M2.5 exit gate proves the persistent MGMT bootstrap in the isolated Rocky/RKE2 lab and establishes readiness for real provisioning. It does not assert that the six-node target is deployed: `deployment_state=NOT_DEPLOYED`, paid resources remain zero, and real target and service inputs remain pending.
+
 ### M3 — PREPROD Infrastructure
 
 Canonical tracker: GitHub issue `#16`.
