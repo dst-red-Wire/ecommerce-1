@@ -174,6 +174,7 @@ if ($Action -eq 'Resume') {
         Start-Sleep -Seconds $delay
     }
     Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
+    $result.virtualbox_backend = Get-LabBackend -LogPath (Join-Path $network.diagnostics_directory 'VBox.log')
     $result.network_smoke = $network
     if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') {
         $result.resume_runner_source_sha = $RunnerSourceSha
@@ -184,8 +185,8 @@ if ($Action -eq 'Resume') {
     $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
     $result.resume_from = if ($network.remote_command_ready -ne 'PASS') { '04-network-ssh' } elseif ($network.rocky_runtime -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
     $result.vm_recreate = 'NOT_REQUIRED'
-    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } elseif ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
-    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 'NEM diagnostic only; native VT-x qualification remains pending' } else { $null }
+    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } elseif ($result.virtualbox_backend -ne 'NATIVE_VTX' -or (Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
+    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.status -eq 'BLOCKED_RUNTIME') { "VirtualBox backend $($result.virtualbox_backend); native VT-x qualification remains pending" } else { $null }
     $result.cleanup.reason = $result.error
     $result.completed_at = [DateTime]::UtcNow.ToString('o')
     Write-Utf8Json -InputObject $result -Path $resultPath
