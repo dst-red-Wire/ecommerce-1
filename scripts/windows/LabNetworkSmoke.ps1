@@ -145,9 +145,22 @@ if ($Action -eq 'Resume') {
     }
     $environment = @{ VAGRANT_HOME = (Join-Path $smokeRoot 'vagrant-home'); VAGRANT_CHECKPOINT_DISABLE = '1'; VAGRANT_DEFAULT_PROVIDER = 'virtualbox'; VAGRANT_NO_PLUGINS = '1' }
     $status = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('status','--machine-readable') -TimeoutSeconds 45 -WorkingDirectory $smokeRoot -Environment $environment
-    if ($status.ExitCode -ne 0 -or $status.StdOut -notmatch '(?m),default,state,running\s*$') {
-        throw 'Network SSH resume VM is not running; no SSH probe was attempted'
+    if ($status.ExitCode -ne 0) { throw 'Network SSH resume could not read Vagrant VM state' }
+    $vmState = if ($status.StdOut -match '(?m),default,state,([a-z_]+)\s*$') { $Matches[1] } else { '' }
+    if ($vmState -in @('poweroff','saved','aborted')) {
+        $start = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up','--provider','virtualbox','--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $environment
+        Assert-ProcessSuccess -Result $start -Operation 'restart the retained network-smoke VM'
+        $afterStart = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
+        if (-not $afterStart.ContainsKey([string]$result.vm_name) -or
+            ([string]$afterStart[[string]$result.vm_name]).Trim('{}') -ine [string]$result.cleanup.vm_id) {
+            throw 'Network SSH resume changed the retained VirtualBox VM identity'
+        }
+        $vmRestart = 'EXECUTED_EXISTING_VM'
     }
+    elseif ($vmState -eq 'running') { $vmRestart = 'NOT_REQUIRED' }
+    else { throw "Network SSH resume refuses Vagrant VM state $vmState" }
+    if ($result.PSObject.Properties.Name -contains 'vm_restart') { $result.vm_restart = $vmRestart }
+    else { $result | Add-Member -NotePropertyName vm_restart -NotePropertyValue $vmRestart }
     $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
     Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
     $network = New-NativeSshSmokeEvidence -VmName $result.vm_name -User 'packer' -EvidenceDirectory (Join-Path $stage "logs\ssh-resume-$attempt")
@@ -173,6 +186,7 @@ if ($Action -eq 'Resume') {
     $result.vm_recreate = 'NOT_REQUIRED'
     $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } elseif ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
     $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 'NEM diagnostic only; native VT-x qualification remains pending' } else { $null }
+    $result.cleanup.reason = $result.error
     $result.completed_at = [DateTime]::UtcNow.ToString('o')
     Write-Utf8Json -InputObject $result -Path $resultPath
     [Console]::WriteLine("LAB_NETWORK_RESUME=$($result.status) campaign=$($prepared.campaign_id) evidence=$resultPath")
@@ -193,7 +207,7 @@ $result = [ordered]@{
     network_smoke = $null
     checkpoints = [ordered]@{ '03-vm-smoke' = 'NOT_EXECUTED'; '04-network-ssh' = 'NOT_EXECUTED'; '05-rocky-runtime' = 'NOT_EXECUTED' }
     resume_from = '03-vm-smoke'; vm_recreate = 'REQUIRED_MISSING_VM'
-    resume_runner_source_sha = $null
+    resume_runner_source_sha = $null; vm_restart = 'NOT_EXECUTED'
     timings = [ordered]@{ box_import_seconds = $null; vm_boot_seconds = $null; network_readiness_seconds = $null; ssh_readiness_seconds = $null; cleanup_seconds = $null }
     guest_security = 'NOT_EXECUTED'
     cleanup = [ordered]@{ policy = if ($retainVm) { 'retain_until_explicit_clean' } elseif ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; vm_id = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
