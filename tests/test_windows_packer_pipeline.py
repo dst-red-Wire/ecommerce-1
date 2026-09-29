@@ -117,6 +117,17 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         )
         self.assertEqual(0, cycle.returncode, cycle.stdout + cycle.stderr)
 
+    def test_windows_seed_server_survives_empty_optional_response(self):
+        powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        if not powershell.is_file():
+            self.skipTest("Windows PowerShell 5.1 interop is unavailable")
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "tests/windows/SeedServer.Tests.ps1"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_native_storage_gc_contract(self):
         policy = yaml.safe_load((ROOT / "config/contracts/vm-lifecycle-policy.yaml").read_text())
         gc = policy["storage_gc"]
