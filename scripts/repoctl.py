@@ -9855,6 +9855,7 @@ def lab_network_status(campaign_id: str) -> int:
         "source_sha": result.get("source_git_sha"),
         "vm_name": vm_name,
         "vm_state": vm_state,
+        "virtualbox_backend": result.get("virtualbox_backend"),
         "ssh_host": network.get("address"),
         "ssh_port": network.get("port"),
         "ssh_user": network.get("user"),
@@ -9872,6 +9873,7 @@ def lab_network_status(campaign_id: str) -> int:
         "checkpoints": result.get("checkpoints"),
         "resume_from": result.get("resume_from"),
         "resume_runner_source_sha": result.get("resume_runner_source_sha"),
+        "resume_seed_server": result.get("resume_seed_server"),
         "failure_code": network.get("failure_code"),
         "evidence": str(evidence),
     }, sort_keys=True))

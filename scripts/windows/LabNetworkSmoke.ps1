@@ -147,33 +147,54 @@ if ($Action -eq 'Resume') {
     $status = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('status','--machine-readable') -TimeoutSeconds 45 -WorkingDirectory $smokeRoot -Environment $environment
     if ($status.ExitCode -ne 0) { throw 'Network SSH resume could not read Vagrant VM state' }
     $vmState = if ($status.StdOut -match '(?m),default,state,([a-z_]+)\s*$') { $Matches[1] } else { '' }
-    if ($vmState -in @('poweroff','saved','aborted')) {
-        $start = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up','--provider','virtualbox','--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $environment
-        Assert-ProcessSuccess -Result $start -Operation 'restart the retained network-smoke VM'
-        $afterStart = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
-        if (-not $afterStart.ContainsKey([string]$result.vm_name) -or
-            ([string]$afterStart[[string]$result.vm_name]).Trim('{}') -ine [string]$result.cleanup.vm_id) {
-            throw 'Network SSH resume changed the retained VirtualBox VM identity'
+    $resumeSeedRoot = Join-Path $smokeRoot 'seed'
+    $resumeSeedStarted = $false
+    $resumeSeedStatus = 'NOT_REQUIRED'
+    try {
+        if ($vmState -in @('poweroff','saved','aborted')) {
+            if (-not ($runtime.PSObject.Properties.Name -contains 'seed_port') -or
+                [int]$runtime.seed_port -lt 1024 -or [int]$runtime.seed_port -gt 65535) {
+                throw 'Network SSH resume requires the retained NoCloud seed port'
+            }
+            $seedStart = Invoke-BoundedProcess -FilePath $powershell -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Start','-SeedRoot',$resumeSeedRoot,'-Port',[string]$runtime.seed_port) -TimeoutSeconds 30 -WorkingDirectory $stage
+            Assert-ProcessSuccess -Result $seedStart -Operation 'retained NoCloud seed server start'
+            $resumeSeedStarted = $true
+            $start = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('up','--provider','virtualbox','--no-provision') -TimeoutSeconds 900 -WorkingDirectory $smokeRoot -Environment $environment
+            Assert-ProcessSuccess -Result $start -Operation 'restart the retained network-smoke VM'
+            $afterStart = Get-VBoxMachines -VBoxManage $vbox -WorkingDirectory $smokeRoot
+            if (-not $afterStart.ContainsKey([string]$result.vm_name) -or
+                ([string]$afterStart[[string]$result.vm_name]).Trim('{}') -ine [string]$result.cleanup.vm_id) {
+                throw 'Network SSH resume changed the retained VirtualBox VM identity'
+            }
+            $vmRestart = 'EXECUTED_EXISTING_VM'
         }
-        $vmRestart = 'EXECUTED_EXISTING_VM'
+        elseif ($vmState -eq 'running') { $vmRestart = 'NOT_REQUIRED' }
+        else { throw "Network SSH resume refuses Vagrant VM state $vmState" }
+        if ($result.PSObject.Properties.Name -contains 'vm_restart') { $result.vm_restart = $vmRestart }
+        else { $result | Add-Member -NotePropertyName vm_restart -NotePropertyValue $vmRestart }
+        $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+        Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
+        $network = New-NativeSshSmokeEvidence -VmName $result.vm_name -User 'packer' -EvidenceDirectory (Join-Path $stage "logs\ssh-resume-$attempt")
+        $network.vagrant_up_started_at = [DateTime]::UtcNow.ToString('o')
+        $network.vagrant_ready = 'PASS'
+        $network.vagrant_ready_at = $network.vagrant_up_started_at
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        foreach ($delay in @(2,3,5,8,10,10,10,10)) {
+            Update-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -VmName $result.vm_name -WorkingDirectory $smokeRoot -PrivateKey $privateKey -SshExecutable $ssh
+            if ($network.ssh_auth_ready -eq 'PASS' -or [DateTime]::UtcNow -ge $deadline) { break }
+            Start-Sleep -Seconds $delay
+        }
+        Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
     }
-    elseif ($vmState -eq 'running') { $vmRestart = 'NOT_REQUIRED' }
-    else { throw "Network SSH resume refuses Vagrant VM state $vmState" }
-    if ($result.PSObject.Properties.Name -contains 'vm_restart') { $result.vm_restart = $vmRestart }
-    else { $result | Add-Member -NotePropertyName vm_restart -NotePropertyValue $vmRestart }
-    $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-    Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
-    $network = New-NativeSshSmokeEvidence -VmName $result.vm_name -User 'packer' -EvidenceDirectory (Join-Path $stage "logs\ssh-resume-$attempt")
-    $network.vagrant_up_started_at = [DateTime]::UtcNow.ToString('o')
-    $network.vagrant_ready = 'PASS'
-    $network.vagrant_ready_at = $network.vagrant_up_started_at
-    $deadline = [DateTime]::UtcNow.AddSeconds(60)
-    foreach ($delay in @(2,3,5,8,10,10,10,10)) {
-        Update-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -VmName $result.vm_name -WorkingDirectory $smokeRoot -PrivateKey $privateKey -SshExecutable $ssh
-        if ($network.ssh_auth_ready -eq 'PASS' -or [DateTime]::UtcNow -ge $deadline) { break }
-        Start-Sleep -Seconds $delay
+    finally {
+        if ($resumeSeedStarted) {
+            $seedStop = Invoke-BoundedProcess -FilePath $powershell -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$seedServer,'-Action','Stop','-SeedRoot',$resumeSeedRoot,'-Port',[string]$runtime.seed_port) -TimeoutSeconds 30 -WorkingDirectory $stage
+            Assert-ProcessSuccess -Result $seedStop -Operation 'retained NoCloud seed server stop'
+            $resumeSeedStatus = 'PASS'
+        }
     }
-    Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
+    if ($result.PSObject.Properties.Name -contains 'resume_seed_server') { $result.resume_seed_server = $resumeSeedStatus }
+    else { $result | Add-Member -NotePropertyName resume_seed_server -NotePropertyValue $resumeSeedStatus }
     $result.virtualbox_backend = Get-LabBackend -LogPath (Join-Path $network.diagnostics_directory 'VBox.log')
     $result.network_smoke = $network
     if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') {
