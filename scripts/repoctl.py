@@ -9802,12 +9802,29 @@ def lab_network_action(action: str, campaign_id: str) -> int:
     runner = stage / "scripts/windows/LabNetworkSmoke.ps1"
     if not runner.is_file():
         return fail(f"network-smoke campaign is absent: {campaign_id}")
+    runner_source_sha = ""
+    if action == "Resume":
+        import rocky_box_catalog
+
+        if output(["git", "status", "--porcelain"]).strip():
+            return fail("network SSH resume requires a clean exact-SHA worktree")
+        runner_source_sha = output(["git", "rev-parse", "HEAD"]).strip()
+        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8"))
+        box_path = Path(output(["wslpath", "-u", prepared["box_path"]]).strip())
+        try:
+            rocky_box_catalog.verify(box_path, runner_source_sha)
+        except (OSError, KeyError, ValueError) as exc:
+            return fail(f"network SSH resume box no longer matches current image inputs: {exc}")
+        runner = ROOT / "scripts/windows/LabNetworkSmoke.ps1"
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     stage_windows = output(["wslpath", "-w", str(stage)]).strip()
     runner_windows = output(["wslpath", "-w", str(runner)]).strip()
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows]
+    if action == "Resume":
+        command.extend(["-RunnerSourceSha", runner_source_sha])
     return run(
-        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows],
+        command,
         cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
     ).returncode
 
@@ -9854,6 +9871,7 @@ def lab_network_status(campaign_id: str) -> int:
         "artifacts_retained": (result.get("cleanup") or {}).get("vm_preserved"),
         "checkpoints": result.get("checkpoints"),
         "resume_from": result.get("resume_from"),
+        "resume_runner_source_sha": result.get("resume_runner_source_sha"),
         "failure_code": network.get("failure_code"),
         "evidence": str(evidence),
     }, sort_keys=True))

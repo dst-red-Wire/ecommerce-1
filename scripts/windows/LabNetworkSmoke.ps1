@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][ValidateSet('Run', 'Resume', 'Clean')][string]$Action,
-    [Parameter(Mandatory = $true)][string]$StageRoot
+    [Parameter(Mandatory = $true)][string]$StageRoot,
+    [string]$RunnerSourceSha = ''
 )
 
 Set-StrictMode -Version Latest
@@ -110,6 +111,9 @@ if ($Action -eq 'Clean') {
 }
 
 if ($Action -eq 'Resume') {
+    if ($RunnerSourceSha -notmatch '^[0-9a-f]{40}$') {
+        throw 'Network SSH resume requires the exact clean runner source SHA'
+    }
     $result = Read-JsonFile $resultPath
     if ($result.campaign_id -ne $prepared.campaign_id -or
         $result.status -notin @('DIAGNOSTIC_PRESERVED','PASS','BLOCKED_RUNTIME') -or
@@ -158,6 +162,7 @@ if ($Action -eq 'Resume') {
     }
     Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
     $result.network_smoke = $network
+    $result.resume_runner_source_sha = $RunnerSourceSha
     $result.checkpoints.'03-vm-smoke' = 'PASS'
     $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS') { 'PASS' } else { 'FAIL' }
     $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }

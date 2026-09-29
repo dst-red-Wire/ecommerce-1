@@ -310,7 +310,7 @@ function Complete-NativeSshSmokeEvidence {
         try {
             $os = Invoke-NativeDirectSshProbe -SshExecutable $SshExecutable -Address $Evidence.address -Port $Evidence.port -User $Evidence.user -PrivateKey $PrivateKey -WorkingDirectory $WorkingDirectory -Command 'cat /etc/os-release'
             [IO.File]::WriteAllText((Join-Path $diagnostics 'os-release.txt'), "exit=$($os.ExitCode)`n$($os.StdOut)`n$($os.StdErr)")
-            if ($os.ExitCode -eq 0 -and $os.StdOut -match '(?m)^ID=rocky\s*$' -and
+            if ($os.ExitCode -eq 0 -and $os.StdOut -match '(?m)^ID="?rocky"?\s*$' -and
                 $os.StdOut -match '(?m)^VERSION_ID="?10\.2"?\s*$') {
                 $Evidence.rocky_runtime = 'PASS'
                 $Evidence.rocky_version = '10.2'

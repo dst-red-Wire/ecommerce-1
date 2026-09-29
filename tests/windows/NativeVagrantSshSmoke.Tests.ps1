@@ -30,7 +30,7 @@ function Invoke-BoundedProcess {
                     return [pscustomobject]@{ ExitCode = 0; StdOut = 'REMOTE_COMMAND_OK'; StdErr = '' }
                 }
                 if ($Arguments[-1] -eq 'cat /etc/os-release') {
-                    return [pscustomobject]@{ ExitCode = 0; StdOut = "ID=rocky`nVERSION_ID=`"10.2`""; StdErr = '' }
+                    return [pscustomobject]@{ ExitCode = 0; StdOut = "ID=`"rocky`"`nVERSION_ID=`"10.2`""; StdErr = '' }
                 }
                 throw 'Unexpected direct SSH command'
             }
