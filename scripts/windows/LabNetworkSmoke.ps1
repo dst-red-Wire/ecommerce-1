@@ -204,7 +204,8 @@ try {
     catch [IO.IOException] { throw 'BLOCKED_RUNTIME another network smoke holds the laboratory runtime lock' }
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem
     $processors = @(Get-CimInstance -ClassName Win32_Processor)
-    if (($computer.HypervisorPresent -and -not $diagnosticNem) -or $processors.Count -eq 0 -or @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -gt 0) {
+    $firmwareStates = @($processors | ForEach-Object { $_.VirtualizationFirmwareEnabled -eq $true })
+    if (-not (Test-LabVirtualizationReady -HypervisorPresent $computer.HypervisorPresent -DiagnosticNem $diagnosticNem -FirmwareEnabled $firmwareStates)) {
         throw 'BLOCKED_RUNTIME native VT-x is unavailable in this Windows boot'
     }
     $identity = Invoke-BoundedProcess -FilePath $powershell -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'LabSshIdentity.ps1'),'-Action','Verify') -TimeoutSeconds 30 -WorkingDirectory $stage

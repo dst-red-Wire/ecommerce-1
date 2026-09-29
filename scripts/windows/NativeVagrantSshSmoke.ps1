@@ -46,6 +46,13 @@ function Convert-VBoxStateTimeToUtc {
     return $parsed.UtcDateTime.ToString('o')
 }
 
+function Test-LabVirtualizationReady {
+    param([bool]$HypervisorPresent, [bool]$DiagnosticNem, [bool[]]$FirmwareEnabled)
+    if ($FirmwareEnabled.Count -eq 0) { return $false }
+    if ($HypervisorPresent) { return $DiagnosticNem }
+    return @($FirmwareEnabled | Where-Object { -not $_ }).Count -eq 0
+}
+
 function Get-NativeLastErrorLine {
     param([string]$StdErr, [string]$StdOut)
     $source = if ($StdErr.Trim()) { $StdErr } else { $StdOut }

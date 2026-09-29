@@ -49,6 +49,13 @@ function Invoke-BoundedProcess {
 
 function Test-NativeTcpPort { param($Address, $Port, [ref]$ErrorClass) if ($script:FixtureMode -eq 'tcp_unavailable') { $ErrorClass.Value = 'CONNECTION_REFUSED'; return $false }; return $true }
 
+if (-not (Test-LabVirtualizationReady -HypervisorPresent $true -DiagnosticNem $true -FirmwareEnabled @($false)) -or
+    (Test-LabVirtualizationReady -HypervisorPresent $true -DiagnosticNem $false -FirmwareEnabled @($true)) -or
+    (Test-LabVirtualizationReady -HypervisorPresent $false -DiagnosticNem $false -FirmwareEnabled @($false)) -or
+    -not (Test-LabVirtualizationReady -HypervisorPresent $false -DiagnosticNem $false -FirmwareEnabled @($true))) {
+    throw 'Native VT-x and NEM diagnostic virtualization preflight are conflated'
+}
+
 $script:FixtureRoot = Join-Path $env:TEMP ('native-ssh-smoke-' + [Guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $script:FixtureRoot -Force)
 $script:FixtureKey = Join-Path $script:FixtureRoot 'id_ed25519'
