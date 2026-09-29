@@ -162,7 +162,10 @@ if ($Action -eq 'Resume') {
     }
     Complete-NativeSshSmokeEvidence -Evidence $network -VBoxManage $vbox -Vagrant $vagrant -VmName $result.vm_name -WorkingDirectory $smokeRoot -Environment $environment -PrivateKey $privateKey -SshExecutable $ssh -VagrantUpResult $null
     $result.network_smoke = $network
-    $result.resume_runner_source_sha = $RunnerSourceSha
+    if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') {
+        $result.resume_runner_source_sha = $RunnerSourceSha
+    }
+    else { $result | Add-Member -NotePropertyName resume_runner_source_sha -NotePropertyValue $RunnerSourceSha }
     $result.checkpoints.'03-vm-smoke' = 'PASS'
     $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS') { 'PASS' } else { 'FAIL' }
     $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
@@ -190,6 +193,7 @@ $result = [ordered]@{
     network_smoke = $null
     checkpoints = [ordered]@{ '03-vm-smoke' = 'NOT_EXECUTED'; '04-network-ssh' = 'NOT_EXECUTED'; '05-rocky-runtime' = 'NOT_EXECUTED' }
     resume_from = '03-vm-smoke'; vm_recreate = 'REQUIRED_MISSING_VM'
+    resume_runner_source_sha = $null
     timings = [ordered]@{ box_import_seconds = $null; vm_boot_seconds = $null; network_readiness_seconds = $null; ssh_readiness_seconds = $null; cleanup_seconds = $null }
     guest_security = 'NOT_EXECUTED'
     cleanup = [ordered]@{ policy = if ($retainVm) { 'retain_until_explicit_clean' } elseif ($prepared.keep_failed_vm) { 'preserve_on_failure' } else { 'destroy_always' }; status = 'NOT_EXECUTED'; vm_preserved = $false; vm_name = $null; vm_id = $null; reason = $null; seed_server = 'NOT_EXECUTED'; lock = 'NOT_EXECUTED' }
