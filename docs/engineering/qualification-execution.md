@@ -8,8 +8,10 @@ rules and the checkpoint model. The single checkpoint schema is
 `config/contracts/qualification-step-evidence.schema.json`.
 
 An expensive step requires a PASS preflight with capacity and environment checks
-bound to the same source SHA and qualification input digest. FULL work requires a
-PASS SMOKE checkpoint with a present, digest-verified runtime evidence file. A
+bound to the same source SHA and qualification input digest. Every declared graph
+predecessor needs a compatible checkpoint; runtime predecessors need a present,
+digest-verified runtime evidence file. FULL work requires the complete transitive
+SMOKE chain. A
 PASS declaration alone cannot authorize FULL. A checkpoint records the step,
 exact source SHA, input digest, status, timestamps, duration, and executed/reused
 metrics. The only reuse status is `SKIPPED_REUSED_VERIFIED`, with a matching
@@ -24,6 +26,9 @@ work, and cleanup requires the completed action sequence and retained runtime
 result files. The offline artifact role checks the digest-specific target before
 transfer; matching content skips the full copy, and transferred bytes are checked
 again before installation.
+Checkpoint files are diagnostic records. A failed campaign starts over; the
+workflow does not reload checkpoints or claim resumable execution. The initial
+offline role trial runs before diagnostic RPM installation so it remains cold.
 
 `python3 scripts/repoctl.py qualification-impact --base <sha> --head <sha>`
 uses the repository's existing affected-component classifier, then the workflow

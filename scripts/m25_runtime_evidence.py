@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,19 @@ NETWORK_SMOKE = Path(".context/evidence/network-smoke/current.json")
 NETWORK_RUNNER_FILES = (
     "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1", "NativeVagrantSshSmoke.ps1",
     "LabNetworkSeed.ps1", "LabSshIdentity.ps1", "local-services-seed-server.ps1",
+)
+IMAGE_QUALIFICATION_FILES = (
+    "scripts/windows/native-vtx-cycle.ps1",
+    "scripts/windows/native-cycle-launch.ps1",
+    "scripts/windows/qualify-rocky-image.ps1",
+    "scripts/windows/RockyImagePipeline.psm1",
+    "scripts/windows/NativeVagrantSshSmoke.ps1",
+    "scripts/windows/LabNetworkSeed.ps1",
+    "scripts/windows/LabSshIdentity.ps1",
+    "scripts/windows/local-services-seed-server.ps1",
+    "platform/vagrant/rocky-image-smoke/Vagrantfile",
+    "scripts/validate_guest_smoke_commands.py",
+    "config/contracts/machine-image-lock.yaml",
 )
 
 
@@ -65,6 +79,16 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def _qualification_sources_match(root: Path, qualified_sha: str, head: str) -> bool:
+    result = subprocess.run(
+        ["git", "diff", "--quiet", qualified_sha, head, "--", *IMAGE_QUALIFICATION_FILES],
+        cwd=root, capture_output=True, check=False,
+    )
+    if result.returncode not in {0, 1}:
+        raise ValueError("M2.5 native qualification source comparison failed")
+    return result.returncode == 0
+
+
 def _sources(root: Path, evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
     vm_name = evidence.get("vm_name")
     _require(isinstance(vm_name, str), "M2.5 VM name missing")
@@ -93,6 +117,7 @@ def _sources(root: Path, evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifest: dict[str, Any]) -> None:
     """Require the exact current runner and its native guest-security result."""
+    _require(isinstance(smoke, dict), "M2.5 current network smoke is malformed")
     runner_files = smoke.get("resume_runner_files")
     _require(isinstance(runner_files, dict) and set(runner_files) == set(NETWORK_RUNNER_FILES),
              "M2.5 current network runner inventory is incomplete")
@@ -100,6 +125,10 @@ def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifes
         runner = root / "scripts/windows" / name
         _require(runner.is_file() and runner_files[name] == _digest(runner),
                  f"M2.5 current network runner bytes differ: {name}")
+    vagrantfile = root / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+    _require(vagrantfile.is_file()
+             and smoke.get("resume_vagrantfile_sha256") == _digest(vagrantfile),
+             "M2.5 retained VM Vagrantfile differs from the current source")
     smoke_checks = smoke.get("network_smoke")
     smoke_packer = smoke.get("packer")
     smoke_cleanup = smoke.get("cleanup")
@@ -138,6 +167,12 @@ def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifes
 
 def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None:
     """Raise on any missing, stale-by-identity, or contradictory runtime source."""
+    _require(evidence.get("schema_version") == 1 and evidence.get("status") == "PASS"
+             and evidence.get("milestone") == "M2.5" and evidence.get("environment") == "lab"
+             and evidence.get("outcome") == "PASS"
+             and evidence.get("exact_commit_evidence") is True
+             and evidence.get("runtime_execution") is True,
+             "M2.5 lab evidence identity or outcome is invalid")
     _require(evidence.get("head_sha") == head and evidence.get("head_tree_sha") == tree,
              "M2.5 proof has wrong source SHA or tree")
     identity = evidence.get("runtime_identity")
@@ -193,11 +228,17 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
     release = sources["image_release"]
     native_import = sources["native_import"]
     native_result = sources["native_result"]
+    native_smoke = native_result.get("vagrant_smoke")
+    native_observations = native_result.get("observations")
+    _require(isinstance(native_smoke, dict) and isinstance(native_observations, dict),
+             "M2.5 native qualification observations are malformed")
     qualification_sha = build.get("source_sha")
     _require(isinstance(qualification_sha, str)
              and rocky_box_catalog.GIT_SHA.fullmatch(qualification_sha) is not None,
              "M2.5 native image qualification source SHA is invalid")
     qualification_tree = rocky_box_catalog.source_tree(qualification_sha)
+    _require(_qualification_sources_match(root, qualification_sha, head),
+             "M2.5 native image qualification logic changed since its execution")
     for name, payload in (("image build", build), ("image qualification", qualified),
                           ("image release", release)):
         _require(payload.get("status") == "PASS" and payload.get("source_sha") == qualification_sha,
@@ -259,8 +300,8 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and native_result.get("nem_detected") is False
              and native_result.get("virtualbox_backend") == "NATIVE_VTX"
              and native_packer.get("build") == packer_mode
-             and native_result.get("vagrant_smoke", {}).get("rocky_version") == "PASS"
-             and "Rocky Linux release 10.2" in str(native_result.get("observations", {}).get("rocky_version", "")),
+             and native_smoke.get("rocky_version") == "PASS"
+             and "Rocky Linux release 10.2" in str(native_observations.get("rocky_version", "")),
              "M2.5 original native Rocky 10.2 execution proof is invalid")
     source = sources["server_source"]
     preflight = sources["vm_preflight"]
@@ -349,7 +390,7 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and campaign.get("manifest_sha256") == lock["approved_manifest_sha256"]
              and isinstance(actions, list)
              and [item.get("action") for item in actions if isinstance(item, dict)] == [
-                 "validate", "create", "diagnostics", "test", "server", "server", "restage",
+                 "validate", "create", "test", "diagnostics", "server", "server", "restage",
                  "tamper", "restage", "server", "destroy",
              ]
              and len(actions) == 11

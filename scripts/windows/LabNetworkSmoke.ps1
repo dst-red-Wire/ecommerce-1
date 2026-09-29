@@ -136,6 +136,12 @@ if ($Action -eq 'Resume') {
         $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
         throw 'Network SSH resume requires an owned preserved VM and matching campaign'
     }
+    $stagedVagrantfile = Join-Path $stage 'platform\vagrant\rocky-image-smoke\Vagrantfile'
+    $runtimeVagrantfile = Join-Path $smokeRoot 'Vagrantfile'
+    $vagrantfileDigest = Get-FileSha256 -Path $stagedVagrantfile
+    if ((Get-FileSha256 -Path $runtimeVagrantfile) -ne $vagrantfileDigest) {
+        throw 'Network SSH resume VM Vagrantfile differs from the verified campaign input'
+    }
     $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
     Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
     $result.status = 'DIAGNOSTIC_PRESERVED'
@@ -145,6 +151,8 @@ if ($Action -eq 'Resume') {
     $result.resume_from = '04-network-ssh'
     if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') { $result.resume_runner_source_sha = $RunnerSourceSha }
     else { $result | Add-Member -NotePropertyName resume_runner_source_sha -NotePropertyValue $RunnerSourceSha }
+    if ($result.PSObject.Properties.Name -contains 'resume_vagrantfile_sha256') { $result.resume_vagrantfile_sha256 = $vagrantfileDigest }
+    else { $result | Add-Member -NotePropertyName resume_vagrantfile_sha256 -NotePropertyValue $vagrantfileDigest }
     $runnerNames = @('LabNetworkSmoke.ps1','RockyImagePipeline.psm1','NativeVagrantSshSmoke.ps1','LabNetworkSeed.ps1','LabSshIdentity.ps1','local-services-seed-server.ps1')
     $runnerFiles = @{}
     foreach ($name in $runnerNames) { $runnerFiles[$name] = Get-FileSha256 -Path (Join-Path $PSScriptRoot $name) }
@@ -247,6 +255,10 @@ if ($Action -eq 'Resume') {
         if ((Get-FileSha256 -Path (Join-Path $PSScriptRoot $name)) -ne $runnerFiles[$name]) {
             throw "Network SSH resume runner input changed during execution: $name"
         }
+    }
+    if ((Get-FileSha256 -Path $stagedVagrantfile) -ne $vagrantfileDigest -or
+        (Get-FileSha256 -Path $runtimeVagrantfile) -ne $vagrantfileDigest) {
+        throw 'Network SSH resume VM Vagrantfile changed during execution'
     }
     Write-Utf8Json -InputObject $result -Path $resultPath
     $resumeExitCode = if ($result.status -eq 'PASS') { 0 } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 2 } else { 1 }

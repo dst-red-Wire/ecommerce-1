@@ -51,7 +51,7 @@ def validate_policy(policy: dict, root: Path) -> dict:
         "evidence_schema": "config/contracts/qualification-step-evidence.schema.json",
         "preflight_before_expensive_work": "required", "fail_fast": True,
         "capacity_check": "required", "environment_check": "required",
-        "checkpointed": True, "resumable": True, "bounded": True,
+        "checkpointed": True, "resumable": False, "bounded": True,
         "reuse_identity": "digest", "source_sha_required": True,
         "input_digest_required": True, "artifact_digest_required_when_applicable": True,
         "mutable_identity": "forbidden", "selective_invalidation": True,
@@ -281,26 +281,31 @@ def guard_start(*, qualification: str, step: str, graph: dict, source_sha: str, 
         validate_checkpoint(preflight, source_sha=source_sha, input_digest=input_digest)
         _require(preflight["qualification"] == qualification, "preflight belongs to another qualification")
         _require(preflight["status"] == "PASS", "expensive work requires preflight PASS")
+    predecessors: set[str] = set()
+    pending = list(spec["depends_on"])
+    while pending:
+        predecessor = pending.pop()
+        if predecessor not in predecessors:
+            predecessors.add(predecessor)
+            pending.extend(graph[predecessor]["depends_on"])
     if spec["level"] == "full":
         _require(final_candidate, "FULL is reserved for the final candidate")
-        predecessors: set[str] = set()
-        pending = list(spec["depends_on"])
-        while pending:
-            predecessor = pending.pop()
-            if predecessor not in predecessors:
-                predecessors.add(predecessor)
-                pending.extend(graph[predecessor]["depends_on"])
-        smoke_names = sorted(name for name in predecessors if graph[name]["level"] == "smoke")
-        _require(bool(smoke_names), "FULL requires compatible SMOKE PASS")
-        for name in smoke_names:
-            smoke = checkpoints.get(name)
-            _require(isinstance(smoke, dict), f"FULL requires {name} SMOKE PASS")
-            validate_checkpoint(smoke, source_sha=source_sha, input_digest=input_digest,
-                                runtime_required=True)
-            _require(smoke["step"] == name, f"SMOKE checkpoint identity differs: {name}")
-            _require(smoke["qualification"] == qualification,
-                     "SMOKE belongs to another qualification")
-            _require(smoke["status"] == "PASS", "FULL requires compatible SMOKE PASS")
+        _require(any(graph[name]["level"] == "smoke" for name in predecessors),
+                 "FULL requires compatible SMOKE PASS")
+    for name in sorted(predecessors):
+        predecessor_spec = graph[name]
+        record = checkpoints.get(name)
+        _require(isinstance(record, dict), f"{step} requires {name} predecessor checkpoint")
+        validate_checkpoint(record, source_sha=source_sha, input_digest=input_digest,
+                            runtime_required=predecessor_spec["level"] != "static")
+        _require(record["step"] == name and record["qualification"] == qualification,
+                 f"predecessor checkpoint identity differs: {name}")
+        _require(record["status"] in ({"PASS"} if name == "preflight" or predecessor_spec["level"] == "smoke"
+                                      else {"PASS", "SKIPPED_REUSED_VERIFIED"}),
+                 f"{step} requires {name} predecessor PASS")
+        if "artifact" in predecessor_spec:
+            _require("artifact_digest" in record,
+                     f"{name} predecessor lacks artifact digest")
 
 
 def guard_transfer(*, source_digest: str, target_digest: str | None,

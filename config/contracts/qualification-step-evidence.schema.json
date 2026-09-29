@@ -51,7 +51,7 @@
      "then": {"required": ["artifact_digest", "reused_from"], "properties": {"executed": {"const": false}, "reused": {"const": true}, "cache_hit": {"const": true}}}},
     {"if": {"properties": {"reused": {"const": true}}, "required": ["reused"]},
      "then": {"required": ["artifact_digest", "reused_from"], "properties": {"status": {"const": "SKIPPED_REUSED_VERIFIED"}}}},
-    {"if": {"properties": {"step": {"const": "preflight"}}, "required": ["step"]},
+    {"if": {"properties": {"step": {"const": "preflight"}, "status": {"const": "PASS"}}, "required": ["step", "status"]},
      "then": {"required": ["preflight"]}}
   ]
 }

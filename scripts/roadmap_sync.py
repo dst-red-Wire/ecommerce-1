@@ -89,6 +89,7 @@ def policy() -> dict[str, Any]:
         or set(runtime_contract.get("required_fields", [])) != runtime_fields
         or runtime_contract.get("accepted_status") != "PASS"
         or runtime_contract.get("accepted_outcome") != "PASS"
+        or runtime_contract.get("m25_deployment_state") != "DEPLOYED"
         or runtime_contract.get("runtime_identity_required_fields") != ["kind", "id"]
     ):
         raise RuntimeError("roadmap runtime evidence contract is invalid")
@@ -363,6 +364,8 @@ def _runtime_evidence_result(
             m25_runtime_evidence.validate(root, evidence, head, tree)
         except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
             return False, f"M2.5 runtime sources are invalid: {exc}"
+        if evidence.get("deployment_state") != contract["m25_deployment_state"]:
+            return False, "M2.5 lab readiness does not prove persistent MGMT deployment"
     return True, relative
 
 

@@ -12,7 +12,7 @@ step_qualification:
   capacity_check: required
   environment_check: required
   checkpointed: true
-  resumable: true
+  resumable: false
   bounded: true
   reuse_identity: digest
   source_sha_required: true

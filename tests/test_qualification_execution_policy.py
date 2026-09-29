@@ -1139,8 +1139,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             [
                 "vm_action=validate",
                 "vm_action=create",
-                "vm_action=diagnostics",
                 "vm_action=test",
+                "vm_action=diagnostics",
                 "vm_action=server",
                 "vm_action=server",
                 "vm_action=restage",
@@ -2167,6 +2167,7 @@ class QualificationStepGuardTests(unittest.TestCase):
 
     def test_policy_schema_rejects_missing_version_unknown_rule_and_status(self):
         policy = MOD.qualification_execution_policy()
+        self.assertFalse(policy["step_qualification"]["resumable"])
         for mutation in (
             lambda value: value.pop("version"),
             lambda value: value.update(kind="WrongKind"),
@@ -2179,11 +2180,25 @@ class QualificationStepGuardTests(unittest.TestCase):
             with self.subTest(altered=altered.get("kind")), self.assertRaises(ValueError):
                 self.steps.validate_policy(altered, ROOT)
 
+    def test_failed_preflight_checkpoint_matches_the_schema(self):
+        import jsonschema
+
+        schema = json.loads((ROOT / "config/contracts/qualification-step-evidence.schema.json").read_text())
+        failed = self.steps.checkpoint(
+            qualification="m2.5", step="preflight", source_sha=self.sha,
+            input_digest=self.digest, status="FAIL", started_at=self.started,
+        )
+        jsonschema.validate(failed, schema)
+        self.steps.validate_checkpoint(failed)
+        passed_without_proof = dict(failed, status="PASS")
+        with self.assertRaises(jsonschema.ValidationError):
+            jsonschema.validate(passed_without_proof, schema)
+
     def test_preflight_blocks_expensive_work_and_full_requires_smoke(self):
         with self.assertRaisesRegex(ValueError, "preflight"):
             self.steps.guard_start(qualification="m2.5", step="vm-smoke", graph=self.graph, source_sha=self.sha,
                                    input_digest=self.digest, checkpoints={})
-        with self.assertRaisesRegex(ValueError, "SMOKE"):
+        with self.assertRaisesRegex(ValueError, "predecessor checkpoint"):
             self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
                                    input_digest=self.digest, checkpoints={"preflight": self.preflight})
 
@@ -2192,7 +2207,13 @@ class QualificationStepGuardTests(unittest.TestCase):
             proof = Path(temporary) / "runtime.json"
             proof.write_text('{"observed":true}\n', encoding="utf-8")
             records = {"preflight": self.preflight}
-            for name in ("vm-smoke", "network-ssh", "rocky-runtime"):
+            for name in ("input-lock", "image"):
+                records[name] = self.steps.checkpoint(
+                    qualification="m2.5", step=name, source_sha=self.sha,
+                    input_digest=self.digest, status="PASS", started_at=self.started,
+                    artifact_digest=self.artifact_digest,
+                )
+            for name in ("vm-smoke", "network-ssh", "rocky-runtime", "offline-bundle"):
                 records[name] = self.steps.checkpoint(
                     qualification="m2.5", step=name, source_sha=self.sha,
                     input_digest=self.digest, status="PASS", started_at=self.started,
@@ -2200,18 +2221,23 @@ class QualificationStepGuardTests(unittest.TestCase):
                 )
             self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
                                    input_digest=self.digest, checkpoints=records)
-            for missing in ("vm-smoke", "network-ssh", "rocky-runtime"):
+            for missing in ("input-lock", "image", "vm-smoke", "network-ssh", "rocky-runtime", "offline-bundle"):
                 incomplete = {name: record for name, record in records.items() if name != missing}
-                with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "SMOKE PASS"):
+                with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "predecessor checkpoint"):
                     self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
                                            source_sha=self.sha, input_digest=self.digest, checkpoints=incomplete)
+            with self.assertRaisesRegex(ValueError, "image predecessor checkpoint"):
+                self.steps.guard_start(qualification="m2.5", step="vm-smoke", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints={"preflight": self.preflight,
+                                                    "input-lock": records["input-lock"]})
             wrong_step = dict(records["network-ssh"], step="vm-smoke")
             with self.assertRaisesRegex(ValueError, "identity differs"):
                 self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
                                        source_sha=self.sha, input_digest=self.digest,
                                        checkpoints=dict(records, **{"network-ssh": wrong_step}))
             failed = dict(records["rocky-runtime"], status="FAIL")
-            with self.assertRaisesRegex(ValueError, "SMOKE PASS"):
+            with self.assertRaisesRegex(ValueError, "predecessor PASS"):
                 self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
                                        source_sha=self.sha, input_digest=self.digest,
                                        checkpoints=dict(records, **{"rocky-runtime": failed}))

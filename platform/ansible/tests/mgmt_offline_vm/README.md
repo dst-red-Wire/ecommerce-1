@@ -93,6 +93,8 @@ is disabled, and the guest must report its own Rocky kernel, systemd and SELinux
 `Enforcing` before artifact work begins.
 
 Only a fresh `create` followed by the first `test` is a cold artifact qualification.
+The registered lifecycle runs `diagnostics` afterward because its `numactl-libs`
+dependency is also part of the RKE2 bundle and must not preinstall that dependency.
 The artifact role validates the independently approved manifest, image contents,
 RPM metadata and signatures before installing with every repository disabled.
 `server` activates the canonical nftables and firewalld templates, invokes the real

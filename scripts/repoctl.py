@@ -9870,16 +9870,23 @@ def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c
             return fail("native network-smoke result is absent or a symlink")
         prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
         result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(prepared, dict) or not isinstance(result, dict):
+            return fail("native network-smoke campaign or result is malformed")
         manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
         if (prepared.get("campaign_id") != campaign_id
             or prepared.get("box_sha256") != manifest["box_sha256"]
             or result.get("campaign_id") != campaign_id):
             return fail("native network-smoke campaign or box binding differs")
+        vagrant_relative = "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        original_vagrantfile = rocky_box_catalog.source_file(prepared.get("source_sha"), vagrant_relative)
+        if original_vagrantfile != (ROOT / vagrant_relative).read_bytes():
+            return fail("native network-smoke retained VM definition differs from current source")
         m25_runtime_evidence.validate_current_smoke(ROOT, result, head, manifest)
         completed_at = datetime.fromisoformat(str(result["completed_at"]).replace("Z", "+00:00"))
         if completed_at.tzinfo is None or not 0 <= time.time() - completed_at.timestamp() <= 86400:
             return fail("native network-smoke result is stale")
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError,
+            subprocess.CalledProcessError) as exc:
         return fail(f"native network-smoke import rejected: {exc}")
     destination = ROOT / ".context/evidence/network-smoke/current.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -9907,12 +9914,28 @@ def lab_network_native_prepare(campaign_id: str,
     try:
         prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
         result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(prepared, dict) or not isinstance(result, dict):
+            return fail("native runner preparation campaign or result is malformed")
         manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
+        cleanup = result.get("cleanup")
         if (prepared.get("campaign_id") != campaign_id
             or prepared.get("box_sha256") != manifest["box_sha256"]
             or result.get("campaign_id") != campaign_id
-            or result.get("cleanup", {}).get("vm_preserved") is not True):
+            or not isinstance(cleanup, dict)
+            or cleanup.get("vm_preserved") is not True):
             return fail("native runner preparation requires the owned preserved campaign and verified box")
+        source_vagrantfile = ROOT / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        staged_vagrantfile = stage / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        runtime_vagrantfile = stage / "smoke-run/Vagrantfile"
+        original_vagrantfile = rocky_box_catalog.source_file(
+            prepared.get("source_sha"), "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        )
+        if original_vagrantfile != source_vagrantfile.read_bytes():
+            return fail("native runner preparation requires the original VM definition on the current head")
+        current_vagrant_digest = m25_runtime_evidence._digest(source_vagrantfile)
+        if (m25_runtime_evidence._digest(staged_vagrantfile) != current_vagrant_digest
+            or m25_runtime_evidence._digest(runtime_vagrantfile) != current_vagrant_digest):
+            return fail("native runner preparation requires the current retained VM Vagrantfile")
         destination = laboratory_root / "network-smoke" / f"runner-{head}" / "scripts/windows"
         destination.mkdir(parents=True, exist_ok=True)
         digests = {}
@@ -9924,16 +9947,18 @@ def lab_network_native_prepare(campaign_id: str,
             if digests[name] != m25_runtime_evidence._digest(source):
                 return fail(f"native runner staging differs: {name}")
         binding = {"source_sha": head, "source_tree_sha": tree,
-                   "campaign_id": campaign_id, "runner_files": digests}
+                   "campaign_id": campaign_id, "runner_files": digests,
+                   "vagrantfile_sha256": current_vagrant_digest}
         (destination.parent.parent / "runner.json").write_text(
             json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
-    except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+    except (OSError, KeyError, ValueError, json.JSONDecodeError,
+            subprocess.CalledProcessError) as exc:
         return fail(f"native runner preparation failed: {exc}")
     runner_windows = output(["wslpath", "-w", str(destination / "LabNetworkSmoke.ps1")]).strip()
     stage_windows = output(["wslpath", "-w", str(stage)]).strip()
     print(f"PASS lab-network-native-prepare source_sha={head} runner={runner_windows}")
-    print(f"NATIVE_RESUME=PowerShell -NoProfile -File {runner_windows} -Action Resume -StageRoot {stage_windows} -RunnerSourceSha {head}")
+    print(f"NATIVE_RESUME=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {runner_windows} -Action Resume -StageRoot {stage_windows} -RunnerSourceSha {head}")
     return 0
 
 
@@ -10570,7 +10595,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         record = qualification_steps.checkpoint(
             qualification="rke2_local_virtualbox", step=step, source_sha=head_sha,
             input_digest=input_digest, status=status, started_at=started_at,
-            artifact_digest=verified_box["vm_box_sha256"] if step == "vm-smoke" else None,
+            artifact_digest=(verified_box["vm_box_sha256"] if step in {"image", "vm-smoke"}
+                             else approved_manifest if step in {"input-lock", "offline-bundle"} else None),
             runtime_path=runtime_path, preflight=(step == "preflight" and status == "PASS"),
         )
         checkpoint_root.mkdir(parents=True, exist_ok=True)
@@ -10611,8 +10637,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     actions = [
         "validate",
         "create",
-        "diagnostics",
         "test",
+        "diagnostics",
         "server",
         "server",
         "restage",
@@ -10729,6 +10755,17 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                 record_step(index, action, step, "PASS", started_at, runtime_file.get(action))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 return fail(f"RKE2 qualification step {action} lacks a valid checkpoint: {exc}")
+        if action == "validate":
+            try:
+                for prerequisite in ("input-lock", "image"):
+                    qualification_steps.guard_start(
+                        qualification="rke2_local_virtualbox", step=prerequisite,
+                        graph=graph, source_sha=head_sha, input_digest=input_digest,
+                        checkpoints=step_records,
+                    )
+                    record_step(index, prerequisite, prerequisite, "PASS", started_at)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 verified input or image checkpoint is invalid: {exc}")
         if action == "create":
             try:
                 guest = json.loads((vm_state / "preflight.json").read_text(encoding="utf-8"))

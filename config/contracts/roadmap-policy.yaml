@@ -46,6 +46,7 @@ status_derivation:
       - outcome
     accepted_status: PASS
     accepted_outcome: PASS
+    m25_deployment_state: DEPLOYED
     runtime_identity_required_fields: [kind, id]
 
 qce_traceability:

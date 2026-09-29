@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         for relative in ("config/contracts/machine-image-lock.yaml",
                          "config/contracts/qualification-execution-policy.yaml",
                          "config/contracts/roadmap-policy.yaml",
+                         "platform/vagrant/rocky-image-smoke/Vagrantfile",
                          *(f"scripts/windows/{name}" for name in m25.NETWORK_RUNNER_FILES),
                          "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"):
             destination = self.root / relative
@@ -95,6 +97,8 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                 "status": "PASS", "resume_runner_source_sha": HEAD,
                 "resume_runner_files": {name: m25._digest(self.root / "scripts/windows" / name)
                                         for name in m25.NETWORK_RUNNER_FILES},
+                "resume_vagrantfile_sha256": m25._digest(
+                    self.root / "platform/vagrant/rocky-image-smoke/Vagrantfile"),
                 "campaign_id": "20260929T163821Z-9da62296f3d5",
                 "vm_name": "ecommerce-rocky-10-2-smoke-4e935faff986",
                 "virtualbox_backend": "NATIVE_VTX", "box_digest_verified": "PASS",
@@ -151,7 +155,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                     {"action": action, "status": "PASS", "duration_seconds": 1.0,
                      **({"vm_uuid": UUID, "install_required": install} if action == "server" else {})}
                     for action, install in zip(
-                        ["validate", "create", "diagnostics", "test", "server", "server", "restage",
+                        ["validate", "create", "test", "diagnostics", "server", "server", "restage",
                          "tamper", "restage", "server", "destroy"],
                         [None, None, None, None, True, False, None, None, None, True, None],
                     )
@@ -196,12 +200,25 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        self.real_source_match = m25._qualification_sources_match
+        patcher = mock.patch.object(m25, "_qualification_sources_match", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def result(self, *, now=None):
+        if now and now.timestamp() - self.evidence["created_at_epoch"] > 86400:
+            return False, "stale"
+        try:
+            m25.validate(self.root, self.evidence, HEAD, TREE)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return False, str(exc)
+        return True, "valid lab proof"
+
+    def roadmap_result(self):
         contract = roadmap_sync.policy()["status_derivation"]["runtime_evidence_contract"]
         return roadmap_sync._runtime_evidence_result(
             self.root, {"path": m25.OUTPUT.as_posix(), "environments": ["lab"]},
-            "M2.5", HEAD, TREE, contract, 86400, now or datetime.now(timezone.utc),
+            "M2.5", HEAD, TREE, contract, 86400, datetime.now(timezone.utc),
         )
 
     def write(self):
@@ -217,6 +234,8 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
 
     def test_valid_sources_pass_and_missing_source_fails(self):
         self.assertTrue(self.result()[0])
+        self.assertFalse(self.roadmap_result()[0])
+        self.assertIn("does not prove persistent MGMT deployment", self.roadmap_result()[1])
         (self.root / m25._paths(VM)["rke2_result"]).unlink()
         self.assertFalse(self.result()[0])
 
@@ -281,6 +300,12 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
 
     def test_current_runner_and_guest_security_must_have_native_smoke_proof(self):
         self.rewrite_source("current_network_smoke", lambda value: value.update(
+            resume_vagrantfile_sha256="0" * 64))
+        self.assertFalse(self.result()[0])
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
+            resume_vagrantfile_sha256=m25._digest(
+                self.root / "platform/vagrant/rocky-image-smoke/Vagrantfile")))
+        self.rewrite_source("current_network_smoke", lambda value: value.update(
             resume_runner_source_sha=ORIGINAL))
         self.assertFalse(self.result()[0])
         self.rewrite_source("current_network_smoke", lambda value: value.update(
@@ -334,8 +359,13 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         stage = laboratory / "network-smoke" / campaign
         stage.mkdir(parents=True)
         (stage / "prepared.json").write_text(json.dumps({
-            "campaign_id": campaign, "box_sha256": BOX_SHA,
+            "campaign_id": campaign, "box_sha256": BOX_SHA, "source_sha": ORIGINAL,
         }), encoding="utf-8")
+        source_vagrantfile = self.root / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        for relative in ("platform/vagrant/rocky-image-smoke/Vagrantfile", "smoke-run/Vagrantfile"):
+            destination = stage / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source_vagrantfile, destination)
         native = laboratory / "evidence/network-smoke" / campaign / "result.json"
         native.parent.mkdir(parents=True)
         retained = self.root / m25.NETWORK_SMOKE
@@ -352,7 +382,9 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             raise AssertionError(args)
 
         with (mock.patch.object(repoctl, "ROOT", self.root),
-              mock.patch.object(repoctl, "git", side_effect=clean_git)):
+              mock.patch.object(repoctl, "git", side_effect=clean_git),
+              mock.patch.object(m25.rocky_box_catalog, "source_file",
+                                return_value=source_vagrantfile.read_bytes())):
             self.assertEqual(0, repoctl.lab_network_import(campaign, laboratory_root=laboratory))
             self.assertEqual(native.read_bytes(), retained.read_bytes())
             self.assertEqual(0, repoctl.lab_network_native_prepare(
@@ -364,6 +396,11 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             for name in m25.NETWORK_RUNNER_FILES:
                 self.assertEqual(m25._digest(self.root / "scripts/windows" / name),
                                  m25._digest(runner_root / "scripts/windows" / name))
+            staged_vagrantfile = stage / "smoke-run/Vagrantfile"
+            staged_vagrantfile.write_text("stale VM definition\n", encoding="utf-8")
+            self.assertEqual(2, repoctl.lab_network_native_prepare(
+                campaign, laboratory_root=laboratory))
+            shutil.copyfile(source_vagrantfile, staged_vagrantfile)
             original = retained.read_bytes()
             payload = json.loads(native.read_text(encoding="utf-8"))
             payload["guest_security"] = "NOT_EXECUTED"
@@ -390,6 +427,31 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.rewrite_source("native_result", lambda value: value["packer"].update(
             reuse_source_sha="f" * 40))
         self.assertFalse(self.result()[0])
+
+    def test_changed_qualification_logic_and_malformed_native_observations_fail(self):
+        with mock.patch.object(m25, "_qualification_sources_match", return_value=False):
+            self.assertFalse(self.result()[0])
+        self.rewrite_source("native_result", lambda value: value.update(vagrant_smoke=[]))
+        self.assertFalse(self.result()[0])
+
+    def test_qualification_source_comparison_detects_changed_runner_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repository = Path(directory)
+            subprocess.run(["git", "init", "-q", str(repository)], check=True)
+            runner = repository / m25.IMAGE_QUALIFICATION_FILES[0]
+            runner.parent.mkdir(parents=True)
+            runner.write_text("original\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "commit.gpgsign=false", "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit", "-qm", "original"], check=True)
+            first = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+            runner.write_text("changed\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(repository), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(repository), "-c", "commit.gpgsign=false", "-c", "user.name=Test",
+                            "-c", "user.email=test@example.invalid", "commit", "-qm", "changed"], check=True)
+            second = subprocess.check_output(["git", "-C", str(repository), "rev-parse", "HEAD"], text=True).strip()
+            self.assertTrue(self.real_source_match(repository, first, first))
+            self.assertFalse(self.real_source_match(repository, first, second))
 
 
 if __name__ == "__main__":
