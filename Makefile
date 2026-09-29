@@ -135,7 +135,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-network-resume lab-network-status lab-clean
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-network-resume lab-network-import lab-network-native-prepare lab-network-status lab-clean
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
 local-services-up: workspace-check ## Start pinned local Gitea/Harbor on native WSL storage
@@ -201,6 +201,12 @@ lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box w
 
 lab-network-resume: ## Resume SSH and Rocky probes on the retained VM for CAMPAIGN_ID
 	@$(PYTHON) scripts/repoctl.py lab-network-resume --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-import: ## Import a PASS native-boot network result after WSL is restored
+	@$(PYTHON) scripts/repoctl.py lab-network-import --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-native-prepare: ## Stage exact-head Windows runner for a native-boot Resume
+	@$(PYTHON) scripts/repoctl.py lab-network-native-prepare --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
 	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"

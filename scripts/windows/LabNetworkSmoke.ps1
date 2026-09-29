@@ -145,6 +145,11 @@ if ($Action -eq 'Resume') {
     $result.resume_from = '04-network-ssh'
     if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') { $result.resume_runner_source_sha = $RunnerSourceSha }
     else { $result | Add-Member -NotePropertyName resume_runner_source_sha -NotePropertyValue $RunnerSourceSha }
+    $runnerNames = @('LabNetworkSmoke.ps1','RockyImagePipeline.psm1','NativeVagrantSshSmoke.ps1','LabNetworkSeed.ps1','LabSshIdentity.ps1','local-services-seed-server.ps1')
+    $runnerFiles = @{}
+    foreach ($name in $runnerNames) { $runnerFiles[$name] = Get-FileSha256 -Path (Join-Path $PSScriptRoot $name) }
+    if ($result.PSObject.Properties.Name -contains 'resume_runner_files') { $result.resume_runner_files = $runnerFiles }
+    else { $result | Add-Member -NotePropertyName resume_runner_files -NotePropertyValue $runnerFiles }
     $result.completed_at = $null
     $result.error = 'Network SSH resume pending guest security verification'
     $result.cleanup.reason = $result.error
@@ -238,6 +243,11 @@ if ($Action -eq 'Resume') {
     $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.guest_security -ne 'PASS') { 'Guest SSH security baseline did not pass' } elseif ($result.status -eq 'BLOCKED_RUNTIME') { "VirtualBox backend $($result.virtualbox_backend); native VT-x qualification remains pending" } else { $null }
     $result.cleanup.reason = $result.error
     $result.completed_at = [DateTime]::UtcNow.ToString('o')
+    foreach ($name in $runnerNames) {
+        if ((Get-FileSha256 -Path (Join-Path $PSScriptRoot $name)) -ne $runnerFiles[$name]) {
+            throw "Network SSH resume runner input changed during execution: $name"
+        }
+    }
     Write-Utf8Json -InputObject $result -Path $resultPath
     $resumeExitCode = if ($result.status -eq 'PASS') { 0 } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 2 } else { 1 }
     }

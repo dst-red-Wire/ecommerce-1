@@ -23,6 +23,10 @@ UUID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 OUTPUT = Path(".context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json")
 IMAGE = Path(".context/evidence/rocky-image/rocky-10.2/windows")
 NETWORK_SMOKE = Path(".context/evidence/network-smoke/current.json")
+NETWORK_RUNNER_FILES = (
+    "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1", "NativeVagrantSshSmoke.ps1",
+    "LabNetworkSeed.ps1", "LabSshIdentity.ps1", "local-services-seed-server.ps1",
+)
 
 
 def _paths(vm_name: str) -> dict[str, Path]:
@@ -41,6 +45,7 @@ def _paths(vm_name: str) -> dict[str, Path]:
         "vm_preflight": state / "preflight.json",
         "server_source": state / "server-source.json",
         "rke2_result": state / "rke2-result.json",
+        "cold_role_result": state / "cold-role-result.json",
         "role_result": state / "role-result.json",
         "tamper_result": state / "tamper-result.json",
         "campaign_result": state / "campaign-result.json",
@@ -84,6 +89,51 @@ def _sources(root: Path, evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
         _require(isinstance(payload, dict), f"M2.5 {name} is not an object")
         values[name] = payload
     return values
+
+
+def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifest: dict[str, Any]) -> None:
+    """Require the exact current runner and its native guest-security result."""
+    runner_files = smoke.get("resume_runner_files")
+    _require(isinstance(runner_files, dict) and set(runner_files) == set(NETWORK_RUNNER_FILES),
+             "M2.5 current network runner inventory is incomplete")
+    for name in NETWORK_RUNNER_FILES:
+        runner = root / "scripts/windows" / name
+        _require(runner.is_file() and runner_files[name] == _digest(runner),
+                 f"M2.5 current network runner bytes differ: {name}")
+    smoke_checks = smoke.get("network_smoke")
+    smoke_packer = smoke.get("packer")
+    smoke_cleanup = smoke.get("cleanup")
+    smoke_checkpoints = smoke.get("checkpoints")
+    smoke_vm = smoke.get("vm_name")
+    _require(isinstance(smoke.get("campaign_id"), str)
+             and re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", smoke["campaign_id"]) is not None
+             and isinstance(smoke_vm, str)
+             and re.fullmatch(r"ecommerce-rocky-10-2-smoke-[0-9a-f]{12}", smoke_vm) is not None
+             and smoke.get("resume_runner_source_sha") == head
+             and smoke.get("status") == "PASS"
+             and smoke.get("virtualbox_backend") == "NATIVE_VTX"
+             and smoke.get("box_digest_verified") == "PASS"
+             and smoke.get("box_digest") == manifest["box_sha256"]
+             and isinstance(smoke_packer, dict)
+             and smoke_packer.get("inputs_digest") == manifest["inputs_digest"]
+             and smoke.get("guest_security") == "PASS"
+             and smoke.get("vm_recreate") == "NOT_REQUIRED"
+             and isinstance(smoke_cleanup, dict)
+             and smoke_cleanup.get("vm_preserved") is True
+             and smoke_cleanup.get("vm_name") == smoke_vm
+             and isinstance(smoke_cleanup.get("vm_id"), str)
+             and UUID.fullmatch(smoke_cleanup["vm_id"]) is not None
+             and isinstance(smoke_checkpoints, dict)
+             and all(smoke_checkpoints.get(name) == "PASS" for name in (
+                 "03-vm-smoke", "04-network-ssh", "05-rocky-runtime"))
+             and isinstance(smoke_checks, dict)
+             and smoke_checks.get("vm_name") == smoke_vm
+             and smoke_checks.get("tcp_22_ready") == "PASS"
+             and smoke_checks.get("ssh_auth_ready") == "PASS"
+             and smoke_checks.get("remote_command_ready") == "PASS"
+             and smoke_checks.get("rocky_runtime") == "PASS"
+             and smoke_checks.get("rocky_version") == "10.2",
+             "M2.5 current-head native network and guest-security smoke is incomplete")
 
 
 def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None:
@@ -137,40 +187,7 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
                  "artifact_digest": manifest["box_sha256"],
              }, "M2.5 current image reuse has invalid execution provenance")
     smoke = sources["current_network_smoke"]
-    smoke_checks = smoke.get("network_smoke")
-    smoke_packer = smoke.get("packer")
-    smoke_cleanup = smoke.get("cleanup")
-    smoke_checkpoints = smoke.get("checkpoints")
-    smoke_vm = smoke.get("vm_name")
-    _require(isinstance(smoke.get("campaign_id"), str)
-             and re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", smoke["campaign_id"]) is not None
-             and isinstance(smoke_vm, str)
-             and re.fullmatch(r"ecommerce-rocky-10-2-smoke-[0-9a-f]{12}", smoke_vm) is not None
-             and smoke.get("resume_runner_source_sha") == head
-             and smoke.get("status") == "PASS"
-             and smoke.get("virtualbox_backend") == "NATIVE_VTX"
-             and smoke.get("box_digest_verified") == "PASS"
-             and smoke.get("box_digest") == manifest["box_sha256"]
-             and isinstance(smoke_packer, dict)
-             and smoke_packer.get("inputs_digest") == manifest["inputs_digest"]
-             and smoke.get("guest_security") == "PASS"
-             and smoke.get("vm_recreate") == "NOT_REQUIRED"
-             and isinstance(smoke_cleanup, dict)
-             and smoke_cleanup.get("vm_preserved") is True
-             and smoke_cleanup.get("vm_name") == smoke_vm
-             and isinstance(smoke_cleanup.get("vm_id"), str)
-             and UUID.fullmatch(smoke_cleanup["vm_id"]) is not None
-             and isinstance(smoke_checkpoints, dict)
-             and all(smoke_checkpoints.get(name) == "PASS" for name in (
-                 "03-vm-smoke", "04-network-ssh", "05-rocky-runtime"))
-             and isinstance(smoke_checks, dict)
-             and smoke_checks.get("vm_name") == smoke_vm
-             and smoke_checks.get("tcp_22_ready") == "PASS"
-             and smoke_checks.get("ssh_auth_ready") == "PASS"
-             and smoke_checks.get("remote_command_ready") == "PASS"
-             and smoke_checks.get("rocky_runtime") == "PASS"
-             and smoke_checks.get("rocky_version") == "10.2",
-             "M2.5 current-head native network and guest-security smoke is incomplete")
+    validate_current_smoke(root, smoke, head, manifest)
     build = sources["image_build"]
     qualified = sources["image_qualification"]
     release = sources["image_release"]
@@ -248,6 +265,7 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
     source = sources["server_source"]
     preflight = sources["vm_preflight"]
     rke2 = sources["rke2_result"]
+    cold_role = sources["cold_role_result"]
     role = sources["role_result"]
     tamper = sources["tamper_result"]
     campaign = sources["campaign_result"]
@@ -297,6 +315,16 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and role.get("vm_uuid") == identity["id"]
              and role.get("bundle_manifest_sha256") == lock["approved_manifest_sha256"],
              "M2.5 offline role or VM identity differs")
+    cold_trial = cold_role.get("trial")
+    _require(cold_role.get("exit_code") == 0
+             and cold_role.get("vm_uuid") == identity["id"]
+             and cold_role.get("bundle_manifest_sha256") == lock["approved_manifest_sha256"]
+             and isinstance(cold_trial, dict)
+             and cold_trial.get("vm_uuid") == identity["id"]
+             and cold_trial.get("boot_id") == preflight.get("boot_id")
+             and cold_trial.get("cold_trial") is True
+             and cold_trial.get("previous_attempt") is False,
+             "M2.5 initial cold offline installation is not preserved")
     _require(rke2.get("node_ready") is True and rke2.get("cilium_ready") == 1
              and rke2.get("rke2_service") == "active"
              and rke2.get("selinux") == "Enforcing"

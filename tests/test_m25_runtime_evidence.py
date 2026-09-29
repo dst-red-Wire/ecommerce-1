@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import shutil
 import sys
@@ -40,6 +41,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         for relative in ("config/contracts/machine-image-lock.yaml",
                          "config/contracts/qualification-execution-policy.yaml",
                          "config/contracts/roadmap-policy.yaml",
+                         *(f"scripts/windows/{name}" for name in m25.NETWORK_RUNNER_FILES),
                          "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -91,6 +93,8 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                              "artifact_digest": BOX_SHA}),
             "current_network_smoke": {
                 "status": "PASS", "resume_runner_source_sha": HEAD,
+                "resume_runner_files": {name: m25._digest(self.root / "scripts/windows" / name)
+                                        for name in m25.NETWORK_RUNNER_FILES},
                 "campaign_id": "20260929T163821Z-9da62296f3d5",
                 "vm_name": "ecommerce-rocky-10-2-smoke-4e935faff986",
                 "virtualbox_backend": "NATIVE_VTX", "box_digest_verified": "PASS",
@@ -116,6 +120,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                               "virtualbox_log_sha256": "5" * 64},
             "vm_preflight": {"rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
                              "kernel": "6.12.0-rocky", "systemd": "running",
+                             "boot_id": "87654321-4321-4321-4321-abcdef123456",
                              "selinux": "Enforcing", "online_cpus": 4,
                              "memory_kib": 3900000,
                              "nft_policies": {"output": "drop", "forward": "drop"},
@@ -128,6 +133,11 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                             "public_connect_error": 101, "rke2_version": "rke2 version v1.37.0+rke2r1"},
             "role_result": {"exit_code": 0, "vm_uuid": UUID,
                             "bundle_manifest_sha256": self.manifest_sha},
+            "cold_role_result": {"exit_code": 0, "vm_uuid": UUID,
+                                 "bundle_manifest_sha256": self.manifest_sha,
+                                 "trial": {"vm_uuid": UUID,
+                                           "boot_id": "87654321-4321-4321-4321-abcdef123456",
+                                           "cold_trial": True, "previous_attempt": False}},
             "tamper_result": {"blocked_task": "Revalidate every staged byte immediately before privileged installation",
                               "rke2_service": "inactive", "mutation": {
                                   "before_sha256": "e" * 64, "after_sha256": "f" * 64}},
@@ -308,6 +318,58 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.assertTrue(self.result()[0])
         self.rewrite_source("backend_probe", lambda value: value.update(vm_memory_mib=4096))
         self.assertFalse(self.result()[0])
+
+    def test_initial_cold_role_result_must_survive_restage(self):
+        self.rewrite_source("cold_role_result", lambda value: value["trial"].update(
+            cold_trial=False))
+        self.assertFalse(self.result()[0])
+
+    def test_native_result_can_be_imported_without_restarting_the_vm(self):
+        spec = importlib.util.spec_from_file_location("m25_repoctl_import_test", ROOT / "scripts/repoctl.py")
+        assert spec and spec.loader
+        repoctl = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(repoctl)
+        campaign = "20260929T163821Z-9da62296f3d5"
+        laboratory = self.root / "laboratory"
+        stage = laboratory / "network-smoke" / campaign
+        stage.mkdir(parents=True)
+        (stage / "prepared.json").write_text(json.dumps({
+            "campaign_id": campaign, "box_sha256": BOX_SHA,
+        }), encoding="utf-8")
+        native = laboratory / "evidence/network-smoke" / campaign / "result.json"
+        native.parent.mkdir(parents=True)
+        retained = self.root / m25.NETWORK_SMOKE
+        native.write_bytes(retained.read_bytes())
+        retained.unlink()
+
+        def clean_git(*args, check=True):
+            if args == ("status", "--porcelain", "--untracked-files=all"):
+                return ""
+            if args == ("rev-parse", "HEAD"):
+                return HEAD + "\n"
+            if args == ("rev-parse", "HEAD^{tree}"):
+                return TREE + "\n"
+            raise AssertionError(args)
+
+        with (mock.patch.object(repoctl, "ROOT", self.root),
+              mock.patch.object(repoctl, "git", side_effect=clean_git)):
+            self.assertEqual(0, repoctl.lab_network_import(campaign, laboratory_root=laboratory))
+            self.assertEqual(native.read_bytes(), retained.read_bytes())
+            self.assertEqual(0, repoctl.lab_network_native_prepare(
+                campaign, laboratory_root=laboratory))
+            runner_root = laboratory / "network-smoke" / f"runner-{HEAD}"
+            staged = json.loads((runner_root / "runner.json").read_text(encoding="utf-8"))
+            self.assertEqual(HEAD, staged["source_sha"])
+            self.assertEqual(TREE, staged["source_tree_sha"])
+            for name in m25.NETWORK_RUNNER_FILES:
+                self.assertEqual(m25._digest(self.root / "scripts/windows" / name),
+                                 m25._digest(runner_root / "scripts/windows" / name))
+            original = retained.read_bytes()
+            payload = json.loads(native.read_text(encoding="utf-8"))
+            payload["guest_security"] = "NOT_EXECUTED"
+            native.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertEqual(2, repoctl.lab_network_import(campaign, laboratory_root=laboratory))
+            self.assertEqual(original, retained.read_bytes())
 
     def test_native_qualification_may_reuse_original_packer_bytes_honestly(self):
         self.rewrite_source("image_build", lambda value: value.update(

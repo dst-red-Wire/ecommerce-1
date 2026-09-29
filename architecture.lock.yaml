@@ -39,6 +39,8 @@ repository_governance:
         - image-rocky-windows-qualify
         - image-rocky-windows-release
         - lab-clean
+        - lab-network-import
+        - lab-network-native-prepare
         - lab-network-resume
         - lab-network-smoke
         - lab-network-status

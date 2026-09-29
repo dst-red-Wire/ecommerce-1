@@ -9853,6 +9853,90 @@ def lab_network_action(action: str, campaign_id: str) -> int:
     return completed.returncode
 
 
+def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab")) -> int:
+    """Import a native-boot result after WSL is restored, without touching the VM."""
+    import m25_runtime_evidence
+    import rocky_box_catalog
+
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-import requires an exact CAMPAIGN_ID")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("lab-network-import requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    stage = laboratory_root / "network-smoke" / campaign_id
+    result_path = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+    try:
+        if result_path.is_symlink() or not result_path.is_file():
+            return fail("native network-smoke result is absent or a symlink")
+        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
+        if (prepared.get("campaign_id") != campaign_id
+            or prepared.get("box_sha256") != manifest["box_sha256"]
+            or result.get("campaign_id") != campaign_id):
+            return fail("native network-smoke campaign or box binding differs")
+        m25_runtime_evidence.validate_current_smoke(ROOT, result, head, manifest)
+        completed_at = datetime.fromisoformat(str(result["completed_at"]).replace("Z", "+00:00"))
+        if completed_at.tzinfo is None or not 0 <= time.time() - completed_at.timestamp() <= 86400:
+            return fail("native network-smoke result is stale")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return fail(f"native network-smoke import rejected: {exc}")
+    destination = ROOT / ".context/evidence/network-smoke/current.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".tmp")
+    shutil.copyfile(result_path, temporary)
+    os.replace(temporary, destination)
+    print(f"PASS lab-network-import campaign={campaign_id} source_sha={head} evidence={destination}")
+    return 0
+
+
+def lab_network_native_prepare(campaign_id: str,
+                               *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab")) -> int:
+    """Stage exact-head runner bytes for a Windows native boot without changing the VM."""
+    import m25_runtime_evidence
+    import rocky_box_catalog
+
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-native-prepare requires an exact CAMPAIGN_ID")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("lab-network-native-prepare requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    tree = git("rev-parse", "HEAD^{tree}").strip()
+    stage = laboratory_root / "network-smoke" / campaign_id
+    result_path = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+    try:
+        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
+        if (prepared.get("campaign_id") != campaign_id
+            or prepared.get("box_sha256") != manifest["box_sha256"]
+            or result.get("campaign_id") != campaign_id
+            or result.get("cleanup", {}).get("vm_preserved") is not True):
+            return fail("native runner preparation requires the owned preserved campaign and verified box")
+        destination = laboratory_root / "network-smoke" / f"runner-{head}" / "scripts/windows"
+        destination.mkdir(parents=True, exist_ok=True)
+        digests = {}
+        for name in m25_runtime_evidence.NETWORK_RUNNER_FILES:
+            source = ROOT / "scripts/windows" / name
+            target = destination / name
+            shutil.copyfile(source, target)
+            digests[name] = m25_runtime_evidence._digest(target)
+            if digests[name] != m25_runtime_evidence._digest(source):
+                return fail(f"native runner staging differs: {name}")
+        binding = {"source_sha": head, "source_tree_sha": tree,
+                   "campaign_id": campaign_id, "runner_files": digests}
+        (destination.parent.parent / "runner.json").write_text(
+            json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    except (OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+        return fail(f"native runner preparation failed: {exc}")
+    runner_windows = output(["wslpath", "-w", str(destination / "LabNetworkSmoke.ps1")]).strip()
+    stage_windows = output(["wslpath", "-w", str(stage)]).strip()
+    print(f"PASS lab-network-native-prepare source_sha={head} runner={runner_windows}")
+    print(f"NATIVE_RESUME=PowerShell -NoProfile -File {runner_windows} -Action Resume -StageRoot {stage_windows} -RunnerSourceSha {head}")
+    return 0
+
+
 def lab_network_status(campaign_id: str) -> int:
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
         return fail("lab-network-status requires an exact CAMPAIGN_ID")
@@ -10448,6 +10532,11 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             "RKE2 local qualification inputs contain unsupported fields: "
             + ", ".join(unsupported_fields)
         )
+    if type(input_values.get("vm_cpus")) is not int or input_values["vm_cpus"] != 4:
+        return fail("RKE2 local qualification requires explicit vm_cpus=4 before VM creation")
+    if (type(input_values.get("vm_memory")) is not int
+        or not 4096 <= input_values["vm_memory"] <= 16384):
+        return fail("RKE2 local qualification requires explicit vm_memory=4096..16384 before VM creation")
     vm_name = input_values.get("vm_name")
     if not isinstance(vm_name, str) or re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
         return fail("RKE2 local qualification inputs must declare a valid vm_name")
@@ -10541,7 +10630,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server": "rke2-single", "restage": "recovery", "tamper": "recovery",
     }
     runtime_file = {
-        "create": "preflight.json", "test": "role-result.json",
+        "create": "preflight.json", "test": "cold-role-result.json",
         "server": "rke2-result.json", "restage": "role-result.json",
         "tamper": "tamper-result.json",
     }
@@ -10601,6 +10690,20 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                 return fail(f"BLOCKED_RUNTIME RKE2 VirtualBox backend cannot be proven: {exc}")
         if action == "server" and not source_evidence_matches():
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
+        if action == "test":
+            cold_path = vm_state / "role-result.json"
+            try:
+                if cold_path.stat().st_mtime < started_at.timestamp() - 1:
+                    return fail("RKE2 cold role result predates the current test action")
+                cold_result = json.loads(cold_path.read_text(encoding="utf-8"))
+                trial = cold_result.get("trial")
+                if (cold_result.get("exit_code") != 0 or not isinstance(trial, dict)
+                    or trial.get("cold_trial") is not True
+                    or trial.get("previous_attempt") is not False):
+                    return fail("RKE2 first offline installation was not a cold trial")
+                (vm_state / "cold-role-result.json").write_bytes(cold_path.read_bytes())
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 cold role result cannot be preserved: {exc}")
         observation: dict[str, object] = {
             "action": action, "status": "PASS",
             "duration_seconds": round(time.monotonic() - started, 3),
@@ -12764,6 +12867,10 @@ def main() -> int:
     lab_clean.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     lab_resume = sub.add_parser("lab-network-resume")
     lab_resume.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_import = sub.add_parser("lab-network-import")
+    lab_import.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_native_prepare = sub.add_parser("lab-network-native-prepare")
+    lab_native_prepare.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     lab_status = sub.add_parser("lab-network-status")
     lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
@@ -13055,6 +13162,10 @@ def main() -> int:
             return lab_network_action("Clean", args.campaign_id)
         if args.cmd == "lab-network-resume":
             return lab_network_action("Resume", args.campaign_id)
+        if args.cmd == "lab-network-import":
+            return lab_network_import(args.campaign_id)
+        if args.cmd == "lab-network-native-prepare":
+            return lab_network_native_prepare(args.campaign_id)
         if args.cmd == "lab-network-status":
             return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":

@@ -1084,7 +1084,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         encoding="utf-8",
                     )
                 if command[-1] == "vm_action=test":
-                    (state / "role-result.json").write_text('{"exit_code":0}\n', encoding="utf-8")
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "trial": {"cold_trial": True,
+                                                  "previous_attempt": False},
+                    }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     server_attempts.append(True)
                     state.mkdir(parents=True, exist_ok=True)
@@ -1290,6 +1293,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     __import__("json").dumps(
                         {
                             "vm_name": vm_name,
+                            "vm_cpus": 4, "vm_memory": 4096,
                             "mgmt_offline_manifest_sha256": approved,
                         }
                     )
@@ -1404,6 +1408,29 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         )
                         run.assert_not_called()
 
+    def test_rke2_launcher_requires_supported_sizing_before_vm_creation(self):
+        workflow = {
+            "entrypoint": "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
+            "exact_sha_required": True, "clean_worktree_required": True,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context/mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            for sizing in ({}, {"vm_cpus": 2, "vm_memory": 4096},
+                           {"vm_cpus": 4, "vm_memory": 2048},
+                           {"vm_cpus": 4, "vm_memory": 32768}):
+                with self.subTest(sizing=sizing):
+                    inputs.write_text(json.dumps({"vm_name": "ecommerce-mgmt-test-policy", **sizing}),
+                                      encoding="utf-8")
+                    with (mock.patch.object(MOD, "ROOT", root),
+                          mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                          mock.patch.object(MOD, "git", side_effect=lambda *args, **kwargs: "" if args[0] == "status" else "e" * 40),
+                          mock.patch.object(MOD, "run") as run):
+                        self.assertEqual(2, MOD.rke2_local_virtualbox_qualification(
+                            ".context/mgmt-vm-inputs.json"))
+                        run.assert_not_called()
+
     def test_rke2_launcher_rejects_noncanonical_manifest_digest(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
         workflow = {
@@ -1423,6 +1450,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 __import__("json").dumps(
                     {
                         "vm_name": "ecommerce-mgmt-test-policy",
+                        "vm_cpus": 4, "vm_memory": 4096,
                         "mgmt_offline_manifest_sha256": "f" * 64,
                     }
                 )
@@ -1510,7 +1538,10 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         "ipv4_routes": [], "ipv6_routes": [],
                     }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=test":
-                    (state / "role-result.json").write_text('{"exit_code":0}\n', encoding="utf-8")
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "trial": {"cold_trial": True,
+                                                  "previous_attempt": False},
+                    }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "server-source.json").write_text(
