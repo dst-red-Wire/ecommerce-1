@@ -1060,7 +1060,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             def fake_run(command, **kwargs):
                 if command[-1] == "vm_action=create":
                     state.mkdir(parents=True, exist_ok=True)
-                    (state / "preflight.json").write_text('{"ssh":"PASS"}\n', encoding="utf-8")
+                    (state / "preflight.json").write_text(json.dumps({
+                        "rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
+                        "selinux": "Enforcing", "kernel": "6.12.0-test", "systemd": "running",
+                        "boot_id": "12345678-1234-1234-1234-123456789abc",
+                        "online_cpus": 4, "memory_kib": 4 * 1024 * 1024,
+                        "ssh_access": {
+                            "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                            "permitrootlogin": "no", "authenticationmethods": "publickey",
+                        },
+                        "public_connect_errno": 101,
+                        "nft_policies": {"output": "drop", "forward": "drop"},
+                        "ipv4_routes": [], "ipv6_routes": [],
+                    }) + "\n", encoding="utf-8")
                     inputs.write_text(
                         __import__("json").dumps(
                             {
@@ -1484,7 +1496,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             def fake_run(command, **kwargs):
                 if command[-1] == "vm_action=create":
                     state.mkdir(parents=True, exist_ok=True)
-                    (state / "preflight.json").write_text('{"ssh":"PASS"}\n', encoding="utf-8")
+                    (state / "preflight.json").write_text(json.dumps({
+                        "rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
+                        "selinux": "Enforcing", "kernel": "6.12.0-test", "systemd": "running",
+                        "boot_id": "12345678-1234-1234-1234-123456789abc",
+                        "online_cpus": 4, "memory_kib": 4 * 1024 * 1024,
+                        "ssh_access": {
+                            "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                            "permitrootlogin": "no", "authenticationmethods": "publickey",
+                        },
+                        "public_connect_errno": 101,
+                        "nft_policies": {"output": "drop", "forward": "drop"},
+                        "ipv4_routes": [], "ipv6_routes": [],
+                    }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=test":
                     (state / "role-result.json").write_text('{"exit_code":0}\n', encoding="utf-8")
                 if command[-1] == "vm_action=server":

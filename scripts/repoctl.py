@@ -10616,6 +10616,35 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                 record_step(index, action, step, "PASS", started_at, runtime_file.get(action))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 return fail(f"RKE2 qualification step {action} lacks a valid checkpoint: {exc}")
+        if action == "create":
+            try:
+                guest = json.loads((vm_state / "preflight.json").read_text(encoding="utf-8"))
+                ssh_access = {
+                    "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                    "permitrootlogin": "no", "authenticationmethods": "publickey",
+                }
+                if (
+                    not isinstance(guest, dict)
+                    or not re.match(r"^Rocky Linux release 10\.2\b", guest.get("rocky_release", ""))
+                    or guest.get("selinux") != "Enforcing"
+                    or guest.get("ssh_access") != ssh_access
+                    or guest.get("public_connect_errno") != 101
+                    or guest.get("nft_policies") != {"output": "drop", "forward": "drop"}
+                    or any(not isinstance(guest.get(route), list) for route in ("ipv4_routes", "ipv6_routes"))
+                    or any(not isinstance(row, dict) or row.get("dst") == "default"
+                           for route in ("ipv4_routes", "ipv6_routes") for row in guest[route])
+                    or not isinstance(guest.get("kernel"), str) or not guest["kernel"]
+                    or guest.get("online_cpus") != int(input_values["vm_cpus"])
+                    or type(guest.get("memory_kib")) is not int or guest["memory_kib"] < 3 * 1024 * 1024
+                    or guest.get("systemd") not in {"running", "degraded"}
+                    or not isinstance(guest.get("boot_id"), str)
+                    or re.fullmatch(r"[0-9a-f-]{36}", guest["boot_id"]) is None
+                ):
+                    return fail("RKE2 fresh VM lacks SSH, Rocky runtime, or isolated network proof")
+                for smoke_step in ("network-ssh", "rocky-runtime"):
+                    record_step(index, smoke_step, smoke_step, "PASS", started_at, "preflight.json")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 fresh VM smoke proof is invalid: {exc}")
         observed_actions.append(observation)
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed during execution")
