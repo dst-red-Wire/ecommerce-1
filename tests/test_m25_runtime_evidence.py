@@ -58,6 +58,14 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             "native_vtx": "PASS", "nem_detected": False,
         }
         self.campaign_epoch = int(datetime.now(timezone.utc).timestamp())
+        transfer = {
+            "mode": "delta", "source_digest": self.manifest_sha,
+            "prior_target_digest": None, "manifest_digest": self.manifest_sha,
+            "final_digest": self.manifest_sha, "target_valid_before": False,
+            "copy_changed": True,
+            "started_at": datetime.fromtimestamp(self.campaign_epoch - 10, timezone.utc).isoformat(),
+            "finished_at": datetime.fromtimestamp(self.campaign_epoch - 9, timezone.utc).isoformat(),
+        }
         source_payloads = {
             "image_build": {"status": "PASS", "source_sha": ORIGINAL, "source_tree": ORIGINAL_TREE,
                             "sha256": BOX_SHA, "artifact": "rocky-10.2-rke2-virtualbox.box",
@@ -136,9 +144,11 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                             "nft_policies": {"output": "drop", "forward": "drop"},
                             "public_connect_error": 101, "rke2_version": "rke2 version v1.37.0+rke2r1"},
             "role_result": {"exit_code": 0, "vm_uuid": UUID,
-                            "bundle_manifest_sha256": self.manifest_sha},
+                            "bundle_manifest_sha256": self.manifest_sha,
+                            "transfer": transfer},
             "cold_role_result": {"exit_code": 0, "vm_uuid": UUID,
                                  "bundle_manifest_sha256": self.manifest_sha,
+                                 "transfer": transfer,
                                  "trial": {"vm_uuid": UUID,
                                            "boot_id": "87654321-4321-4321-4321-abcdef123456",
                                            "cold_trial": True, "previous_attempt": False}},
@@ -153,6 +163,7 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
                 "manifest_sha256": self.manifest_sha,
                 "actions": [
                     {"action": action, "status": "PASS", "duration_seconds": 1.0,
+                     **({"transfer": transfer} if action in {"test", "restage"} else {}),
                      **({"vm_uuid": UUID, "install_required": install} if action == "server" else {})}
                     for action, install in zip(
                         ["validate", "create", "test", "diagnostics", "server", "server", "restage",
@@ -347,6 +358,16 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
     def test_initial_cold_role_result_must_survive_restage(self):
         self.rewrite_source("cold_role_result", lambda value: value["trial"].update(
             cold_trial=False))
+        self.assertFalse(self.result()[0])
+
+    def test_transfer_decision_must_match_approved_bytes_and_recovery(self):
+        self.rewrite_source("cold_role_result", lambda value: value["transfer"].update(
+            source_digest="0" * 64))
+        self.assertFalse(self.result()[0])
+        self.rewrite_source("cold_role_result", lambda value: value["transfer"].update(
+            source_digest=self.manifest_sha))
+        self.rewrite_source("campaign_result", lambda value: value["actions"][8]["transfer"].update(
+            copy_changed=False))
         self.assertFalse(self.result()[0])
 
     def test_native_result_can_be_imported_without_restarting_the_vm(self):

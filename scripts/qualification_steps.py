@@ -323,6 +323,35 @@ def guard_transfer(*, source_digest: str, target_digest: str | None,
         _require(final_digest == source_digest, "transfer final digest verification failed")
 
 
+def validate_transfer_record(record: dict, *, approved_manifest: str) -> None:
+    """Validate the retained decision made by the offline bundle transfer."""
+    fields = {"mode", "source_digest", "prior_target_digest", "manifest_digest",
+              "final_digest", "target_valid_before", "copy_changed", "started_at", "finished_at"}
+    _require(isinstance(record, dict) and set(record) == fields,
+             "offline transfer evidence is missing or malformed")
+    _require(record["source_digest"] == approved_manifest
+             and record["manifest_digest"] == approved_manifest
+             and record["final_digest"] == approved_manifest,
+             "offline transfer differs from the approved manifest")
+    guard_transfer(source_digest=record["source_digest"],
+                   target_digest=record["prior_target_digest"], mode=record["mode"],
+                   manifest_digest=record["manifest_digest"], final_digest=record["final_digest"])
+    _require(type(record["target_valid_before"]) is bool and type(record["copy_changed"]) is bool,
+             "offline transfer decisions must be booleans")
+    _require((record["mode"] == "skip" and record["target_valid_before"]
+              and not record["copy_changed"])
+             or (record["mode"] == "delta" and not record["target_valid_before"]
+                 and record["copy_changed"]),
+             "offline transfer mode contradicts the observed copy decision")
+    try:
+        started = datetime.fromisoformat(record["started_at"])
+        finished = datetime.fromisoformat(record["finished_at"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("offline transfer timestamps are invalid") from exc
+    _require(started.tzinfo is not None and finished.tzinfo is not None and finished >= started,
+             "offline transfer timestamps are invalid")
+
+
 def guard_cleanup(*, final_evidence_captured: bool, explicitly_authorized: bool) -> None:
     _require(final_evidence_captured is True or explicitly_authorized is True,
              "diagnostic artifact must be retained until final evidence or explicit cleanup")

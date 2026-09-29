@@ -28,6 +28,16 @@ PERF_MOD = importlib.util.module_from_spec(PERF_SPEC)
 PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
+def _transfer_fixture(manifest: str) -> dict:
+    return {
+        "mode": "delta", "source_digest": manifest, "prior_target_digest": None,
+        "manifest_digest": manifest, "final_digest": manifest,
+        "target_valid_before": False, "copy_changed": True,
+        "started_at": "2026-09-29T20:00:00+00:00",
+        "finished_at": "2026-09-29T20:00:01+00:00",
+    }
+
+
 class QualificationExecutionPolicyTests(unittest.TestCase):
     def setUp(self):
         box = {
@@ -1088,6 +1098,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     (state / "role-result.json").write_text(json.dumps({
                         "exit_code": 0, "trial": {"cold_trial": True,
                                                   "previous_attempt": False},
+                        "transfer": _transfer_fixture(input_values["mgmt_offline_manifest_sha256"]),
                     }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     server_attempts.append(True)
@@ -1102,6 +1113,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     }))
                     (state / "role-result.json").write_text(json.dumps({
                         "exit_code": 0, "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "transfer": _transfer_fixture(input_values["mgmt_offline_manifest_sha256"]),
                     }))
                     (state / "rke2-result.json").write_text(json.dumps({
                         "node_ready": True, "cilium_ready": 1,
@@ -1130,6 +1142,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     0,
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
+                for index, step in ((11, "evidence"), (12, "final")):
+                    checkpoint_path = state / "step-checkpoints" / f"{index:02d}-{step}.json"
+                    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    self.assertEqual("PASS", checkpoint["status"])
+                    self.assertEqual(step, checkpoint["step"])
 
         actions = [
             call.args[0][-1]
@@ -1486,6 +1503,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_rke2_launcher_rejects_source_evidence_from_another_sha(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        approved_manifest = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
         workflow = {
             "entrypoint": (
                 "scripts/repoctl.py rke2-local-virtualbox-qualification "
@@ -1547,6 +1565,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     (state / "role-result.json").write_text(json.dumps({
                         "exit_code": 0, "trial": {"cold_trial": True,
                                                   "previous_attempt": False},
+                        "transfer": _transfer_fixture(approved_manifest),
                     }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     state.mkdir(parents=True, exist_ok=True)
@@ -2326,6 +2345,20 @@ class QualificationStepGuardTests(unittest.TestCase):
                                       final_digest=self.digest)
         self.steps.guard_transfer(source_digest=self.digest, target_digest=self.digest,
                                   mode="skip", manifest_digest=self.artifact_digest)
+        transfer = {
+            "mode": "skip", "source_digest": self.digest,
+            "prior_target_digest": self.digest, "manifest_digest": self.digest,
+            "final_digest": self.digest, "target_valid_before": True,
+            "copy_changed": False, "started_at": "2026-09-29T20:00:00+00:00",
+            "finished_at": "2026-09-29T20:00:01+00:00",
+        }
+        self.steps.validate_transfer_record(transfer, approved_manifest=self.digest)
+        with self.assertRaisesRegex(ValueError, "copy decision"):
+            self.steps.validate_transfer_record(dict(transfer, copy_changed=True),
+                                                approved_manifest=self.digest)
+        with self.assertRaisesRegex(ValueError, "approved manifest"):
+            self.steps.validate_transfer_record(dict(transfer, source_digest=self.artifact_digest),
+                                                approved_manifest=self.digest)
         with self.assertRaisesRegex(ValueError, "retained"):
             self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=False)
         self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=True)

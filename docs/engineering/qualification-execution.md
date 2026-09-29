@@ -25,7 +25,11 @@ preflight precedes VM creation, its VM smoke precedes offline bundle and RKE2
 work, and cleanup requires the completed action sequence and retained runtime
 result files. The offline artifact role checks the digest-specific target before
 transfer; matching content skips the full copy, and transferred bytes are checked
-again before installation.
+again before installation. Each cold or recovery role result retains the source,
+prior target manifest, approved manifest and final digests, its `skip` or `delta`
+decision, and timestamps. The campaign validates these records before accepting
+the action. Terminal `evidence` and `final` graph checkpoints are required before
+the campaign result can report PASS.
 Checkpoint files are diagnostic records. A failed campaign starts over; the
 workflow does not reload checkpoints or claim resumable execution. The initial
 offline role trial runs before diagnostic RPM installation so it remains cold.

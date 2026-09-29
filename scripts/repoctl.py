@@ -10649,6 +10649,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server",
         "destroy",
     ]
+    campaign_started_at = datetime.now(timezone.utc)
     observed_actions: list[dict[str, object]] = []
     observed_vm_uuid = ""
     backend_probe: dict[str, object] | None = None
@@ -10736,6 +10737,17 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             "action": action, "status": "PASS",
             "duration_seconds": round(time.monotonic() - started, 3),
         }
+        if action in {"test", "restage"}:
+            try:
+                transfer_result = json.loads((vm_state / "role-result.json").read_text(encoding="utf-8"))
+                if not isinstance(transfer_result, dict):
+                    raise ValueError("offline role result is malformed")
+                qualification_steps.validate_transfer_record(
+                    transfer_result.get("transfer"), approved_manifest=approved_manifest,
+                )
+                observation["transfer"] = transfer_result["transfer"]
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 {action} lacks verified transfer evidence: {exc}")
         if action == "server":
             try:
                 invocation = json.loads((vm_state / "server-invocation.json").read_text(encoding="utf-8"))
@@ -10788,7 +10800,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                     or not isinstance(guest.get("kernel"), str) or not guest["kernel"]
                     or guest.get("online_cpus") != int(input_values["vm_cpus"])
                     or type(guest.get("memory_kib")) is not int or guest["memory_kib"] < 3 * 1024 * 1024
-                    or guest.get("systemd") not in {"running", "degraded"}
+                    or guest.get("systemd") != "running"
                     or not isinstance(guest.get("boot_id"), str)
                     or re.fullmatch(r"[0-9a-f-]{36}", guest["boot_id"]) is None
                 ):
@@ -10810,6 +10822,17 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         or rke2.get("node_ready") is not True or rke2.get("cilium_ready") != 1
         or tamper.get("blocked_task") != "Revalidate every staged byte immediately before privileged installation"):
         return fail("RKE2 campaign lacks coherent role, server, or tamper results")
+    try:
+        for index, (step, runtime_file) in enumerate((
+            ("evidence", "rke2-result.json"), ("final", "tamper-result.json")
+        ), start=len(actions)):
+            qualification_steps.guard_start(
+                qualification="rke2_local_virtualbox", step=step, graph=graph,
+                source_sha=head_sha, input_digest=input_digest, checkpoints=step_records,
+            )
+            record_step(index, step, step, "PASS", campaign_started_at, runtime_file)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 campaign terminal graph checkpoint is incomplete: {exc}")
     head_tree = git("rev-parse", "HEAD^{tree}").strip()
     campaign = {
         "schema_version": 1, "status": "PASS", "head_sha": head_sha,

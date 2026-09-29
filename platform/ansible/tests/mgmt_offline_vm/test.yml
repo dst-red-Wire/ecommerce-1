@@ -236,6 +236,8 @@
           'vm_uuid': vm_id_file.content | b64decode | trim,
           'bundle_manifest_sha256': mgmt_offline_manifest_sha256,
           'source_sha256': vm_source_hashes.stdout,
+          'transfer': (lookup('file', vm_state ~ '/transport-metrics.json', errors='ignore')
+                       | default('{}', true) | from_json),
           'trial': lookup('file', vm_state ~ '/test-attempt.json') | from_json} | to_nice_json }}
 - name: Require complete role success without bypassing any runtime gate
   ansible.builtin.assert:

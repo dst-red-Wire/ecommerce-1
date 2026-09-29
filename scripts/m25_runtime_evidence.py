@@ -366,6 +366,10 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and cold_trial.get("cold_trial") is True
              and cold_trial.get("previous_attempt") is False,
              "M2.5 initial cold offline installation is not preserved")
+    for result in (cold_role, role):
+        qualification_steps.validate_transfer_record(
+            result.get("transfer"), approved_manifest=lock["approved_manifest_sha256"]
+        )
     _require(rke2.get("node_ready") is True and rke2.get("cilium_ready") == 1
              and rke2.get("rke2_service") == "active"
              and rke2.get("selinux") == "Enforcing"
@@ -398,6 +402,15 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
                      and isinstance(item.get("duration_seconds"), (int, float))
                      and item["duration_seconds"] >= 0 for item in actions),
              "M2.5 RKE2 campaign sequence is incomplete")
+    transfers = [item for item in actions if item["action"] in {"test", "restage"}]
+    _require(len(transfers) == 3, "M2.5 cold and recovery transfer decisions are incomplete")
+    for item in transfers:
+        qualification_steps.validate_transfer_record(
+            item.get("transfer"), approved_manifest=lock["approved_manifest_sha256"]
+        )
+    _require(transfers[0]["transfer"] == cold_role["transfer"]
+             and transfers[-1]["transfer"] == role["transfer"],
+             "M2.5 retained transfer decisions differ from role executions")
     servers = [item for item in actions if item["action"] == "server"]
     _require([item.get("install_required") for item in servers] == [True, False, True]
              and all(item.get("vm_uuid") == identity["id"] for item in servers),

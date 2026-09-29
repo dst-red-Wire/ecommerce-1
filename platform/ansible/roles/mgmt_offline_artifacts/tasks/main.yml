@@ -23,6 +23,7 @@
       - "{{ rke2_version }}"
       - --services-json
       - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
+  register: mgmt_offline_controller
   delegate_to: localhost
   become: false
   changed_when: false
@@ -69,6 +70,17 @@
   changed_when: false
   failed_when: false
 
+- name: Record the prior target manifest digest when present
+  ansible.builtin.stat:
+    path: "{{ mgmt_offline_target_dir }}/manifest.json"
+    checksum_algorithm: sha256
+  register: mgmt_offline_prior_manifest
+  changed_when: false
+
+- name: Mark the transfer start after the prior target probe
+  ansible.builtin.set_fact:
+    mgmt_offline_transfer_started_at: "{{ now(utc=true).isoformat() }}"
+
 - name: Transfer approved bundle only when target content is absent or invalid
   ansible.builtin.copy:
     src: "{{ mgmt_offline_bundle_dir }}/"
@@ -78,6 +90,7 @@
     mode: "0600"
     directory_mode: "0700"
   when: mgmt_offline_existing.rc != 0
+  register: mgmt_offline_copy
 
 - name: Verify transferred bytes before package installation
   ansible.builtin.command:
@@ -95,6 +108,19 @@
       - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
   register: mgmt_offline_validated
   changed_when: false
+
+- name: Retain the verified content-addressed transfer decision
+  ansible.builtin.set_fact:
+    mgmt_offline_transport_metrics:
+      mode: "{{ 'skip' if mgmt_offline_existing.rc == 0 else 'delta' }}"
+      source_digest: "{{ (mgmt_offline_controller.stdout | from_json).manifest_sha256 }}"
+      prior_target_digest: "{{ mgmt_offline_prior_manifest.stat.checksum if mgmt_offline_prior_manifest.stat.exists else none }}"
+      manifest_digest: "{{ mgmt_offline_manifest_sha256 }}"
+      final_digest: "{{ (mgmt_offline_validated.stdout | from_json).manifest_sha256 }}"
+      target_valid_before: "{{ mgmt_offline_existing.rc == 0 }}"
+      copy_changed: "{{ mgmt_offline_copy.changed | default(false) | bool }}"
+      started_at: "{{ mgmt_offline_transfer_started_at }}"
+      finished_at: "{{ now(utc=true).isoformat() }}"
 
 - name: Verify every local RPM signature against isolated approved keys
   ansible.builtin.command:
