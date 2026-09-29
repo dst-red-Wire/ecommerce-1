@@ -9779,6 +9779,20 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
             return fail(f"verified Rocky box is absent: {selected}")
         if action == "verify":
             manifest = rocky_box_catalog.verify(selected, source_sha)
+            reuse = qualification_steps.checkpoint(
+                qualification="m2.5", step="image", source_sha=source_sha,
+                input_digest=manifest["inputs_digest"],
+                artifact_digest=manifest["box_sha256"],
+                status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
+                reused_from={
+                    "source_sha": manifest["source_sha"],
+                    "input_digest": manifest["inputs_digest"],
+                    "artifact_digest": manifest["box_sha256"],
+                },
+            )
+            destination = ROOT / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text(json.dumps(reuse, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             print(json.dumps({"box_reuse": "REUSED", "box_sha256": manifest["box_sha256"],
                               "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
         elif action == "prepare-smoke":
@@ -10364,6 +10378,15 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
 
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
     workflow = qualification_workflow("rke2_local_virtualbox")
+    backend_policy = qualification_execution_policy()["workflows"]["rke2_local_virtualbox"].get(
+        "virtualbox_backend_policy"
+    )
+    if backend_policy != {
+        "image_execution_required": "NATIVE_VTX",
+        "rke2_functional_allowed": ["NATIVE_VTX", "NEM"],
+        "observed_backend_evidence": ".context/mgmt-offline-vm/<name>/backend-probe.json",
+    }:
+        return fail("RKE2 VirtualBox backend policy is missing or ambiguous")
     graph = qualification_steps.validate_graph(
         qualification_execution_policy()["workflows"]["rke2_local_virtualbox"]
     )
@@ -10500,6 +10523,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     ]
     observed_actions: list[dict[str, object]] = []
     observed_vm_uuid = ""
+    backend_probe: dict[str, object] | None = None
     server_count = 0
     action_step = {
         "validate": "preflight", "create": "vm-smoke", "test": "offline-bundle",
@@ -10541,6 +10565,29 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             if step:
                 record_step(index, action, step, "FAIL", started_at)
             return result.returncode
+        if action == "create":
+            import rke2_virtualbox_backend
+
+            try:
+                backend_probe = rke2_virtualbox_backend.probe(
+                    vm_name, expected_cpus=int(input_values["vm_cpus"]),
+                    expected_memory=int(input_values["vm_memory"]),
+                    expected_version=json.loads(
+                        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+                    )["versions"]["VIRTUALBOX_VERSION"],
+                    minimum_log_mtime=started_at.timestamp(),
+                )
+                backend_probe["head_sha"] = head_sha
+                backend_probe["head_tree_sha"] = git("rev-parse", "HEAD^{tree}").strip()
+                backend_probe["box_sha256"] = verified_box["vm_box_sha256"]
+                (vm_state / "backend-probe.json").write_text(
+                    json.dumps(backend_probe, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                if backend_probe["virtualbox_backend"] not in backend_policy["rke2_functional_allowed"]:
+                    return fail("BLOCKED_RUNTIME RKE2 VirtualBox backend is incompatible with the contract")
+                observed_vm_uuid = str(backend_probe["vm_uuid"])
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                return fail(f"BLOCKED_RUNTIME RKE2 VirtualBox backend cannot be proven: {exc}")
         if action == "server" and not source_evidence_matches():
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
         observation: dict[str, object] = {
@@ -10586,6 +10633,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "schema_version": 1, "status": "PASS", "head_sha": head_sha,
         "head_tree_sha": head_tree, "vm_uuid": observed_vm_uuid,
         "box_sha256": verified_box["vm_box_sha256"],
+        "virtualbox_backend": backend_probe["virtualbox_backend"] if backend_probe else None,
         "manifest_sha256": approved_manifest,
         "created_at_epoch": int(time.time()), "actions": observed_actions,
     }

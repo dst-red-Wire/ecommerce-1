@@ -59,10 +59,13 @@ def main():
     }, "only the generated non-root SSH identity may authenticate"
     systemd = subprocess.run(["systemctl", "is-system-running"], text=True, capture_output=True, check=False)
     result = {
+        "rocky_release": Path("/etc/rocky-release").read_text().strip(),
         "selinux": selinux,
         "ssh_access": ssh_access,
         "kernel": output("uname", "-r"),
         "online_cpus": os.cpu_count(),
+        "memory_kib": int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines()
+                               if line.startswith("MemTotal:"))),
         "systemd": systemd.stdout.strip(),
         "public_connect_errno": errno,
         "ipv4_routes": routes,

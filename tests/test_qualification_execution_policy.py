@@ -1016,10 +1016,15 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = root / ".context" / "mgmt-vm-inputs.json"
+            toolchain = root / "config/contracts/toolchain-lock.json"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(json.dumps({"versions": {"VIRTUALBOX_VERSION": "7.2.18"}}))
             inputs.parent.mkdir(parents=True)
             vm_name = "ecommerce-mgmt-test-policy"
             input_values = {
                 "vm_name": vm_name,
+                "vm_cpus": 4,
+                "vm_memory": 4096,
                 "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
             }
             inputs.write_text(
@@ -1097,6 +1102,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
+                mock.patch.dict(sys.modules, {"rke2_virtualbox_backend": types.SimpleNamespace(
+                    probe=lambda *args, **kwargs: {
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "virtualbox_backend": "NEM",
+                    }
+                )}),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
@@ -1442,12 +1453,17 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             vm_name = "ecommerce-mgmt-test-policy"
+            toolchain = root / "config/contracts/toolchain-lock.json"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(json.dumps({"versions": {"VIRTUALBOX_VERSION": "7.2.18"}}))
             inputs = root / ".context" / "mgmt-vm-inputs.json"
             inputs.parent.mkdir(parents=True)
             inputs.write_text(
                 __import__("json").dumps(
                     {
                         "vm_name": vm_name,
+                        "vm_cpus": 4,
+                        "vm_memory": 4096,
                         "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
                     }
                 )
@@ -1461,6 +1477,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     return ""
                 if args == ("rev-parse", "HEAD"):
                     return head + "\n"
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "b" * 40 + "\n"
                 raise AssertionError(args)
 
             def fake_run(command, **kwargs):
@@ -1484,6 +1502,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=clean_git),
                 mock.patch.object(MOD, "require"),
+                mock.patch.dict(sys.modules, {"rke2_virtualbox_backend": types.SimpleNamespace(
+                    probe=lambda *args, **kwargs: {
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "virtualbox_backend": "NEM",
+                    }
+                )}),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
@@ -2146,6 +2170,29 @@ class QualificationStepGuardTests(unittest.TestCase):
             self.steps.validate_checkpoint(record)
         record["reused_from"]["input_digest"] = self.digest
         self.steps.validate_checkpoint(record)
+
+    def test_reused_runtime_smoke_cannot_omit_or_change_immutable_proof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proof = Path(temporary) / "smoke.json"
+            proof.write_text('{"observed":true}\n', encoding="utf-8")
+            reused = self.steps.checkpoint(
+                qualification="m2.5", step="vm-smoke", source_sha=self.sha,
+                input_digest=self.digest, artifact_digest=self.artifact_digest,
+                status="SKIPPED_REUSED_VERIFIED", started_at=self.started,
+                reused_from={"source_sha": "e" * 40, "input_digest": self.digest,
+                             "artifact_digest": self.artifact_digest},
+            )
+            with self.assertRaisesRegex(ValueError, "runtime evidence"):
+                self.steps.validate_checkpoint(reused, runtime_required=True)
+            import hashlib
+
+            reused["runtime_evidence"] = {
+                "path": str(proof), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+            }
+            self.steps.validate_checkpoint(reused, runtime_required=True)
+            proof.write_text('{"observed":false}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                self.steps.validate_checkpoint(reused, runtime_required=True)
 
     def test_verified_artifact_reuse_forbids_rebuild(self):
         import hashlib

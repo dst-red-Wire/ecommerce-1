@@ -184,7 +184,7 @@ def validate_checkpoint(record: dict, *, source_sha: str | None = None,
     if record["step"] == "preflight" and record["status"] == "PASS":
         _require(record.get("preflight") == {"capacity": "PASS", "environment": "PASS"},
                  "preflight lacks capacity or environment PASS")
-    if runtime_required and record["status"] == "PASS":
+    if runtime_required and record["status"] in {"PASS", "SKIPPED_REUSED_VERIFIED"}:
         proof = record.get("runtime_evidence")
         _require(isinstance(proof, dict) and set(proof) == {"path", "sha256"}
                  and isinstance(proof["path"], str) and bool(proof["path"])

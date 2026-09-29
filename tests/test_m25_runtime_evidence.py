@@ -14,14 +14,19 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import m25_runtime_evidence as m25
+import qualification_steps
 import roadmap_sync
 
 
 HEAD = "a" * 40
 TREE = "b" * 40
+ORIGINAL = "1" * 40
+ORIGINAL_TREE = "2" * 40
 UUID = "12345678-1234-1234-1234-123456789abc"
 BOX_SHA = "c" * 64
 INPUTS = "d" * 64
+TEMPLATE = "3" * 64
+STAGING = "4" * 64
 VM = "ecommerce-mgmt-test-proof"
 
 
@@ -31,40 +36,72 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         for relative in ("config/contracts/machine-image-lock.yaml",
+                         "config/contracts/qualification-execution-policy.yaml",
                          "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json"):
             destination = self.root / relative
-            destination.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
         lock = json.loads((self.root / "config/artifacts/mgmt-rke2-offline-v1.37.0-rke2r1.lock.json").read_text())
         self.manifest_sha = lock["approved_manifest_sha256"]
         self.manifest = {
             "box_sha256": BOX_SHA, "inputs_digest": INPUTS,
+            "packer_template_digest": TEMPLATE, "staging_manifest_sha256": STAGING,
+            "source_sha": ORIGINAL, "source_tree_sha": ORIGINAL_TREE,
             "rocky_version": "10.2", "virtualbox_version": "7.2.18",
             "native_vtx": "PASS", "nem_detected": False,
         }
         source_payloads = {
-            "image_build": {"status": "PASS", "source_sha": HEAD, "source_tree": TREE,
+            "image_build": {"status": "PASS", "source_sha": ORIGINAL, "source_tree": ORIGINAL_TREE,
                             "sha256": BOX_SHA, "artifact": "rocky-10.2-rke2-virtualbox.box",
                             "virtualbox_backend": "NATIVE_VTX", "virtualbox_version": "7.2.18",
                             "packer_build": "PASS"},
-            "image_qualification": {"status": "PASS", "source_sha": HEAD,
+            "image_qualification": {"status": "PASS", "source_sha": ORIGINAL,
                                     "artifact_sha256": BOX_SHA, "artifact": "rocky-10.2-rke2-virtualbox.box",
                                     "qualification": {key: "PASS" for key in (
                                         "boot", "ssh", "rocky_release", "kernel", "systemd",
                                         "rke2_prerequisites", "security", "cleanup", "key_cleanup",
                                         "swap_absent", "rpm_profile")}},
-            "image_release": {"status": "PASS", "source_sha": HEAD,
+            "image_release": {"status": "PASS", "source_sha": ORIGINAL,
                               "artifact_sha256": BOX_SHA, "artifact": "rocky-10.2-rke2-virtualbox.box",
                               "checks": {key: "PASS" for key in (
                                   "exact_source_sha", "build_evidence", "checksum",
                                   "qualification_evidence", "cleanup", "ephemeral_key_absent",
                                   "sbom", "package_manifest", "profile_inventory")}},
-            "native_import": {"status": "PASS", "source_git_sha": HEAD,
-                              "source_tree_sha": TREE, "artifact_sha256": BOX_SHA,
+            "native_import": {"status": "PASS", "source_git_sha": ORIGINAL,
+                              "source_tree_sha": ORIGINAL_TREE, "artifact_sha256": BOX_SHA,
                               "virtualbox_backend": "NATIVE_VTX", "wsl2_restored": "PASS",
                               "bcd_restored": "PASS"},
+            "native_result": {"status": "PASS", "source_git_sha": ORIGINAL,
+                              "source_tree_sha": ORIGINAL_TREE, "artifact_sha256": BOX_SHA,
+                              "staging_manifest_sha256": STAGING, "native_vtx": "PASS",
+                              "nem_detected": False, "virtualbox_backend": "NATIVE_VTX",
+                              "packer": {"build": "PASS"},
+                              "vagrant_smoke": {"rocky_version": "PASS"},
+                              "observations": {"rocky_version": "Rocky Linux release 10.2 (Red Quartz)"}},
+            "image_reuse": qualification_steps.checkpoint(
+                qualification="m2.5", step="image", source_sha=HEAD,
+                input_digest=INPUTS, artifact_digest=BOX_SHA,
+                status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
+                reused_from={"source_sha": ORIGINAL, "input_digest": INPUTS,
+                             "artifact_digest": BOX_SHA}),
+            "backend_probe": {"schema_version": 1, "status": "PASS",
+                              "head_sha": HEAD, "head_tree_sha": TREE,
+                              "box_sha256": BOX_SHA, "vm_uuid": UUID,
+                              "virtualbox_backend": "NATIVE_VTX",
+                              "virtualbox_version": "7.2.18r175117",
+                              "hypervisor_present": False, "host_logical_processors": 8,
+                              "vm_cpus": 4, "vm_memory_mib": 4096,
+                              "virtualbox_log_sha256": "5" * 64},
+            "vm_preflight": {"rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
+                             "kernel": "6.12.0-rocky", "systemd": "running",
+                             "selinux": "Enforcing", "online_cpus": 4,
+                             "memory_kib": 3900000,
+                             "nft_policies": {"output": "drop", "forward": "drop"},
+                             "public_connect_errno": 101,
+                             "cold_artifact_target": True},
             "server_source": {"git_sha": HEAD},
             "rke2_result": {"node_ready": True, "cilium_ready": 1, "selinux": "Enforcing",
+                            "rke2_service": "active",
                             "nft_policies": {"output": "drop", "forward": "drop"},
                             "public_connect_error": 101, "rke2_version": "rke2 version v1.37.0+rke2r1"},
             "role_result": {"exit_code": 0, "vm_uuid": UUID,
@@ -75,14 +112,15 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
             "campaign_result": {
                 "schema_version": 1, "status": "PASS", "head_sha": HEAD,
                 "head_tree_sha": TREE, "vm_uuid": UUID, "box_sha256": BOX_SHA,
+                "virtualbox_backend": "NATIVE_VTX",
                 "manifest_sha256": self.manifest_sha,
                 "actions": [
                     {"action": action, "status": "PASS", "duration_seconds": 1.0,
                      **({"vm_uuid": UUID, "install_required": install} if action == "server" else {})}
                     for action, install in zip(
-                        ["validate", "create", "test", "server", "server", "restage",
+                        ["validate", "create", "diagnostics", "test", "server", "server", "restage",
                          "tamper", "restage", "server", "destroy"],
-                        [None, None, None, True, False, None, None, None, True, None],
+                        [None, None, None, None, True, False, None, None, None, True, None],
                     )
                 ],
             },
@@ -112,7 +150,10 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         destination.write_text(json.dumps(self.evidence), encoding="utf-8")
         self.destination = destination
         for name, value in (("find_matching_box", Path("/unused/box")),
-                            ("verify", self.manifest)):
+                            ("verify", self.manifest),
+                            ("build_inputs", {"inputs_digest": INPUTS,
+                                              "packer_template_digest": TEMPLATE}),
+                            ("source_tree", ORIGINAL_TREE)):
             patcher = mock.patch.object(m25.rocky_box_catalog, name, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -126,6 +167,14 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
 
     def write(self):
         self.destination.write_text(json.dumps(self.evidence), encoding="utf-8")
+
+    def rewrite_source(self, name, mutation):
+        path = self.root / m25._paths(VM)[name]
+        payload = json.loads(path.read_text())
+        mutation(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        self.evidence["source_evidence"][name]["sha256"] = m25._digest(path)
+        self.write()
 
     def test_valid_sources_pass_and_missing_source_fails(self):
         self.assertTrue(self.result()[0])
@@ -159,6 +208,37 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.evidence["source_evidence"]["rke2_result"]["sha256"] = m25._digest(runtime)
         self.write()
         self.assertFalse(self.result()[0])
+
+    def test_changed_input_digest_and_box_digest_are_rejected(self):
+        with mock.patch.object(m25.rocky_box_catalog, "build_inputs",
+                               return_value={"inputs_digest": "f" * 64,
+                                             "packer_template_digest": TEMPLATE}):
+            self.assertFalse(self.result()[0])
+        self.manifest["box_sha256"] = "f" * 64
+        self.assertFalse(self.result()[0])
+
+    def test_unknown_provenance_and_fake_execution_rebinding_are_rejected(self):
+        self.rewrite_source("image_reuse", lambda value: value["reused_from"].update(source_sha="f" * 40))
+        self.assertFalse(self.result()[0])
+        self.rewrite_source("image_reuse", lambda value: value["reused_from"].update(source_sha=ORIGINAL))
+        self.rewrite_source("image_build", lambda value: value.update(source_sha=HEAD, source_tree=TREE))
+        self.assertFalse(self.result()[0])
+
+    def test_original_native_proof_missing_or_nem_is_rejected(self):
+        native = self.root / m25._paths(VM)["native_result"]
+        original = native.read_text()
+        native.unlink()
+        self.assertFalse(self.result()[0])
+        native.write_text(original)
+        self.rewrite_source("native_result", lambda value: value.update(nem_detected=True,
+                                                                       virtualbox_backend="NEM"))
+        self.assertFalse(self.result()[0])
+
+    def test_functional_rke2_nem_is_recorded_separately_from_native_image(self):
+        self.rewrite_source("backend_probe", lambda value: value.update(
+            virtualbox_backend="NEM", hypervisor_present=True))
+        self.rewrite_source("campaign_result", lambda value: value.update(virtualbox_backend="NEM"))
+        self.assertTrue(self.result()[0])
 
 
 if __name__ == "__main__":
