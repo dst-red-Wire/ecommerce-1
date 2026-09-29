@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'ProbeS4U', 'ProbeSystem', 'Watchdog', 'SelfTest')]
+    [ValidateSet('Preflight', 'Prepare', 'Reboot', 'Run', 'Import', 'Resume', 'Cycle', 'Recover', 'ResetFailed', 'ProbeS4U', 'ProbeSystem', 'Watchdog', 'SelfTest')]
     [string]$Action,
     [string]$RepoRoot = '',
     [string]$WslDistribution = '',
@@ -35,6 +35,7 @@ Set-PipelineUtf8
 . (Join-Path $PSScriptRoot 'NativeStorageGc.ps1')
 
 $NativeEntryName = 'Windows - VirtualBox VT-x native'
+$NetworkSmokeNativeEntryName = 'Windows - Ecommerce Network Smoke Native VT-x'
 $NativeTaskName = 'Ecommerce-VirtualBox-Native-Qualification'
 $WatchdogTaskName = 'Ecommerce-VirtualBox-Native-Watchdog'
 $ResumeTaskName = 'Ecommerce-VirtualBox-Native-Import'
@@ -184,6 +185,7 @@ function New-NativeRuntimeIdentity {
 }
 
 function Test-NativeHostIdle {
+    if (-not (Test-NetworkSmokeNativeBootClear -Root $script:LabRootResolved)) { return $false }
     $hostState = Get-NormalHostState
     if (-not $hostState.hypervisor_present -or $hostState.hypervisorlaunchtype -eq 'off') { return $false }
     $normalStatePath = Join-Path $script:LabRootResolved 'normal-host-state.json'
@@ -296,6 +298,228 @@ function Invoke-CompletedCycleCleanup {
         staging_manifest_sha256=$prepared.staging_manifest_sha256
         completed_at=Get-UtcTimestamp
     }) -Path (Join-Path $Root 'evidence\current\staging-retirement.json')
+}
+
+function Assert-NativeArchiveTree {
+    param([string]$Root, [string]$Path)
+    [void](Assert-SafeChildPath -BasePath $Root -CandidatePath $Path)
+    foreach ($candidate in @($Root, (Join-Path $Root 'staging'), $Path)) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Container) -or
+            ((Get-Item -LiteralPath $candidate -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "FAILED staging archive has a missing or reparse ancestor: $candidate"
+        }
+    }
+    $reparse = Get-ChildItem -LiteralPath $Path -Recurse -Force | Where-Object {
+        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+    } | Select-Object -First 1
+    if ($null -ne $reparse) { throw "FAILED staging archive contains a reparse point: $($reparse.FullName)" }
+}
+
+function Copy-NativeFailedEvidence {
+    param([string]$Root, [string]$Archive)
+    $source = Join-Path $Root 'evidence\current'
+    if (-not (Test-Path -LiteralPath $source -PathType Container)) {
+        throw 'FAILED native cycle has no current evidence directory to preserve'
+    }
+    foreach ($ancestor in @($Root, (Join-Path $Root 'evidence'), $source)) {
+        if (-not (Test-Path -LiteralPath $ancestor -PathType Container) -or
+            ((Get-Item -LiteralPath $ancestor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "FAILED native evidence has a missing or reparse ancestor: $ancestor"
+        }
+    }
+    $reparse = Get-ChildItem -LiteralPath $source -Recurse -Force | Where-Object {
+        $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+    } | Select-Object -First 1
+    if ($null -ne $reparse) { throw "FAILED native evidence contains a reparse point: $($reparse.FullName)" }
+    $destination = Join-Path $Archive 'evidence\failed-cycle\current'
+    [void](Assert-SafeChildPath -BasePath $Root -CandidatePath $destination)
+    [void](New-Item -ItemType Directory -Path $destination -Force)
+    $sourcePrefix = [IO.Path]::GetFullPath($source).TrimEnd('\') + '\'
+    foreach ($file in @(Get-ChildItem -LiteralPath $source -File -Recurse -Force)) {
+        $relative = $file.FullName.Substring($sourcePrefix.Length)
+        $target = Join-Path $destination $relative
+        [void](Assert-SafeChildPath -BasePath $Root -CandidatePath $target)
+        [void](New-Item -ItemType Directory -Path (Split-Path -Parent $target) -Force)
+        Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+        if ((Get-FileSha256 -Path $file.FullName) -ne (Get-FileSha256 -Path $target)) {
+            throw "FAILED native evidence copy differs from its source: $relative"
+        }
+    }
+}
+
+function Assert-NativeFailedArchive {
+    param([string]$Root, [string]$Archive, $Prepared, $State)
+    Assert-NativeArchiveTree -Root $Root -Path $Archive
+    $staged = Read-JsonFile (Join-Path $Archive '.prepared.json')
+    if ($staged.source_git_sha -ne $Prepared.source_git_sha -or
+        $staged.source_tree_sha -ne $Prepared.source_tree_sha -or
+        -not (Test-StagingManifest -Root $Archive) -or
+        (Get-FileSha256 -Path (Join-Path $Archive 'SHA256SUMS')) -ne $Prepared.staging_manifest_sha256) {
+        throw 'FAILED staging archive does not preserve the exact prepared source and manifest'
+    }
+    $archivedState = Join-Path $Archive 'evidence\failed-cycle\startup-real\state.json'
+    if (Test-Path -LiteralPath $archivedState -PathType Leaf) {
+        $copy = Read-JsonFile $archivedState
+        if ($copy.phase -ne 'FAILED' -or $copy.source_sha -ne $State.source_sha -or
+            $copy.staging_manifest_sha256 -ne $State.staging_manifest_sha256) {
+            throw 'FAILED staging archive has a conflicting startup state'
+        }
+    }
+    $archivedPrepared = Join-Path $Archive 'evidence\failed-cycle\prepared.json'
+    if (Test-Path -LiteralPath $archivedPrepared -PathType Leaf) {
+        $copy = Read-JsonFile $archivedPrepared
+        if ($copy.status -ne 'PREPARED' -or $copy.source_git_sha -ne $Prepared.source_git_sha -or
+            $copy.staging_manifest_sha256 -ne $Prepared.staging_manifest_sha256) {
+            throw 'FAILED staging archive has a conflicting prepared checkpoint'
+        }
+    }
+}
+
+function Invoke-ResetFailedCycle {
+    param([string]$Root, [scriptblock]$HostIdleProbe = $null)
+    $production = [IO.Path]::GetFullPath($Root).TrimEnd('\') -ieq 'C:\ecommerce-lab'
+    if ($production -and $env:ECOMMERCE_RUNTIME_ORCHESTRATED -ne '1') {
+        throw 'BLOCKED_RUNTIME FAILED staging retirement requires local-virtualization-serialization'
+    }
+    if ($production) { $HostIdleProbe = { Test-NativeHostIdle } }
+    if ($null -eq $HostIdleProbe -or -not (& $HostIdleProbe)) {
+        throw 'BLOCKED_RUNTIME FAILED staging retirement requires normal boot and no active VM or task'
+    }
+    $preparedPath = Join-Path $Root 'prepared.json'
+    $stateRoot = Join-Path $Root 'startup-real'
+    $statePath = Join-Path $stateRoot 'state.json'
+    $stage = Join-Path $Root 'staging\current'
+    $resetPath = Join-Path $Root 'failed-cycle-reset.json'
+    if (-not (Test-Path -LiteralPath $preparedPath -PathType Leaf)) {
+        if ((Test-Path -LiteralPath $stage) -or -not (Test-Path -LiteralPath $resetPath -PathType Leaf)) {
+            throw 'FAILED reset has no prepared checkpoint or completed archive marker'
+        }
+        $reset = Read-JsonFile $resetPath
+        $archive = [IO.Path]::GetFullPath([string]$reset.archive_root)
+        [void](Assert-SafeChildPath -BasePath (Join-Path $Root 'staging') -CandidatePath $archive)
+        if ($reset.source_sha -notmatch '^[0-9a-f]{40}$' -or
+            $reset.staging_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+            $archive -ine (Join-Path $Root "staging\failed-$($reset.source_sha.Substring(0, 20))-$($reset.staging_manifest_sha256.Substring(0, 16))")) {
+            throw 'FAILED reset marker has an invalid archive identity'
+        }
+        Assert-NativeArchiveTree -Root $Root -Path $archive
+        $archivedPrepared = Read-JsonFile (Join-Path $archive 'evidence\failed-cycle\prepared.json')
+        if ($reset.status -notin @('RESETTING', 'FAILED_ARCHIVED') -or
+            $archivedPrepared.status -ne 'PREPARED' -or
+            $archivedPrepared.source_git_sha -ne $reset.source_sha -or
+            $archivedPrepared.staging_manifest_sha256 -ne $reset.staging_manifest_sha256 -or
+            -not (Test-NativeStorageGenerationOwned -LabRoot $Root -Path $archive)) {
+            throw 'FAILED reset marker does not bind an owned archived generation'
+        }
+        if (Test-Path -LiteralPath $stateRoot -PathType Container) {
+            if ($reset.status -eq 'FAILED_ARCHIVED') {
+                $reset.status = 'RESETTING'
+                Write-Utf8Json -Path $resetPath -InputObject $reset
+            }
+            if (Test-Path -LiteralPath (Join-Path $archive 'evidence\failed-cycle\startup-real')) {
+                throw 'FAILED reset found both current and archived startup state directories'
+            }
+            if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
+                $null -ne (Get-ChildItem -LiteralPath $stateRoot -Recurse -Force | Where-Object {
+                    $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+                } | Select-Object -First 1)) { throw 'FAILED startup state contains a reparse point' }
+            $remainingState = Read-JsonFile $statePath
+            if ($remainingState.phase -ne 'FAILED' -or $remainingState.source_sha -ne $reset.source_sha -or
+                $remainingState.staging_manifest_sha256 -ne $reset.staging_manifest_sha256) {
+                throw 'FAILED reset cannot reconcile a different current startup state'
+            }
+            Move-Item -LiteralPath $stateRoot -Destination (Join-Path $archive 'evidence\failed-cycle\startup-real')
+        }
+        $archivedState = Read-JsonFile (Join-Path $archive 'evidence\failed-cycle\startup-real\state.json')
+        if ($archivedState.phase -ne 'FAILED' -or
+            $archivedPrepared.source_git_sha -ne $reset.source_sha -or
+            $archivedState.source_sha -ne $reset.source_sha -or
+            $archivedPrepared.staging_manifest_sha256 -ne $reset.staging_manifest_sha256 -or
+            $archivedState.staging_manifest_sha256 -ne $reset.staging_manifest_sha256 -or
+            (Test-Path -LiteralPath $stateRoot) -or
+            -not (Test-NativeStorageGenerationOwned -LabRoot $Root -Path $archive)) {
+            throw 'FAILED reset marker does not bind a complete archived generation'
+        }
+        if ($reset.status -eq 'RESETTING') {
+            $reset.status = 'FAILED_ARCHIVED'
+            $reset | Add-Member -NotePropertyName archived_at -NotePropertyValue (Get-UtcTimestamp) -Force
+            Write-Utf8Json -Path $resetPath -InputObject $reset
+        }
+        [Console]::WriteLine("PASS native-vtx-reset-failed already-archived=$archive")
+        return
+    }
+    $prepared = Read-JsonFile $preparedPath
+    if ($prepared.schema -ne 1 -or $prepared.status -ne 'PREPARED' -or
+        $prepared.source_git_sha -notmatch '^[0-9a-f]{40}$' -or
+        $prepared.source_tree_sha -notmatch '^[0-9a-f]{40}$' -or
+        $prepared.staging_manifest_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        [IO.Path]::GetFullPath([string]$prepared.stage_root).TrimEnd('\') -ine
+        [IO.Path]::GetFullPath($stage).TrimEnd('\')) {
+        throw 'FAILED reset requires a valid PREPARED checkpoint bound to staging/current'
+    }
+    $generation = "failed-$($prepared.source_git_sha.Substring(0, 20))-$($prepared.staging_manifest_sha256.Substring(0, 16))"
+    $archive = Join-Path $Root "staging\$generation"
+    [void](Assert-SafeChildPath -BasePath (Join-Path $Root 'staging') -CandidatePath $archive)
+    $archivedStatePath = Join-Path $archive 'evidence\failed-cycle\startup-real\state.json'
+    $state = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
+        Read-JsonFile $statePath
+    } else { Read-JsonFile $archivedStatePath }
+    $recovery = Read-JsonFile (Join-Path $Root 'evidence\current\recovery.json')
+    if ($state.schema -ne 1 -or $state.mode -ne 'REAL' -or $state.phase -ne 'FAILED' -or
+        $state.source_sha -ne $prepared.source_git_sha -or
+        $state.source_tree -ne $prepared.source_tree_sha -or
+        $state.staging_manifest_sha256 -ne $prepared.staging_manifest_sha256 -or
+        $recovery.schema -ne 1 -or $recovery.status -ne 'PASS' -or
+        $recovery.scheduled_task_removed -ne $true -or $recovery.native_entry_removed -ne $true -or
+        $recovery.next_boot -ne $prepared.normal_boot_id) {
+        throw 'FAILED reset requires exact-source FAILED state and completed normal-boot recovery'
+    }
+    Write-Utf8Json -Path $resetPath -InputObject ([ordered]@{
+        schema=1; status='RESETTING'; source_sha=$prepared.source_git_sha
+        staging_manifest_sha256=$prepared.staging_manifest_sha256; archive_root=$archive
+        started_at=Get-UtcTimestamp
+    })
+    if (Test-Path -LiteralPath $stage -PathType Container) {
+        if (Test-Path -LiteralPath $archive) { throw 'FAILED reset found both current staging and its archive generation' }
+        Assert-NativeFailedArchive -Root $Root -Archive $stage -Prepared $prepared -State $state
+        Copy-NativeFailedEvidence -Root $Root -Archive $stage
+        Move-Item -LiteralPath $stage -Destination $archive
+    }
+    Assert-NativeFailedArchive -Root $Root -Archive $archive -Prepared $prepared -State $state
+    Copy-NativeFailedEvidence -Root $Root -Archive $archive
+    Write-Utf8Json -Path (Join-Path $archive 'storage-generation.json') -InputObject ([ordered]@{
+        schema=1; owner='ecommerce-1/native-vtx'; kind='staging'; generation=$generation
+        status='failed'; source_sha=$prepared.source_git_sha; completed_at=Get-UtcTimestamp
+    })
+    if (-not (Test-NativeStorageGenerationOwned -LabRoot $Root -Path $archive)) {
+        throw 'FAILED staging archive is not a verified owned storage generation'
+    }
+    if (Test-Path -LiteralPath $stateRoot -PathType Container) {
+        [void](Assert-SafeChildPath -BasePath $Root -CandidatePath $stateRoot)
+        if ((Get-Item -LiteralPath $stateRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint -or
+            $null -ne (Get-ChildItem -LiteralPath $stateRoot -Recurse -Force | Where-Object {
+                $_.Attributes -band [IO.FileAttributes]::ReparsePoint
+            } | Select-Object -First 1)) { throw 'FAILED startup state contains a reparse point' }
+        if (Test-Path -LiteralPath (Join-Path $archive 'evidence\failed-cycle\startup-real')) {
+            throw 'FAILED reset found both current and archived startup state directories'
+        }
+        Move-Item -LiteralPath $stateRoot -Destination (Join-Path $archive 'evidence\failed-cycle\startup-real')
+    }
+    if (-not (Test-Path -LiteralPath $archivedStatePath -PathType Leaf)) {
+        throw 'FAILED reset did not preserve the startup state directory'
+    }
+    Move-Item -LiteralPath $preparedPath -Destination (Join-Path $archive 'evidence\failed-cycle\prepared.json')
+    if ((Test-Path -LiteralPath $stage) -or (Test-Path -LiteralPath $stateRoot) -or
+        (Test-Path -LiteralPath $preparedPath) -or
+        -not (Test-NativeStorageGenerationOwned -LabRoot $Root -Path $archive)) {
+        throw 'FAILED reset did not retire all stale current checkpoints'
+    }
+    Write-Utf8Json -Path $resetPath -InputObject ([ordered]@{
+        schema=1; status='FAILED_ARCHIVED'; source_sha=$prepared.source_git_sha
+        staging_manifest_sha256=$prepared.staging_manifest_sha256; archive_root=$archive
+        archived_at=Get-UtcTimestamp
+    })
+    [Console]::WriteLine("PASS native-vtx-reset-failed source=$($prepared.source_git_sha) archive=$archive")
 }
 
 function Assert-NativeFreeSpace {
@@ -510,15 +734,52 @@ function Assert-NormalHostRestored {
     return $after
 }
 
-function Find-NativeWindowsLoaderIds {
-    $result = Invoke-BcdEdit -Arguments @('/enum', 'all', '/v')
-    $entries = @(Get-BcdEntries -Text ($result.StdOut + "`n" + $result.StdErr))
+function Select-NativeWindowsLoaderIds {
+    param([string]$Text, [string]$EntryName)
+    $entries = @(Get-BcdEntries -Text $Text)
     return @(
         $entries | Where-Object {
             $_.Text -match '(?i)winload\.(efi|exe)' -and
-            $_.Text -match ('(?m)^.*' + [regex]::Escape($NativeEntryName) + '\s*$')
+            $_.Text -match ('(?m)^.*' + [regex]::Escape($EntryName) + '\s*$')
         } | ForEach-Object { $_.Id }
     )
+}
+
+function Find-NativeWindowsLoaderIds {
+    param([string]$EntryName = $NativeEntryName)
+    $result = Invoke-BcdEdit -Arguments @('/enum', 'all', '/v')
+    return @(Select-NativeWindowsLoaderIds -Text ($result.StdOut + "`n" + $result.StdErr) -EntryName $EntryName)
+}
+
+function Test-NetworkSmokeNativeBootClear {
+    param([string]$Root, [scriptblock]$EntryProbe = $null)
+    $smokeRoot = Join-Path $Root 'network-smoke'
+    $statePath = Join-Path $smokeRoot 'native-boot.json'
+    if (Test-Path -LiteralPath $smokeRoot) {
+        if (-not (Test-Path -LiteralPath $smokeRoot -PathType Container) -or
+            ((Get-Item -LiteralPath $smokeRoot -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return $false
+        }
+    }
+    if (Test-Path -LiteralPath $statePath) {
+        if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or
+            ((Get-Item -LiteralPath $statePath -Force).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            return $false
+        }
+        try {
+            $state = Read-JsonFile $statePath
+            if ($state.schema -ne 1 -or $state.mode -ne 'NETWORK_SMOKE_NATIVE' -or
+                $state.phase -ne 'RECOVERED' -or $state.entry_name -ne $NetworkSmokeNativeEntryName) {
+                return $false
+            }
+        }
+        catch { return $false }
+    }
+    if ($null -eq $EntryProbe) {
+        $entries = @(Find-NativeWindowsLoaderIds -EntryName $NetworkSmokeNativeEntryName)
+    }
+    else { $entries = @(& $EntryProbe) }
+    return $entries.Count -eq 0
 }
 
 function Set-OneShotBootSequence {
@@ -541,7 +802,7 @@ function Write-StagingManifest {
     foreach ($file in (Get-ChildItem -LiteralPath $Root -File -Recurse | Sort-Object FullName)) {
         $relative = $file.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
         if (
-            $relative -in @('.prepared.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -or
+            $relative -in @('.prepared.json', 'storage-generation.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -or
             $relative -match '^(artifacts|evidence|logs|smoke-run|local-services-run)/'
         ) {
             continue
@@ -581,7 +842,7 @@ function Test-StagingManifest {
             $_.FullName.Substring($Root.Length).TrimStart('\').Replace('\', '/')
         } | Where-Object {
             $_ -ne 'SHA256SUMS' -and
-            $_ -notin @('.prepared.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -and
+            $_ -notin @('.prepared.json', 'storage-generation.json', 'qualification-key', 'qualification-key.pub', 'lab-runtime-key') -and
             $_ -notmatch '^(artifacts|evidence|logs|smoke-run|probe|local-services-run)/'
         }
     )
@@ -1940,6 +2201,9 @@ function Invoke-Prepare {
     if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
         throw 'Prepare repository root must be the exact WSL worktree that owns the source SHA'
     }
+    if (-not (Test-NetworkSmokeNativeBootClear -Root $script:LabRootResolved)) {
+        throw 'BLOCKED_RUNTIME network smoke native boot must be recovered before image preparation'
+    }
     $minimumStageGiB = if ($ReuseBoxPath) { 24 } else { 40 }
     $targetStageGiB = if ($ReuseBoxPath) { 32 } else { 48 }
     $gitState = Get-GitState -Distribution $WslDistribution -WslRepoRoot $WslRepoRoot
@@ -2204,6 +2468,9 @@ function Invoke-Prepare {
 }
 
 function Invoke-Reboot {
+    if (-not (Test-NetworkSmokeNativeBootClear -Root $script:LabRootResolved)) {
+        throw 'BLOCKED_RUNTIME network smoke native boot must be recovered before image reboot'
+    }
     $prepared = Read-JsonFile (Join-Path $script:LabRootResolved 'prepared.json')
     if ($prepared.status -ne 'PREPARED' -or -not (Test-StagingManifest -Root ([string]$prepared.stage_root))) {
         throw 'Native reboot requires verified PREPARED staging'
@@ -2300,6 +2567,9 @@ function Invoke-CyclePreflight {
     $expectedRoot = "\\wsl.localhost\$WslDistribution$($WslRepoRoot.Replace('/', '\'))"
     if ([IO.Path]::GetFullPath($root).TrimEnd('\') -ine [IO.Path]::GetFullPath($expectedRoot).TrimEnd('\')) {
         throw 'Native cycle preflight must target the exact WSL source worktree'
+    }
+    if (-not (Test-NetworkSmokeNativeBootClear -Root $script:LabRootResolved)) {
+        throw 'BLOCKED_RUNTIME network smoke native boot must be recovered before image preflight'
     }
     [void](Get-ValidatedNativeReuseBox)
     Invoke-CompletedCycleCleanup -Root $script:LabRootResolved
@@ -2403,6 +2673,12 @@ function Invoke-Resume {
 }
 
 function Invoke-SelfTest {
+    $storageTimestamp = '2026-09-29T22:22:37.0000000Z'
+    $storageDate = [DateTime]::Parse($storageTimestamp, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::RoundtripKind)
+    if ((Convert-NativeStorageTimestampUtc -Value $storageTimestamp) -ne
+        (Convert-NativeStorageTimestampUtc -Value $storageDate)) {
+        throw 'Storage generation timestamp differs between JSON string and DateTime parsers'
+    }
     if ((Get-NativeSshFailureCode -Stage 'remote_command_ready' -Detail 'timeout') -ne 'REMOTE_COMMAND_FAILED' -or
         (Get-NativeSshFailureCode -Stage 'rocky_runtime' -Detail 'wrong OS') -ne 'ROCKY_RUNTIME_INVALID') {
         throw 'Direct SSH and Rocky runtime failure stages are not distinct'
@@ -2424,6 +2700,12 @@ description             $NativeEntryName
 "@
     $entries = @(Get-BcdEntries -Text $fixture)
     if ($entries.Count -ne 2 -or $entries[1].Id -ne $native) { throw 'BCD GUID parsing self-test failed' }
+    $networkLoader = '{33333333-3333-3333-3333-333333333333}'
+    $networkFixture = $fixture + "`n`nWindows Boot Loader`n-------------------`nidentifier              $networkLoader`npath                    \Windows\system32\winload.efi`ndescription             $NetworkSmokeNativeEntryName`n"
+    $networkEntries = @(Select-NativeWindowsLoaderIds -Text $networkFixture -EntryName $NetworkSmokeNativeEntryName)
+    if ($networkEntries.Count -ne 1 -or $networkEntries[0] -ne $networkLoader) {
+        throw 'Network smoke native BCD entry parser self-test failed'
+    }
     if ((Get-HypervisorLaunchType -BcdText $entries[0].Text) -ne 'DEFAULT_ABSENT') { throw 'Absent normal hypervisorlaunchtype must remain absent' }
     if ((Get-HypervisorLaunchType -BcdText ($entries[1].Text + "`nhypervisorlaunchtype    off")) -ne 'off') { throw 'Native off hypervisorlaunchtype parser failed' }
     try { [void](Assert-Guid -Value '{bootmgr}'); throw 'bootmgr rejection self-test failed' } catch { }
@@ -2433,6 +2715,25 @@ description             $NativeEntryName
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ("native-vtx-selftest-" + [Guid]::NewGuid().ToString('N'))
     try {
         [void](New-Item -ItemType Directory -Path $temporary)
+        $networkGuardRoot = Join-Path $temporary 'network-guard'
+        [void](New-Item -ItemType Directory -Path $networkGuardRoot)
+        if (-not (Test-NetworkSmokeNativeBootClear -Root $networkGuardRoot -EntryProbe { @() }) -or
+            (Test-NetworkSmokeNativeBootClear -Root $networkGuardRoot -EntryProbe { '{33333333-3333-3333-3333-333333333333}' })) {
+            throw 'Network smoke native boot entry guard self-test failed'
+        }
+        $networkStatePath = Join-Path $networkGuardRoot 'network-smoke\native-boot.json'
+        $networkState = [ordered]@{
+            schema=1; mode='NETWORK_SMOKE_NATIVE'; phase='PREPARED'; entry_name=$NetworkSmokeNativeEntryName
+        }
+        Write-Utf8Json -Path $networkStatePath -InputObject $networkState
+        if (Test-NetworkSmokeNativeBootClear -Root $networkGuardRoot -EntryProbe { @() }) {
+            throw 'Active network smoke native boot state was accepted'
+        }
+        $networkState.phase = 'RECOVERED'
+        Write-Utf8Json -Path $networkStatePath -InputObject $networkState
+        if (-not (Test-NetworkSmokeNativeBootClear -Root $networkGuardRoot -EntryProbe { @() })) {
+            throw 'Recovered network smoke native boot state was rejected'
+        }
         $attemptRoot = Join-Path $temporary 'attempts'
         [void](New-Item -ItemType Directory -Path $attemptRoot)
         New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('a' * 40)
@@ -2560,6 +2861,74 @@ description             $NativeEntryName
             if ((Read-JsonFile (Get-NativeStatePath -SourceSha $nextSha)).source_sha -ne $nextSha) {
                 throw 'Completed cycle did not converge into the next exact-SHA state'
             }
+            foreach ($scenario in @('full', 'stage-moved', 'state-moved', 'post-checkpoints')) {
+                $failedRoot = Join-Path $temporary "failed-$scenario"
+                $script:LabRootResolved = $failedRoot
+                $failedSha = 'f' * 40
+                $failedTree = 'e' * 40
+                $failedStage = Join-Path $failedRoot 'staging\current'
+                [void](New-Item -ItemType Directory -Path $failedStage -Force)
+                foreach ($name in 1..8) { [IO.File]::WriteAllText((Join-Path $failedStage "$name.txt"), "failed-$name") }
+                $failedManifest = Get-FileSha256 -Path (Write-StagingManifest -Root $failedStage)
+                Write-Utf8Json -Path (Join-Path $failedStage '.prepared.json') -InputObject ([ordered]@{
+                    schema=1; source_git_sha=$failedSha; source_tree_sha=$failedTree
+                })
+                Write-Utf8Json -Path (Join-Path $failedRoot 'prepared.json') -InputObject ([ordered]@{
+                    schema=1; status='PREPARED'; source_git_sha=$failedSha; source_tree_sha=$failedTree
+                    staging_manifest_sha256=$failedManifest; stage_root=$failedStage; normal_boot_id=$normal
+                })
+                Initialize-NativeState -SourceSha $failedSha -SourceTree $failedTree -ManifestSha256 $failedManifest -NormalBootId $normal
+                Move-NativePhase -SourceSha $failedSha -Expected 'PREPARED' -Next 'FAILED'
+                Write-Utf8Json -Path (Join-Path $failedRoot 'evidence\current\recovery.json') -InputObject ([ordered]@{
+                    schema=1; status='PASS'; scheduled_task_removed=$true; native_entry_removed=$true
+                    next_boot=$normal
+                })
+                Write-Utf8Json -Path (Join-Path $failedRoot 'evidence\current\failure.json') -InputObject ([ordered]@{
+                    status='FAIL'; source_sha=$failedSha
+                })
+                $blocked = $false
+                try { Invoke-ResetFailedCycle -Root $failedRoot -HostIdleProbe { $false } }
+                catch { $blocked = $_.Exception.Message.StartsWith('BLOCKED_RUNTIME', [StringComparison]::Ordinal) }
+                if (-not $blocked -or -not (Test-Path -LiteralPath $failedStage)) {
+                    throw 'FAILED staging reset was allowed without an idle runtime'
+                }
+                $failedGeneration = "failed-$($failedSha.Substring(0, 20))-$($failedManifest.Substring(0, 16))"
+                $failedArchive = Join-Path $failedRoot "staging\$failedGeneration"
+                if ($scenario -ne 'full') {
+                    Move-Item -LiteralPath $failedStage -Destination $failedArchive
+                    if ($scenario -eq 'state-moved') {
+                        [void](New-Item -ItemType Directory -Path (Join-Path $failedArchive 'evidence\failed-cycle') -Force)
+                        Move-Item -LiteralPath (Join-Path $failedRoot 'startup-real') -Destination (Join-Path $failedArchive 'evidence\failed-cycle\startup-real')
+                    }
+                    if ($scenario -eq 'post-checkpoints') {
+                        Copy-NativeFailedEvidence -Root $failedRoot -Archive $failedArchive
+                        Write-Utf8Json -Path (Join-Path $failedArchive 'storage-generation.json') -InputObject ([ordered]@{
+                            schema=1; owner='ecommerce-1/native-vtx'; kind='staging'; generation=$failedGeneration
+                            status='failed'; source_sha=$failedSha; completed_at=Get-UtcTimestamp
+                        })
+                        Write-Utf8Json -Path (Join-Path $failedRoot 'failed-cycle-reset.json') -InputObject ([ordered]@{
+                            schema=1; status='RESETTING'; source_sha=$failedSha
+                            staging_manifest_sha256=$failedManifest; archive_root=$failedArchive
+                            started_at=Get-UtcTimestamp
+                        })
+                        Move-Item -LiteralPath (Join-Path $failedRoot 'startup-real') -Destination (Join-Path $failedArchive 'evidence\failed-cycle\startup-real')
+                        Move-Item -LiteralPath (Join-Path $failedRoot 'prepared.json') -Destination (Join-Path $failedArchive 'evidence\failed-cycle\prepared.json')
+                        if ((Read-JsonFile (Join-Path $failedRoot 'failed-cycle-reset.json')).status -ne 'RESETTING') {
+                            throw 'Interrupted FAILED reset prematurely reported completion'
+                        }
+                    }
+                }
+                Invoke-ResetFailedCycle -Root $failedRoot -HostIdleProbe { $true }
+                Invoke-ResetFailedCycle -Root $failedRoot -HostIdleProbe { $true }
+                if ((Test-Path -LiteralPath $failedStage) -or (Test-Path -LiteralPath (Join-Path $failedRoot 'prepared.json')) -or
+                    (Test-Path -LiteralPath (Join-Path $failedRoot 'startup-real')) -or
+                    -not (Test-NativeStorageGenerationOwned -LabRoot $failedRoot -Path $failedArchive) -or
+                    -not (Test-Path -LiteralPath (Join-Path $failedArchive 'evidence\failed-cycle\current\failure.json')) -or
+                    (Read-JsonFile (Join-Path $failedArchive 'evidence\failed-cycle\startup-real\state.json')).phase -ne 'FAILED' -or
+                    (Read-JsonFile (Join-Path $failedRoot 'failed-cycle-reset.json')).status -ne 'FAILED_ARCHIVED') {
+                    throw "FAILED staging reset did not preserve and retire the $scenario cycle"
+                }
+            }
         }
         finally { $script:LabRootResolved = $previousRoot }
         Write-Utf8Json -Path (Join-Path $temporary 'runtime-contract.json') -InputObject ([ordered]@{
@@ -2590,7 +2959,7 @@ description             $NativeEntryName
 $script:LabRootResolved = Resolve-LabRoot -Path $LabRoot
 
 try {
-    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator)) {
+    if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'ResetFailed', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator)) {
         throw 'BLOCKED_PRIVILEGE: native VT-x boot operations require an administrator PowerShell token before preparation'
     }
     switch ($Action) {
@@ -2598,6 +2967,7 @@ try {
         'Preflight' { Invoke-CyclePreflight }
         'Reboot' { Invoke-Reboot }
         'Recover' { Invoke-Recover }
+        'ResetFailed' { Invoke-ResetFailedCycle -Root $script:LabRootResolved }
         'SelfTest' { Invoke-SelfTest }
         'Run' { Invoke-NativeRun }
         'Import' { Invoke-Import }

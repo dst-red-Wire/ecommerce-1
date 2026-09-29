@@ -258,6 +258,12 @@ It arms the normal Windows loader for the next boot and removes the temporary
 tasks. Full BCD restoration remains a manual last resort using the verified backup
 under `C:\ecommerce-lab\bcd`.
 
+After a failed cycle has recovered to the normal boot, use
+`make image-rocky-windows-native-reset-failed` from an administrator PowerShell
+once no VirtualBox VM remains registered. It archives the failed staging and
+checkpoints under the laboratory root before a new exact-SHA preparation; it
+does not turn the failed attempt into qualification proof.
+
 The legacy stage-specific commands remain available for bounded diagnostics:
 
 ```console

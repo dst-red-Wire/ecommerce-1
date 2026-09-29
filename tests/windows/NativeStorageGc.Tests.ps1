@@ -3,7 +3,8 @@ Set-StrictMode -Version Latest
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 Import-Module (Join-Path $repo 'scripts/windows/RockyImagePipeline.psm1') -Force
 . (Join-Path $repo 'scripts/windows/NativeStorageGc.ps1')
-function Test-StagingManifest { param([string]$Root) return $false }
+$script:OwnedFailedStage = ''
+function Test-StagingManifest { param([string]$Root) return $Root -eq $script:OwnedFailedStage }
 function Assert-Equal { param($Actual, $Expected, [string]$What) if ($Actual -ne $Expected) { throw "$What expected=$Expected actual=$Actual" } }
 $base = Join-Path $env:TEMP ("ecommerce-storage-gc-test-" + [guid]::NewGuid().ToString('N'))
 [void](New-Item -ItemType Directory -Path $base)
@@ -45,6 +46,31 @@ try {
     Assert-Equal (Test-NativeStorageGenerationOwned -LabRoot $base -Path $env:TEMP) $false 'outside ownership'
     $reuse = Join-Path $paths[0] $boxName
     Assert-Equal (Test-NativeStorageGenerationProtected -LabRoot $base -Path $paths[0] -ReuseBoxPath $reuse) $true 'reuse protection'
+    $failedDigest = 'b' * 64
+    $failedName = "failed-$($sha.Substring(0, 20))-$($failedDigest.Substring(0, 16))"
+    $failedStage = Join-Path $base "staging/$failedName"
+    [void](New-Item -ItemType Directory -Path $failedStage)
+    $script:OwnedFailedStage = $failedStage
+    Write-Utf8Json -Path (Join-Path $failedStage '.prepared.json') -InputObject @{
+        schema=1; source_git_sha=$sha
+    }
+    Write-Utf8Json -Path (Join-Path $failedStage 'storage-generation.json') -InputObject @{
+        schema=1; owner='ecommerce-1/native-vtx'; kind='staging'; generation=$failedName
+        source_sha=$sha; status='failed'; completed_at='2026-01-01T00:00:00Z'
+    }
+    Assert-Equal (Test-NativeStorageGenerationOwned -LabRoot $base -Path $failedStage) $true 'failed archive ownership'
+    foreach ($markerStatus in @('RESETTING','FAILED_ARCHIVED')) {
+        Write-Utf8Json -Path (Join-Path $base 'failed-cycle-reset.json') -InputObject @{
+            schema=1; status=$markerStatus; source_sha=$sha
+            staging_manifest_sha256=$failedDigest; archive_root=$failedStage
+        }
+        Assert-Equal (Test-NativeStorageGenerationProtected -LabRoot $base -Path $failedStage) $true "$markerStatus archive protection"
+        $deletionBlocked = $false
+        try { Remove-NativeStorageGeneration -LabRoot $base -Path $failedStage }
+        catch { $deletionBlocked = $_.Exception.Message.Contains('protected') }
+        Assert-Equal $deletionBlocked $true "$markerStatus archive deletion refusal"
+    }
+    Assert-Equal (Test-Path -LiteralPath $failedStage) $true 'referenced failed archive retained'
     Write-Utf8Json -Path (Join-Path $base 'prepared.json') -InputObject @{stage_root=$paths[1]}
     Assert-Equal (Test-NativeStorageGenerationProtected -LabRoot $base -Path $paths[1]) $true 'prepared protection'
     Remove-Item -LiteralPath (Join-Path $base 'prepared.json') -Force

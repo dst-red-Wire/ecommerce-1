@@ -1,6 +1,25 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Convert-NativeStorageTimestampUtc {
+    param([Parameter(Mandatory = $true)]$Value)
+    if ($Value -is [DateTimeOffset]) {
+        $timestamp = $Value
+    }
+    elseif ($Value -is [DateTime]) {
+        if ($Value.Kind -eq [DateTimeKind]::Unspecified) {
+            throw 'Storage generation timestamp has no timezone'
+        }
+        $timestamp = [DateTimeOffset]::new($Value)
+    }
+    elseif ($Value -is [string] -and
+        $Value -match '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$') {
+        $timestamp = [DateTimeOffset]::Parse($Value, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    else { throw 'Storage generation timestamp is not an ISO-8601 value with timezone' }
+    return $timestamp.ToUniversalTime().ToString('o', [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Assert-NativeGcPath {
     param([string]$LabRoot, [string]$Path)
     $root = [IO.Path]::GetFullPath($LabRoot).TrimEnd('\')
@@ -39,7 +58,7 @@ function Test-NativeStorageGenerationOwned {
             $manifest.source_sha -notmatch '^[0-9a-f]{40}$' -or
             $manifest.status -notin @('successful','failed') -or
             [string]::IsNullOrWhiteSpace([string]$manifest.completed_at)) { return $false }
-        [void][DateTimeOffset]::Parse([string]$manifest.completed_at)
+        [void](Convert-NativeStorageTimestampUtc -Value $manifest.completed_at)
         if ($kind -eq 'artifacts') {
             $boxManifest = Read-JsonFile (Join-Path $target 'manifest.json')
             if ($boxManifest.schema -ne 1 -or $boxManifest.source_sha -ne $manifest.source_sha -or
@@ -74,7 +93,7 @@ function Get-NativeStorageGeneration {
             $rows += [pscustomobject]@{
                 path = $item.FullName; generation = $item.Name; kind = $kind
                 owned = $owned; status = if ($owned) { [string]$manifest.status } else { '' }
-                completed_at = if ($owned) { [string]$manifest.completed_at } else { '' }
+                completed_at = if ($owned) { Convert-NativeStorageTimestampUtc -Value $manifest.completed_at } else { '' }
             }
         }
     }
@@ -85,6 +104,21 @@ function Test-NativeStorageGenerationProtected {
     param([string]$LabRoot, [string]$Path, [string]$ReuseBoxPath = '')
     $target = [IO.Path]::GetFullPath($Path).TrimEnd('\')
     if ((Split-Path -Leaf $target) -eq 'current') { return $true }
+    $resetPath = Join-Path $LabRoot 'failed-cycle-reset.json'
+    if (Test-Path -LiteralPath $resetPath -PathType Leaf) {
+        $reset = Read-JsonFile $resetPath
+        if ($reset.status -notin @('RESETTING', 'FAILED_ARCHIVED') -or
+            $reset.source_sha -notmatch '^[0-9a-f]{40}$' -or
+            $reset.staging_manifest_sha256 -notmatch '^[0-9a-f]{64}$') {
+            throw 'FAILED reset marker has an invalid storage protection identity'
+        }
+        $expected = [IO.Path]::GetFullPath((Join-Path $LabRoot (
+            "staging\failed-$($reset.source_sha.Substring(0, 20))-$($reset.staging_manifest_sha256.Substring(0, 16))"
+        ))).TrimEnd('\')
+        $archive = [IO.Path]::GetFullPath([string]$reset.archive_root).TrimEnd('\')
+        if ($archive -ine $expected) { throw 'FAILED reset marker references a different storage generation' }
+        if ($archive -ieq $target) { return $true }
+    }
     if ($ReuseBoxPath) {
         $reuse = [IO.Path]::GetFullPath($ReuseBoxPath)
         if ($reuse.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)) { return $true }
@@ -222,7 +256,7 @@ function Invoke-NativeStorageGc {
             }
             $currentManifest = Read-JsonFile (Join-Path $item.path 'storage-generation.json')
             if ($currentManifest.status -ne $item.status -or
-                $currentManifest.completed_at -ne $item.completed_at) {
+                (Convert-NativeStorageTimestampUtc -Value $currentManifest.completed_at) -ne $item.completed_at) {
                 throw "BLOCKED_RUNTIME storage generation changed after inventory: $($item.path)"
             }
             if (-not (Test-NativeStorageGenerationOwned -LabRoot $root -Path $item.path) -or

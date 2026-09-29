@@ -9654,7 +9654,7 @@ def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
 
 
 def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
-    if action not in {"prepare", "reboot", "import", "recover", "selftest"}:
+    if action not in {"prepare", "reboot", "import", "recover", "resetfailed", "selftest"}:
         return fail(f"unsupported Windows native VT-x cycle action: {action}")
     cycle = (
         ruby_yaml("config/contracts/machine-image-lock.yaml")
@@ -9686,6 +9686,7 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
         "reboot": "Reboot",
         "import": "Import",
         "recover": "Recover",
+        "resetfailed": "ResetFailed",
         "selftest": "SelfTest",
     }[action]
     command = [
@@ -9960,6 +9961,57 @@ def lab_network_native_prepare(campaign_id: str,
     print(f"PASS lab-network-native-prepare source_sha={head} runner={runner_windows}")
     print(f"NATIVE_RESUME=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {runner_windows} -Action Resume -StageRoot {stage_windows} -RunnerSourceSha {head}")
     return 0
+
+
+def lab_network_native_boot(action: str, campaign_id: str) -> int:
+    """Manage the retained campaign's one-shot native Windows boot."""
+    if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
+        return fail("unsupported native network-smoke boot action")
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("native network-smoke boot requires an exact CAMPAIGN_ID")
+    if action in {"Prepare", "Reboot"}:
+        if git("status", "--porcelain", "--untracked-files=all").strip():
+            return fail("native network-smoke boot requires a clean exact-SHA worktree")
+        if action == "Prepare" and lab_network_native_prepare(campaign_id):
+            return 2
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    script = ROOT / "scripts/windows/LabNativeBoot.ps1"
+    if not powershell.is_file() or not script.is_file():
+        return fail("native network-smoke boot PowerShell entrypoint is unavailable")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("native network-smoke boot requires a WSL distribution")
+    try:
+        script_windows = output(["wslpath", "-w", str(script)]).strip()
+    except RuntimeError as exc:
+        return fail(f"native network-smoke boot script path is unavailable: {exc}")
+    if not script_windows.startswith("\\\\"):
+        return fail("native network-smoke boot script must resolve through the WSL UNC bridge")
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-File", script_windows, "-Action", action, "-CampaignId", campaign_id,
+               "-SourceSha", git("rev-parse", "HEAD").strip(), "-LabRoot", r"C:\ecommerce-lab",
+               "-WslDistribution", distribution, "-WslRepoRoot", str(ROOT)]
+    return run(command, cwd=Path("/mnt/c/Windows"),
+               env=_windows_powershell_environment(), check=False).returncode
+
+
+def lab_network_native_boot_with_runtime(command: str, campaign_id: str) -> int:
+    """Serialize BCD and retained VirtualBox state checks with the runtime lock."""
+    records: list[dict] = []
+
+    def execute(runtime_env: dict[str, str]) -> int:
+        result = run(_controller_command(command, "--campaign-id", campaign_id),
+                     check=False, env=runtime_env)
+        records.append({"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL",
+                        "exit_code": result.returncode})
+        return result.returncode
+
+    return _execute_with_runtime(
+        [], execute, workflow=f"network-smoke:{command}", head="WORKTREE",
+        environment=os.environ.copy(),
+        workflow_capabilities=["local-virtualization-serialization"],
+        records=records,
+    )
 
 
 def lab_network_status(campaign_id: str) -> int:
@@ -12914,6 +12966,7 @@ def main() -> int:
     sub.add_parser("image-rocky-windows-native-reboot")
     sub.add_parser("image-rocky-windows-native-import")
     sub.add_parser("image-rocky-windows-native-recover")
+    sub.add_parser("image-rocky-windows-native-reset-failed")
     sub.add_parser("image-rocky-windows-native-self-test")
     sub.add_parser("lab-ssh-key")
     packer_box = sub.add_parser("packer-box")
@@ -12933,6 +12986,10 @@ def main() -> int:
     lab_import.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     lab_native_prepare = sub.add_parser("lab-network-native-prepare")
     lab_native_prepare.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    for name in ("lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
+                 "lab-network-native-boot-recover", "lab-network-native-boot-self-test"):
+        native_boot = sub.add_parser(name)
+        native_boot.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     lab_status = sub.add_parser("lab-network-status")
     lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
@@ -13182,10 +13239,16 @@ def main() -> int:
             "image-rocky-windows-qualify", "image-rocky-windows-release",
             "image-rocky-windows-native-prepare", "image-rocky-windows-native-reboot",
             "image-rocky-windows-native-import", "image-rocky-windows-native-recover",
+            "image-rocky-windows-native-reset-failed",
             "image-rocky-linux-preflight", "image-rocky-linux-build",
             "image-rocky-linux-qualify", "image-rocky-linux-release",
         } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
             return image_phase_with_runtime(args.cmd, offline=getattr(args, "offline", False))
+        if args.cmd in {
+            "lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
+            "lab-network-native-boot-recover",
+        } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+            return lab_network_native_boot_with_runtime(args.cmd, args.campaign_id)
         if args.cmd == "image-rocky-preflight":
             return windows_image_pipeline("preflight")
         if args.cmd == "image-rocky-build":
@@ -13210,6 +13273,8 @@ def main() -> int:
             return windows_native_vtx_cycle("import")
         if args.cmd == "image-rocky-windows-native-recover":
             return windows_native_vtx_cycle("recover")
+        if args.cmd == "image-rocky-windows-native-reset-failed":
+            return windows_native_vtx_cycle("resetfailed")
         if args.cmd == "image-rocky-windows-native-self-test":
             return windows_native_vtx_cycle("selftest")
         if args.cmd == "lab-ssh-key":
@@ -13228,6 +13293,14 @@ def main() -> int:
             return lab_network_import(args.campaign_id)
         if args.cmd == "lab-network-native-prepare":
             return lab_network_native_prepare(args.campaign_id)
+        if args.cmd.startswith("lab-network-native-boot-"):
+            action = {
+                "lab-network-native-boot-prepare": "Prepare",
+                "lab-network-native-boot-reboot": "Reboot",
+                "lab-network-native-boot-recover": "Recover",
+                "lab-network-native-boot-self-test": "SelfTest",
+            }[args.cmd]
+            return lab_network_native_boot(action, args.campaign_id)
         if args.cmd == "lab-network-status":
             return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":

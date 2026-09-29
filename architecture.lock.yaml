@@ -34,12 +34,17 @@ repository_governance:
         - image-rocky-windows-native-prepare
         - image-rocky-windows-native-reboot
         - image-rocky-windows-native-recover
+        - image-rocky-windows-native-reset-failed
         - image-rocky-windows-native-self-test
         - image-rocky-windows-preflight
         - image-rocky-windows-qualify
         - image-rocky-windows-release
         - lab-clean
         - lab-network-import
+        - lab-network-native-boot-prepare
+        - lab-network-native-boot-reboot
+        - lab-network-native-boot-recover
+        - lab-network-native-boot-self-test
         - lab-network-native-prepare
         - lab-network-resume
         - lab-network-smoke

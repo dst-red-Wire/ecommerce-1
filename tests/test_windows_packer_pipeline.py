@@ -116,6 +116,13 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, timeout=90,
         )
         self.assertEqual(0, cycle.returncode, cycle.stdout + cycle.stderr)
+        network_boot = subprocess.run(
+            [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "scripts/windows/LabNativeBoot.ps1",
+             "-Action", "SelfTest"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, network_boot.returncode, network_boot.stdout + network_boot.stderr)
 
     def test_windows_seed_server_survives_empty_optional_response(self):
         powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
@@ -152,7 +159,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NEM", self.native)
 
     def test_native_boot_mutation_fails_early_without_administrator_token(self):
-        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator))", self.native)
+        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'ResetFailed', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator))", self.native)
         self.assertIn("BLOCKED_PRIVILEGE", self.native)
         self.assertNotIn("Invoke-ElevatedSelf", self.native)
 
