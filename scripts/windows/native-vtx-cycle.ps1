@@ -906,6 +906,19 @@ function Remove-NativeWatchdogTask {
     }
 }
 
+function Test-CurrentNativeResult {
+    param([string]$Path, [string]$SourceSha, [string]$ManifestSha256, [datetime]$BootPendingAt)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $result = Read-JsonFile $Path
+        return ($result.source_git_sha -eq $SourceSha -and
+            $result.staging_manifest_sha256 -eq $ManifestSha256 -and
+            -not [string]::IsNullOrWhiteSpace([string]$result.completed_at) -and
+            ([datetime]$result.started_at).ToUniversalTime() -ge $BootPendingAt.ToUniversalTime())
+    }
+    catch { return $false }
+}
+
 function Invoke-NativeWatchdog {
     if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
         throw 'Native watchdog requires the SYSTEM startup principal'
@@ -923,13 +936,17 @@ function Invoke-NativeWatchdog {
     $resultPath = Join-Path $script:LabRootResolved 'evidence\current\result.json'
     $deadline = [DateTime]::UtcNow.AddMinutes(270)
     $resultObservedAt = $null
+    $freshResultObserved = $false
     do {
         $state = Read-JsonFile $statePath
         if ($state.source_sha -ne $ExpectedSourceSha -or $state.normal_boot_id -ne $normalId -or
             $state.native_boot_id -ne $nativeId -or $state.staging_manifest_sha256 -ne $prepared.staging_manifest_sha256) {
             throw 'Native watchdog state binding is inconsistent'
         }
-        if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+        $pending = @($state.history | Where-Object { $_.phase -eq 'NATIVE_BOOT_PENDING' })
+        if ($pending.Count -ne 1) { throw 'Native watchdog boot checkpoint is missing or ambiguous' }
+        $freshResultObserved = Test-CurrentNativeResult -Path $resultPath -SourceSha $ExpectedSourceSha -ManifestSha256 ([string]$prepared.staging_manifest_sha256) -BootPendingAt ([datetime]$pending[0].at)
+        if ($freshResultObserved) {
             if ($null -eq $resultObservedAt) { $resultObservedAt = [DateTime]::UtcNow }
             if ([DateTime]::UtcNow -ge $resultObservedAt.AddMinutes(10)) { break }
         }
@@ -940,7 +957,7 @@ function Invoke-NativeWatchdog {
     if ($state.phase -notin @('RESTORE_PENDING','FAILED')) {
         Move-NativePhase -SourceSha $ExpectedSourceSha -Expected ([string]$state.phase) -Next 'FAILED'
     }
-    $reason = if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+    $reason = if ($freshResultObserved) {
         'Native task wrote a result but did not return to normal boot within ten minutes'
     } else { 'Native task exceeded the 270-minute watchdog deadline without a result' }
     Write-Utf8Json -InputObject ([ordered]@{
@@ -1092,6 +1109,9 @@ function Invoke-NativeRun {
     $sourceTree = [string]$prepared.source_tree_sha
     if ($sourceSha -notmatch '^[0-9a-f]{40}$' -or $sourceTree -notmatch '^[0-9a-f]{40}$') {
         throw 'Prepared native runtime has invalid Git identities'
+    }
+    if ((Get-CurrentWindowsLoaderId) -ne (Assert-Guid -Value ([string]$prepared.native_boot_id))) {
+        throw 'Native runtime task is outside its prepared Windows loader'
     }
     $resultRoot = Join-Path $script:LabRootResolved 'evidence\current'
     [void](New-Item -ItemType Directory -Path $resultRoot -Force)
@@ -2345,6 +2365,34 @@ description             $NativeEntryName
         New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('b' * 40)
         if (@(Get-ChildItem -LiteralPath $attemptRoot -File).Count -ne 2) {
             throw 'Distinct native source attempts did not remain independent'
+        }
+        $watchResult = Join-Path $temporary 'watch-result.json'
+        $bootPendingAt = [DateTime]::UtcNow
+        $watchEvidence = [ordered]@{
+            source_git_sha = 'b' * 40; staging_manifest_sha256 = 'c' * 64
+            started_at = $bootPendingAt.AddSeconds(1).ToString('o')
+            completed_at = $bootPendingAt.AddSeconds(2).ToString('o')
+        }
+        Write-Utf8Json -Path $watchResult -InputObject $watchEvidence
+        if (Test-CurrentNativeResult -Path $watchResult -SourceSha ('a' * 40) -ManifestSha256 ('c' * 64) -BootPendingAt $bootPendingAt) {
+            throw 'Watchdog accepted a result from another source'
+        }
+        $watchEvidence.source_git_sha = 'a' * 40
+        $watchEvidence.started_at = $bootPendingAt.AddSeconds(-1).ToString('o')
+        Write-Utf8Json -Path $watchResult -InputObject $watchEvidence
+        if (Test-CurrentNativeResult -Path $watchResult -SourceSha ('a' * 40) -ManifestSha256 ('c' * 64) -BootPendingAt $bootPendingAt) {
+            throw 'Watchdog accepted a stale result for the current source'
+        }
+        $watchEvidence.started_at = $bootPendingAt.AddSeconds(1).ToString('o')
+        $watchEvidence.completed_at = $null
+        Write-Utf8Json -Path $watchResult -InputObject $watchEvidence
+        if (Test-CurrentNativeResult -Path $watchResult -SourceSha ('a' * 40) -ManifestSha256 ('c' * 64) -BootPendingAt $bootPendingAt) {
+            throw 'Watchdog accepted an unfinished native result'
+        }
+        $watchEvidence.completed_at = $bootPendingAt.AddSeconds(2).ToString('o')
+        Write-Utf8Json -Path $watchResult -InputObject $watchEvidence
+        if (-not (Test-CurrentNativeResult -Path $watchResult -SourceSha ('a' * 40) -ManifestSha256 ('c' * 64) -BootPendingAt $bootPendingAt)) {
+            throw 'Watchdog rejected the current completed native result'
         }
         foreach ($name in 1..8) { [IO.File]::WriteAllText((Join-Path $temporary "$name.txt"), "value-$name", [Text.Encoding]::UTF8) }
         $manifest = Write-StagingManifest -Root $temporary
