@@ -197,7 +197,7 @@ packer-box: ## Verify and reuse the local immutable Rocky box matching current P
 	@$(PYTHON) scripts/repoctl.py packer-box $(if $(BOX_PATH),--box "$(BOX_PATH)",)
 
 lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box without running Packer
-	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(filter 1,$(RETAIN_VM)),--retain-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(filter 1,$(RETAIN_VM)),--retain-vm,) $(if $(filter 1,$(DIAGNOSTIC_NEM)),--diagnostic-nem,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
 
 lab-network-resume: ## Resume SSH and Rocky probes on the retained VM for CAMPAIGN_ID
 	@$(PYTHON) scripts/repoctl.py lab-network-resume --campaign-id "$(CAMPAIGN_ID)"

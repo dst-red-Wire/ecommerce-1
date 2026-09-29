@@ -9767,7 +9767,8 @@ def windows_lab_ssh_identity() -> int:
 
 
 def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_failed_vm: bool = False,
-                      global_deadline: int = 900, retain_vm: bool = False) -> int:
+                      global_deadline: int = 900, retain_vm: bool = False,
+                      diagnostic_nem: bool = False) -> int:
     """Verify a retained box or stage a single exact-SHA native network smoke."""
     import rocky_box_catalog
 
@@ -9782,7 +9783,7 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
                               "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
         elif action == "prepare-smoke":
             prepared = rocky_box_catalog.prepare_smoke(
-                selected, source_sha, box_sha256, keep_failed_vm, global_deadline, retain_vm
+                selected, source_sha, box_sha256, keep_failed_vm, global_deadline, retain_vm, diagnostic_nem
             )
             print(json.dumps(prepared, sort_keys=True))
         else:
@@ -12648,6 +12649,7 @@ def main() -> int:
     network_smoke.add_argument("--box-sha256", default=os.environ.get("BOX_SHA256", ""))
     network_smoke.add_argument("--keep-failed-vm", action="store_true")
     network_smoke.add_argument("--retain-vm", action="store_true")
+    network_smoke.add_argument("--diagnostic-nem", action="store_true")
     network_smoke.add_argument("--global-deadline", type=int, default=900)
     lab_clean = sub.add_parser("lab-clean")
     lab_clean.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
@@ -12939,7 +12941,7 @@ def main() -> int:
         if args.cmd == "lab-network-smoke":
             return rocky_box_command("prepare-smoke", box=args.box, box_sha256=args.box_sha256,
                                      keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline,
-                                     retain_vm=args.retain_vm)
+                                     retain_vm=args.retain_vm, diagnostic_nem=args.diagnostic_nem)
         if args.cmd == "lab-clean":
             return lab_network_action("Clean", args.campaign_id)
         if args.cmd == "lab-network-resume":

@@ -232,7 +232,7 @@ def find_matching_box(source_sha: str, artifact_root: Path = Path("/mnt/c/ecomme
 
 
 def prepare_smoke(box: Path, source_sha: str, expected_sha256: str, keep_failed_vm: bool, deadline: int,
-                  retain_vm: bool = False) -> dict[str, str]:
+                  retain_vm: bool = False, diagnostic_nem: bool = False) -> dict[str, str]:
     if deadline < 30 or deadline > 1800:
         raise ValueError("network smoke global deadline must be between 30 and 1800 seconds")
     if expected_sha256 and (not SHA256.fullmatch(expected_sha256) or digest_file(box) != expected_sha256):
@@ -268,6 +268,7 @@ def prepare_smoke(box: Path, source_sha: str, expected_sha256: str, keep_failed_
         "global_deadline_seconds": deadline,
         "keep_failed_vm": keep_failed_vm,
         "retain_vm": retain_vm,
+        "diagnostic_nem": diagnostic_nem,
         "vagrant_version": toolchain["VAGRANT_VERSION"],
         "virtualbox_version": toolchain["VIRTUALBOX_VERSION"],
     }
@@ -293,6 +294,7 @@ def main() -> int:
     parser.add_argument("--box-sha256", default="")
     parser.add_argument("--keep-failed-vm", action="store_true")
     parser.add_argument("--retain-vm", action="store_true")
+    parser.add_argument("--diagnostic-nem", action="store_true")
     parser.add_argument("--global-deadline", type=int, default=900)
     args = parser.parse_args()
     try:
@@ -303,7 +305,7 @@ def main() -> int:
         elif args.action == "verify":
             manifest = verify(args.box, args.source_sha)
         else:
-            print(json.dumps(prepare_smoke(args.box, args.source_sha, args.box_sha256, args.keep_failed_vm, args.global_deadline, args.retain_vm), sort_keys=True))
+            print(json.dumps(prepare_smoke(args.box, args.source_sha, args.box_sha256, args.keep_failed_vm, args.global_deadline, args.retain_vm, args.diagnostic_nem), sort_keys=True))
             return 0
     except (OSError, KeyError, ValueError, subprocess.CalledProcessError, yaml.YAMLError) as exc:
         parser.exit(1, f"BOX_REUSE=FAIL reason={exc}\n")

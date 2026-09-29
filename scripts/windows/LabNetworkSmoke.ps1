@@ -49,6 +49,7 @@ if ($prepared.schema -ne 1 -or $prepared.status -ne 'PREPARED' -or
     throw 'Network smoke prepared binding is invalid'
 }
 $retainVm = $prepared.PSObject.Properties.Name -contains 'retain_vm' -and $prepared.retain_vm -eq $true
+$diagnosticNem = $prepared.PSObject.Properties.Name -contains 'diagnostic_nem' -and $prepared.diagnostic_nem -eq $true
 $smokeRoot = Join-Path $stage 'smoke-run'
 $evidenceRoot = Join-Path 'C:\ecommerce-lab\evidence\network-smoke' ([string]$prepared.campaign_id)
 $resultPath = Join-Path $evidenceRoot 'result.json'
@@ -72,7 +73,7 @@ if ($Action -eq 'Clean') {
         [Console]::WriteLine("PASS lab-network-clean already-clean campaign=$($prepared.campaign_id)")
         exit 0
     }
-    if ($result.status -notin @('DIAGNOSTIC_PRESERVED','PASS') -or $result.campaign_id -ne $prepared.campaign_id -or
+    if ($result.status -notin @('DIAGNOSTIC_PRESERVED','PASS','BLOCKED_RUNTIME') -or $result.campaign_id -ne $prepared.campaign_id -or
         $result.cleanup.vm_preserved -ne $true -or $result.cleanup.vm_name -ne $result.vm_name -or
         $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$' -or
         $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
@@ -111,13 +112,13 @@ if ($Action -eq 'Clean') {
 if ($Action -eq 'Resume') {
     $result = Read-JsonFile $resultPath
     if ($result.campaign_id -ne $prepared.campaign_id -or
-        $result.status -notin @('DIAGNOSTIC_PRESERVED','PASS') -or
+        $result.status -notin @('DIAGNOSTIC_PRESERVED','PASS','BLOCKED_RUNTIME') -or
         $result.cleanup.vm_preserved -ne $true -or
         $result.vm_name -notmatch '^ecommerce-rocky-10-2-smoke-[0-9a-f]{12}$' -or
         $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
         throw 'Network SSH resume requires an owned preserved VM and matching campaign'
     }
-    if ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) {
+    if ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent -and -not $diagnosticNem) {
         throw 'BLOCKED_RUNTIME native VT-x is unavailable for network SSH resume in this Windows boot'
     }
     $box = [IO.Path]::GetFullPath([string]$prepared.box_path)
@@ -162,12 +163,13 @@ if ($Action -eq 'Resume') {
     $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
     $result.resume_from = if ($network.remote_command_ready -ne 'PASS') { '04-network-ssh' } elseif ($network.rocky_runtime -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
     $result.vm_recreate = 'NOT_REQUIRED'
-    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } else { 'PASS' }
-    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } else { $null }
+    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } elseif ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
+    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 'NEM diagnostic only; native VT-x qualification remains pending' } else { $null }
     $result.completed_at = [DateTime]::UtcNow.ToString('o')
     Write-Utf8Json -InputObject $result -Path $resultPath
     [Console]::WriteLine("LAB_NETWORK_RESUME=$($result.status) campaign=$($prepared.campaign_id) evidence=$resultPath")
     if ($result.status -eq 'PASS') { exit 0 }
+    if ($result.status -eq 'BLOCKED_RUNTIME') { exit 2 }
     exit 1
 }
 
@@ -202,7 +204,7 @@ try {
     catch [IO.IOException] { throw 'BLOCKED_RUNTIME another network smoke holds the laboratory runtime lock' }
     $computer = Get-CimInstance -ClassName Win32_ComputerSystem
     $processors = @(Get-CimInstance -ClassName Win32_Processor)
-    if ($computer.HypervisorPresent -or $processors.Count -eq 0 -or @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -gt 0) {
+    if (($computer.HypervisorPresent -and -not $diagnosticNem) -or $processors.Count -eq 0 -or @($processors | Where-Object { $_.VirtualizationFirmwareEnabled -ne $true }).Count -gt 0) {
         throw 'BLOCKED_RUNTIME native VT-x is unavailable in this Windows boot'
     }
     $identity = Invoke-BoundedProcess -FilePath $powershell -Arguments @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',(Join-Path $PSScriptRoot 'LabSshIdentity.ps1'),'-Action','Verify') -TimeoutSeconds 30 -WorkingDirectory $stage
@@ -277,14 +279,17 @@ try {
     $result.timings.network_readiness_seconds = Get-NativeSshSeconds -Start $network.vm_running_at -End $network.tcp_22_ready_at
     $result.timings.ssh_readiness_seconds = Get-NativeSshSeconds -Start $network.tcp_22_ready_at -End $network.ssh_auth_ready_at
     $result.virtualbox_backend = Get-LabBackend -LogPath (Join-Path $stage 'logs\ssh-smoke\VBox.log')
-    if ($result.virtualbox_backend -ne 'NATIVE_VTX') { throw "BLOCKED_RUNTIME VirtualBox backend is $($result.virtualbox_backend)" }
+    if ($result.virtualbox_backend -ne 'NATIVE_VTX' -and -not ($diagnosticNem -and $result.virtualbox_backend -eq 'NEM')) {
+        throw "BLOCKED_RUNTIME VirtualBox backend is $($result.virtualbox_backend)"
+    }
     if ($upError) { throw "Network smoke vagrant up failed at $($network.failure_stage): $upError" }
     if ($up.ExitCode -ne 0 -or $network.failure_stage) { throw "Network smoke failed at $($network.failure_stage): $($network.failure_reason)" }
     $security = Invoke-NativeDirectSshProbe -SshExecutable $ssh -Address $network.address -Port $network.port -User $network.user -PrivateKey $privateKey -WorkingDirectory $smokeRoot -TimeoutSeconds 30 -Command 'test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }'
     Assert-ProcessSuccess -Result $security -Operation 'guest SSH key ownership, mode, cloud-init and sshd security'
     $result.guest_security = 'PASS'
     $result.ssh_identity.private_key_in_box = $false
-    $result.status = 'PASS'
+    $result.status = if ($result.virtualbox_backend -eq 'NATIVE_VTX') { 'PASS' } else { 'BLOCKED_RUNTIME' }
+    if ($result.status -eq 'BLOCKED_RUNTIME') { $result.error = 'NEM diagnostic only; native VT-x qualification remains pending' }
 }
 catch {
     $result.error = $_.Exception.Message
@@ -319,7 +324,7 @@ finally {
         $result.status = 'FAIL'
         $result.error = "VirtualBox ownership check failed: $($_.Exception.Message); prior error: $($result.error)"
     }
-    $preserve = (($result.status -eq 'FAIL' -and ($prepared.keep_failed_vm -eq $true -or $retainVm)) -or
+    $preserve = (($result.status -in @('FAIL','BLOCKED_RUNTIME') -and ($prepared.keep_failed_vm -eq $true -or $retainVm)) -or
         ($result.status -eq 'PASS' -and $retainVm)) -and $vmExists -and $boxAdded
     if ($preserve) {
         if ($result.status -eq 'FAIL') { $result.status = 'DIAGNOSTIC_PRESERVED' }

@@ -395,9 +395,11 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertNotIn("@('up'", resume)
         self.assertNotIn("@('destroy'", resume)
         self.assertIn("$result.checkpoints.'04-network-ssh'", resume)
+        self.assertIn("'BLOCKED_RUNTIME'", resume)
         probe = (WINDOWS / "NativeVagrantSshSmoke.ps1").read_text(encoding="utf-8")
         self.assertIn("$Evidence.vagrant_ssh_command = 'FAIL_NON_BLOCKING'", probe)
         self.assertNotIn("-TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment", probe)
+        self.assertIn("$result.status = if ($result.virtualbox_backend -eq 'NATIVE_VTX') { 'PASS' } else { 'BLOCKED_RUNTIME' }", network)
 
     def test_standard_vagrant_ssh_retry_remains_bounded(self):
         self.assertIn("$attempt -le 12", self.qualify)
