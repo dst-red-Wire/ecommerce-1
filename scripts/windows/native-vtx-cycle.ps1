@@ -47,6 +47,30 @@ function Get-NativeStatePath {
     return Join-Path $script:LabRootResolved 'startup-real\state.json'
 }
 
+function New-NativeBootAttempt {
+    param([Parameter(Mandatory = $true)][string]$EvidenceRoot,
+          [Parameter(Mandatory = $true)][string]$SourceSha)
+    if ($SourceSha -notmatch '^[0-9a-f]{40}$') { throw 'Native boot attempt requires an exact source SHA' }
+    $path = Join-Path $EvidenceRoot "attempt-$SourceSha.json"
+    $attempt = [ordered]@{ source_git_sha = $SourceSha; attempt = 1; started_at = Get-UtcTimestamp }
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes(($attempt | ConvertTo-Json -Compress) + "`n")
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    }
+    catch [IO.IOException] {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            throw 'FAIL_ALREADY_ATTEMPTED: MAX_NATIVE_BOOT_ATTEMPTS=1'
+        }
+        throw
+    }
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush($true)
+    }
+    finally { $stream.Dispose() }
+}
+
 function Initialize-NativeState {
     param([string]$SourceSha, [string]$SourceTree, [string]$ManifestSha256, [string]$NormalBootId)
     $path = Get-NativeStatePath -SourceSha $SourceSha
@@ -1072,7 +1096,6 @@ function Invoke-NativeRun {
     $resultRoot = Join-Path $script:LabRootResolved 'evidence\current'
     [void](New-Item -ItemType Directory -Path $resultRoot -Force)
     $resultPath = Join-Path $resultRoot 'result.json'
-    $attemptPath = Join-Path $resultRoot 'attempt.json'
     $artifactRoot = Join-Path $script:LabRootResolved 'artifacts\current'
     [void](New-Item -ItemType Directory -Path $artifactRoot -Force)
     $result = [ordered]@{
@@ -1176,10 +1199,7 @@ function Invoke-NativeRun {
             $startupState.normal_boot_id -ne $expectedNormal -or $startupState.staging_manifest_sha256 -ne $ExpectedManifestSha256) {
             throw 'Native startup state is not bound to this boot and exact staging manifest'
         }
-        if (Test-Path -LiteralPath $attemptPath) {
-            throw 'FAIL_ALREADY_ATTEMPTED: MAX_NATIVE_BOOT_ATTEMPTS=1'
-        }
-        Write-Utf8Json -InputObject ([ordered]@{ source_git_sha = $sourceSha; attempt = 1; started_at = Get-UtcTimestamp }) -Path $attemptPath
+        New-NativeBootAttempt -EvidenceRoot $resultRoot -SourceSha $sourceSha
         Move-NativePhase -SourceSha $sourceSha -Expected 'NATIVE_BOOT_PENDING' -Next 'NATIVE_BOOTED'
         if (-not (Test-StagingManifest -Root $preparedStage)) { throw 'Native staging integrity verification failed before build' }
         $packerEnvironment = Get-StagedPackerEnvironment -Stage $preparedStage
@@ -2315,6 +2335,17 @@ description             $NativeEntryName
     $temporary = Join-Path ([IO.Path]::GetTempPath()) ("native-vtx-selftest-" + [Guid]::NewGuid().ToString('N'))
     try {
         [void](New-Item -ItemType Directory -Path $temporary)
+        $attemptRoot = Join-Path $temporary 'attempts'
+        [void](New-Item -ItemType Directory -Path $attemptRoot)
+        New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('a' * 40)
+        $replayRejected = $false
+        try { New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('a' * 40) }
+        catch { $replayRejected = $_.Exception.Message -eq 'FAIL_ALREADY_ATTEMPTED: MAX_NATIVE_BOOT_ATTEMPTS=1' }
+        if (-not $replayRejected) { throw 'Same-source native boot replay was accepted' }
+        New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('b' * 40)
+        if (@(Get-ChildItem -LiteralPath $attemptRoot -File).Count -ne 2) {
+            throw 'Distinct native source attempts did not remain independent'
+        }
         foreach ($name in 1..8) { [IO.File]::WriteAllText((Join-Path $temporary "$name.txt"), "value-$name", [Text.Encoding]::UTF8) }
         $manifest = Write-StagingManifest -Root $temporary
         if (-not (Test-StagingManifest -Root $temporary)) { throw 'staging manifest acceptance self-test failed' }
