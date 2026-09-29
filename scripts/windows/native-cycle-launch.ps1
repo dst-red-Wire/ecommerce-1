@@ -21,8 +21,10 @@ foreach ($executable in @($powershell, $wsl)) {
 }
 $head = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- git rev-parse HEAD 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $head -ne $ExpectedSourceSha) { throw 'Local Git HEAD differs from the exact expected source SHA' }
-$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
-if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'GitHub PR #148 HEAD differs from the exact expected source SHA' }
+$branch = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- git branch --show-current 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $branch -notmatch '^[a-zA-Z0-9/_-]+$') { throw 'Current Git branch is unavailable' }
+$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view $branch --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'Current branch PR HEAD differs from the exact expected source SHA' }
 $payload = Join-Path $RepoRoot '.context\cache\native-controller-payload\current'
 $manifest = Join-Path $payload 'payload.json'
 if (-not (Test-Path -LiteralPath $manifest -PathType Leaf)) { throw "Exact-SHA payload is absent: $manifest" }
@@ -42,11 +44,11 @@ foreach ($name in @('Ecommerce-System-WSL-Probe','Ecommerce-S4U-WSL-Probe')) {
         Unregister-ScheduledTask -TaskName $name -Confirm:$false
     }
 }
-$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
+$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view $branch --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'PR head advanced after startup dry-run; BCD remains unchanged' }
 & $wsl -d $WslDistribution --cd $WslRepoRoot -- python3 scripts/repoctl.py image-rocky-windows-native-prepare --offline
 if ($LASTEXITCODE -ne 0) { throw 'Native cycle preparation failed under the global virtualization lock; inspect persistent Windows evidence and host state' }
-$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view 148 --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
+$published = (& $wsl -d $WslDistribution --cd $WslRepoRoot -- gh pr view $branch --repo dst-red-Wire/ecommerce-1 --json headRefOid -q .headRefOid 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0 -or $published -ne $ExpectedSourceSha) { throw 'PR head advanced after preparation; refusing reboot' }
 & $wsl -d $WslDistribution --cd $WslRepoRoot -- python3 scripts/repoctl.py image-rocky-windows-native-reboot
 if ($LASTEXITCODE -ne 0) { throw 'Native reboot authorization failed; inspect persistent Windows evidence and host state' }

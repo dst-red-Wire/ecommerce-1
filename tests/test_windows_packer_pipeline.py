@@ -201,7 +201,9 @@ class WindowsPackerPipelineTest(unittest.TestCase):
 
         launcher = self.native_launcher
         self.assertIn("BLOCKED_PRIVILEGE", launcher)
-        self.assertIn("GitHub PR #148 HEAD differs", launcher)
+        self.assertIn("Current branch PR HEAD differs", launcher)
+        self.assertIn("gh pr view $branch --repo dst-red-Wire/ecommerce-1", launcher)
+        self.assertNotIn("gh pr view 148", launcher)
         self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("image-rocky-windows-native-prepare"))
         self.assertIn("python3 scripts/repoctl.py image-rocky-windows-native-reboot", launcher)
         self.assertLess(launcher.index("image-rocky-windows-native-prepare"), launcher.index("image-rocky-windows-native-reboot"))
