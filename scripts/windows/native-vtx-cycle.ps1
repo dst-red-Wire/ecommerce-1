@@ -1099,6 +1099,46 @@ function Invoke-VagrantSmokeCommand {
     return $result.StdOut.Trim()
 }
 
+function Invoke-NativeSshInventory {
+    param(
+        [Parameter(Mandatory = $true)][string]$SshExecutable,
+        [Parameter(Mandatory = $true)][string]$PrivateKey,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][System.Collections.IDictionary]$SshEvidence,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$Name
+    )
+    if ($SshEvidence.ssh_auth_ready -ne 'PASS' -or $SshEvidence.vagrant_ssh_command -ne 'PASS' -or
+        $SshEvidence.address -ne '127.0.0.1' -or $SshEvidence.user -ne 'packer' -or
+        [int]$SshEvidence.port -lt 1 -or [int]$SshEvidence.port -gt 65535) {
+        throw "Native SSH inventory $Name requires verified Vagrant SSH readiness and loopback forwarding"
+    }
+    $knownHosts = Join-Path $WorkingDirectory 'ssh_known_hosts'
+    if (-not (Test-Path -LiteralPath $knownHosts -PathType Leaf)) {
+        throw "Native SSH inventory $Name has no verified known-hosts file"
+    }
+    $arguments = @(
+        '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+        '-o', 'StrictHostKeyChecking=yes', '-o', "UserKnownHostsFile=$knownHosts",
+        '-o', 'ConnectTimeout=10', '-o', 'NumberOfPasswordPrompts=0',
+        '-i', $PrivateKey, '-p', [string]$SshEvidence.port,
+        'packer@127.0.0.1', $Command
+    )
+    for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+            $result = Invoke-BoundedProcess -FilePath $SshExecutable -Arguments $arguments -TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory
+            break
+        }
+        catch {
+            if (-not $_.Exception.Message.StartsWith("Timed out after 120s: $SshExecutable; output=", [StringComparison]::Ordinal)) { throw }
+            if ($attempt -eq 2) { throw "Native SSH inventory $Name timed out after 2 bounded attempts; last_error=$($_.Exception.Message)" }
+            Start-Sleep -Seconds 5
+        }
+    }
+    Assert-ProcessSuccess -Result $result -Operation "Native SSH inventory $Name"
+    return $result.StdOut.Trim()
+}
+
 function Invoke-NativeRun {
     if (-not (Test-Administrator)) { throw 'Native runtime task requires an elevated token' }
     if ([Security.Principal.WindowsIdentity]::GetCurrent().User.Value -ne 'S-1-5-18') {
@@ -1495,7 +1535,7 @@ function Invoke-NativeRun {
         $result.vagrant_smoke.swap_absent = 'PASS'
         $packages = @($runtimeContract.rpm_profile_roots)
         if ($packages.Count -lt 10 -or @($packages | Where-Object { $_ -notmatch '^[A-Za-z0-9+_.-]+$' }).Count -gt 0) { throw 'Runtime RPM profile roots are invalid' }
-        $result.observations.rpm_profile = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'rpm-profile' -Command ("rpm -q " + ($packages -join ' '))
+        $result.observations.rpm_profile = Invoke-NativeSshInventory -SshExecutable $sshExecutable -PrivateKey $runtimePrivateKey -WorkingDirectory $smokeRoot -SshEvidence $sshSmoke -Name 'rpm-profile' -Command ("rpm -q " + ($packages -join ' '))
         $result.vagrant_smoke.rpm_profile = 'PASS'
         $result.observations.kernel = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'kernel' -Command 'uname -r'
         $result.vagrant_smoke.kernel = 'PASS'
@@ -1509,7 +1549,7 @@ function Invoke-NativeRun {
         $result.vagrant_smoke.rke2_prerequisites = 'PASS'
         $result.observations.security = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml'
         $result.vagrant_smoke.security = 'PASS'
-        $rpmInventory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'package-manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
+        $rpmInventory = Invoke-NativeSshInventory -SshExecutable $sshExecutable -PrivateKey $runtimePrivateKey -WorkingDirectory $smokeRoot -SshEvidence $sshSmoke -Name 'package-manifest' -Command 'rpm -qa --qf ''%{NAME}|%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n'' | LC_ALL=C sort'
         $result.supply_chain = New-ImageSupplyChainEvidence -ArtifactSha256 $artifactSha256 -RpmInventory $rpmInventory -RequiredPackages $packages
         Assert-ImageSupplyChainEvidence -Evidence $result.supply_chain -ArtifactSha256 $artifactSha256 -RequiredPackages $packages
         $smokeDestroy = Invoke-BoundedProcess -FilePath $vagrant -Arguments @('destroy', '--force') -TimeoutSeconds 300 -WorkingDirectory $smokeRoot -Environment $smokeEnvironment

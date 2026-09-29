@@ -392,6 +392,13 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn('Timed out after ${TimeoutSeconds}s: $script:vagrant; output=', self.qualify)
         self.assertIn('Timed out after 60s: $vagrant; output=', self.qualify)
 
+    def test_large_native_inventories_use_verified_direct_ssh(self):
+        self.assertIn("$SshEvidence.vagrant_ssh_command -ne 'PASS'", self.native)
+        self.assertIn("'StrictHostKeyChecking=yes'", self.native)
+        self.assertIn("'packer@127.0.0.1', $Command", self.native)
+        self.assertIn("-SshEvidence $sshSmoke -Name 'rpm-profile'", self.native)
+        self.assertIn("-SshEvidence $sshSmoke -Name 'package-manifest'", self.native)
+
     def test_disk_smoke_cannot_report_success_after_failed_size_check(self):
         self.assertIn("test \"$size\" -ge {0} && printf ''%s\\n''", self.native)
         self.assertIn('test "$available" -ge 1024 && printf', self.qualify)

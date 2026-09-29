@@ -12,7 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS_SOURCES = (
-    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 17),
+    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 15),
+    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-NativeSshInventory", 2),
     (ROOT / "scripts/windows/qualify-rocky-image.ps1", "Invoke-SmokeCommand", 10),
 )
 
@@ -49,7 +50,7 @@ def _windows_commands() -> list[tuple[str, str]]:
         for line in lines:
             owner = f"{path.name}:{invocation}"
             if '-Command ("rpm -q " + ($packages -join' in line:
-                if path.name != "native-vtx-cycle.ps1" or not line.strip().endswith(
+                if invocation != "Invoke-NativeSshInventory" or not line.strip().endswith(
                     '-Command ("rpm -q " + ($packages -join \' \'))'
                 ):
                     raise GuestSmokePreflightError(f"unexpected dynamic guest command: {owner}")
