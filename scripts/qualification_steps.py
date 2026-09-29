@@ -283,12 +283,21 @@ def guard_start(*, qualification: str, step: str, graph: dict, source_sha: str, 
         _require(preflight["status"] == "PASS", "expensive work requires preflight PASS")
     if spec["level"] == "full":
         _require(final_candidate, "FULL is reserved for the final candidate")
-        smokes = [checkpoint for name, checkpoint in checkpoints.items()
-                  if name in graph and graph[name]["level"] == "smoke"]
-        _require(bool(smokes), "FULL requires compatible SMOKE PASS")
-        for smoke in smokes:
+        predecessors: set[str] = set()
+        pending = list(spec["depends_on"])
+        while pending:
+            predecessor = pending.pop()
+            if predecessor not in predecessors:
+                predecessors.add(predecessor)
+                pending.extend(graph[predecessor]["depends_on"])
+        smoke_names = sorted(name for name in predecessors if graph[name]["level"] == "smoke")
+        _require(bool(smoke_names), "FULL requires compatible SMOKE PASS")
+        for name in smoke_names:
+            smoke = checkpoints.get(name)
+            _require(isinstance(smoke, dict), f"FULL requires {name} SMOKE PASS")
             validate_checkpoint(smoke, source_sha=source_sha, input_digest=input_digest,
                                 runtime_required=True)
+            _require(smoke["step"] == name, f"SMOKE checkpoint identity differs: {name}")
             _require(smoke["qualification"] == qualification,
                      "SMOKE belongs to another qualification")
             _require(smoke["status"] == "PASS", "FULL requires compatible SMOKE PASS")

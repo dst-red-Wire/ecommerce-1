@@ -2136,14 +2136,30 @@ class QualificationStepGuardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             proof = Path(temporary) / "runtime.json"
             proof.write_text('{"observed":true}\n', encoding="utf-8")
-            smoke = self.steps.checkpoint(
-                qualification="m2.5", step="vm-smoke", source_sha=self.sha,
-                input_digest=self.digest, status="PASS", started_at=self.started,
-                artifact_digest=self.artifact_digest, runtime_path=proof,
-            )
-            records = {"preflight": self.preflight, "vm-smoke": smoke}
+            records = {"preflight": self.preflight}
+            for name in ("vm-smoke", "network-ssh", "rocky-runtime"):
+                records[name] = self.steps.checkpoint(
+                    qualification="m2.5", step=name, source_sha=self.sha,
+                    input_digest=self.digest, status="PASS", started_at=self.started,
+                    artifact_digest=self.artifact_digest, runtime_path=proof,
+                )
             self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
                                    input_digest=self.digest, checkpoints=records)
+            for missing in ("vm-smoke", "network-ssh", "rocky-runtime"):
+                incomplete = {name: record for name, record in records.items() if name != missing}
+                with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "SMOKE PASS"):
+                    self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                           source_sha=self.sha, input_digest=self.digest, checkpoints=incomplete)
+            wrong_step = dict(records["network-ssh"], step="vm-smoke")
+            with self.assertRaisesRegex(ValueError, "identity differs"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints=dict(records, **{"network-ssh": wrong_step}))
+            failed = dict(records["rocky-runtime"], status="FAIL")
+            with self.assertRaisesRegex(ValueError, "SMOKE PASS"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints=dict(records, **{"rocky-runtime": failed}))
             with self.assertRaisesRegex(ValueError, "another source SHA"):
                 self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha="d" * 40,
                                        input_digest=self.digest, checkpoints=records)

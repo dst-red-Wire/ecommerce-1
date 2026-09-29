@@ -42,6 +42,12 @@ function Get-LabBackend {
     return 'UNKNOWN'
 }
 
+function Assert-LabGuestSecurity {
+    param([string]$SshExecutable, [object]$Network, [string]$PrivateKey, [string]$WorkingDirectory)
+    $security = Invoke-NativeDirectSshProbe -SshExecutable $SshExecutable -Address $Network.address -Port $Network.port -User $Network.user -PrivateKey $PrivateKey -WorkingDirectory $WorkingDirectory -TimeoutSeconds 30 -Command 'test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }'
+    Assert-ProcessSuccess -Result $security -Operation 'guest SSH key ownership, mode, cloud-init and sshd security'
+}
+
 $stage = Assert-LabStage -Root $StageRoot
 $prepared = Read-JsonFile (Join-Path $stage 'prepared.json')
 if ($prepared.schema -ne 1 -or $prepared.status -ne 'PREPARED' -or
@@ -111,6 +117,14 @@ if ($Action -eq 'Clean') {
 }
 
 if ($Action -eq 'Resume') {
+    $resumeLock = $null
+    $result = $null
+    $resumeInProgress = $false
+    try {
+    try {
+        $resumeLock = [IO.File]::Open('C:\ecommerce-lab\network-smoke\.runtime.lock', [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    }
+    catch [IO.IOException] { throw 'BLOCKED_RUNTIME another network smoke holds the laboratory runtime lock' }
     if ($RunnerSourceSha -notmatch '^[0-9a-f]{40}$') {
         throw 'Network SSH resume requires the exact clean runner source SHA'
     }
@@ -122,6 +136,20 @@ if ($Action -eq 'Resume') {
         $result.cleanup.vm_id -notmatch '^[0-9a-fA-F-]{36}$') {
         throw 'Network SSH resume requires an owned preserved VM and matching campaign'
     }
+    $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
+    Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
+    $result.status = 'DIAGNOSTIC_PRESERVED'
+    $result.guest_security = 'NOT_EXECUTED'
+    $result.checkpoints.'04-network-ssh' = 'NOT_EXECUTED'
+    $result.checkpoints.'05-rocky-runtime' = 'NOT_EXECUTED'
+    $result.resume_from = '04-network-ssh'
+    if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') { $result.resume_runner_source_sha = $RunnerSourceSha }
+    else { $result | Add-Member -NotePropertyName resume_runner_source_sha -NotePropertyValue $RunnerSourceSha }
+    $result.completed_at = $null
+    $result.error = 'Network SSH resume pending guest security verification'
+    $result.cleanup.reason = $result.error
+    $resumeInProgress = $true
+    Write-Utf8Json -InputObject $result -Path $resultPath
     if ((Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent -and -not $diagnosticNem) {
         throw 'BLOCKED_RUNTIME native VT-x is unavailable for network SSH resume in this Windows boot'
     }
@@ -172,8 +200,6 @@ if ($Action -eq 'Resume') {
         else { throw "Network SSH resume refuses Vagrant VM state $vmState" }
         if ($result.PSObject.Properties.Name -contains 'vm_restart') { $result.vm_restart = $vmRestart }
         else { $result | Add-Member -NotePropertyName vm_restart -NotePropertyValue $vmRestart }
-        $attempt = [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ')
-        Write-Utf8Json -InputObject $result -Path (Join-Path $evidenceRoot "result-before-resume-$attempt.json")
         $network = New-NativeSshSmokeEvidence -VmName $result.vm_name -User 'packer' -EvidenceDirectory (Join-Path $stage "logs\ssh-resume-$attempt")
         $network.vagrant_up_started_at = [DateTime]::UtcNow.ToString('o')
         $network.vagrant_ready = 'PASS'
@@ -197,24 +223,43 @@ if ($Action -eq 'Resume') {
     else { $result | Add-Member -NotePropertyName resume_seed_server -NotePropertyValue $resumeSeedStatus }
     $result.virtualbox_backend = Get-LabBackend -LogPath (Join-Path $network.diagnostics_directory 'VBox.log')
     $result.network_smoke = $network
-    if ($result.PSObject.Properties.Name -contains 'resume_runner_source_sha') {
-        $result.resume_runner_source_sha = $RunnerSourceSha
+    if (-not $network.failure_stage -and $network.remote_command_ready -eq 'PASS' -and $network.rocky_runtime -eq 'PASS') {
+        $result.guest_security = 'FAIL'
+        Assert-LabGuestSecurity -SshExecutable $ssh -Network $network -PrivateKey $privateKey -WorkingDirectory $smokeRoot
+        $result.guest_security = 'PASS'
+        $result.ssh_identity.private_key_in_box = $false
     }
-    else { $result | Add-Member -NotePropertyName resume_runner_source_sha -NotePropertyValue $RunnerSourceSha }
     $result.checkpoints.'03-vm-smoke' = 'PASS'
-    $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS') { 'PASS' } else { 'FAIL' }
-    $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
-    $result.resume_from = if ($network.remote_command_ready -ne 'PASS') { '04-network-ssh' } elseif ($network.rocky_runtime -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
+    $result.checkpoints.'04-network-ssh' = if ($network.remote_command_ready -eq 'PASS' -and $result.guest_security -eq 'PASS') { 'PASS' } else { 'FAIL' }
+    $result.checkpoints.'05-rocky-runtime' = if ($network.rocky_runtime -eq 'PASS' -and $result.guest_security -eq 'PASS') { 'PASS' } else { 'NOT_EXECUTED' }
+    $result.resume_from = if ($result.checkpoints.'04-network-ssh' -ne 'PASS') { '04-network-ssh' } elseif ($result.checkpoints.'05-rocky-runtime' -ne 'PASS') { '05-rocky-runtime' } else { 'downstream-qualification' }
     $result.vm_recreate = 'NOT_REQUIRED'
-    $result.status = if ($network.failure_stage) { 'DIAGNOSTIC_PRESERVED' } elseif ($result.virtualbox_backend -ne 'NATIVE_VTX' -or (Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
-    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.status -eq 'BLOCKED_RUNTIME') { "VirtualBox backend $($result.virtualbox_backend); native VT-x qualification remains pending" } else { $null }
+    $result.status = if ($network.failure_stage -or $result.guest_security -ne 'PASS') { 'DIAGNOSTIC_PRESERVED' } elseif ($result.virtualbox_backend -ne 'NATIVE_VTX' -or (Get-CimInstance -ClassName Win32_ComputerSystem).HypervisorPresent) { 'BLOCKED_RUNTIME' } else { 'PASS' }
+    $result.error = if ($network.failure_stage) { "$($network.failure_code): $($network.failure_reason)" } elseif ($result.guest_security -ne 'PASS') { 'Guest SSH security baseline did not pass' } elseif ($result.status -eq 'BLOCKED_RUNTIME') { "VirtualBox backend $($result.virtualbox_backend); native VT-x qualification remains pending" } else { $null }
     $result.cleanup.reason = $result.error
     $result.completed_at = [DateTime]::UtcNow.ToString('o')
     Write-Utf8Json -InputObject $result -Path $resultPath
+    $resumeExitCode = if ($result.status -eq 'PASS') { 0 } elseif ($result.status -eq 'BLOCKED_RUNTIME') { 2 } else { 1 }
+    }
+    catch {
+        if ($resumeInProgress) {
+            $result.error = $_.Exception.Message
+            $result.status = if ($result.error.StartsWith('BLOCKED_RUNTIME ', [StringComparison]::Ordinal)) { 'BLOCKED_RUNTIME' } else { 'DIAGNOSTIC_PRESERVED' }
+            $result.guest_security = if ($result.guest_security -eq 'FAIL') { 'FAIL' } else { 'NOT_EXECUTED' }
+            $result.checkpoints.'04-network-ssh' = 'FAIL'
+            $result.checkpoints.'05-rocky-runtime' = 'NOT_EXECUTED'
+            $result.resume_from = '04-network-ssh'
+            $result.cleanup.reason = $result.error
+            $result.completed_at = [DateTime]::UtcNow.ToString('o')
+            Write-Utf8Json -InputObject $result -Path $resultPath
+        }
+        throw
+    }
+    finally {
+        if ($null -ne $resumeLock) { $resumeLock.Dispose() }
+    }
     [Console]::WriteLine("LAB_NETWORK_RESUME=$($result.status) campaign=$($prepared.campaign_id) evidence=$resultPath")
-    if ($result.status -eq 'PASS') { exit 0 }
-    if ($result.status -eq 'BLOCKED_RUNTIME') { exit 2 }
-    exit 1
+    exit $resumeExitCode
 }
 
 if (Test-Path -LiteralPath $resultPath -PathType Leaf) { throw 'Network smoke campaign was already attempted; prepare a new campaign' }
@@ -330,8 +375,7 @@ try {
     }
     if ($upError) { throw "Network smoke vagrant up failed at $($network.failure_stage): $upError" }
     if ($up.ExitCode -ne 0 -or $network.failure_stage) { throw "Network smoke failed at $($network.failure_stage): $($network.failure_reason)" }
-    $security = Invoke-NativeDirectSshProbe -SshExecutable $ssh -Address $network.address -Port $network.port -User $network.user -PrivateKey $privateKey -WorkingDirectory $smokeRoot -TimeoutSeconds 30 -Command 'test "$(stat -c %a ~/.ssh)" = 700 && test "$(stat -c %a ~/.ssh/authorized_keys)" = 600 && test "$(stat -c %U ~/.ssh/authorized_keys)" = packer && sudo -n sshd -T | grep -qx "pubkeyauthentication yes" && { sudo -n grep -R -l "BEGIN OPENSSH PRIVATE KEY" /home/packer /root >/dev/null 2>&1; test $? -eq 1; }'
-    Assert-ProcessSuccess -Result $security -Operation 'guest SSH key ownership, mode, cloud-init and sshd security'
+    Assert-LabGuestSecurity -SshExecutable $ssh -Network $network -PrivateKey $privateKey -WorkingDirectory $smokeRoot
     $result.guest_security = 'PASS'
     $result.ssh_identity.private_key_in_box = $false
     $result.status = if ($result.virtualbox_backend -eq 'NATIVE_VTX') { 'PASS' } else { 'BLOCKED_RUNTIME' }

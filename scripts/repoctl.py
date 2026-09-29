@@ -9878,6 +9878,7 @@ def lab_network_status(campaign_id: str) -> int:
         "ssh_handshake": network.get("ssh_auth_ready"),
         "remote_command": network.get("remote_command_ready"),
         "rocky_runtime": network.get("rocky_runtime"),
+        "guest_security": result.get("guest_security"),
         "rocky_version": network.get("rocky_version"),
         "vagrant_ssh_wrapper": network.get("vagrant_ssh_command"),
         "direct_openssh": network.get("remote_command_ready"),
