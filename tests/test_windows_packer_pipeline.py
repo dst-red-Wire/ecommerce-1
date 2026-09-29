@@ -388,11 +388,12 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             self.assertIn('$attempt -le 2', source)
             self.assertIn('timed out after 2 bounded attempts', source)
             self.assertIn('Start-Sleep -Seconds 5', source)
-        self.assertIn('if ($_.Exception.Message -ne "Timed out after 120s: $Vagrant") { throw }', self.native)
-        self.assertIn('if ($_.Exception.Message -ne "Timed out after ${TimeoutSeconds}s: $script:vagrant") { throw }', self.qualify)
+        self.assertIn('Test-VagrantSmokeTimeout -Message $_.Exception.Message -Vagrant $Vagrant', self.native)
+        self.assertIn('Timed out after ${TimeoutSeconds}s: $script:vagrant; output=', self.qualify)
+        self.assertIn('Timed out after 60s: $vagrant; output=', self.qualify)
 
     def test_disk_smoke_cannot_report_success_after_failed_size_check(self):
-        self.assertIn('test "$size" -ge {0} && printf', self.native)
+        self.assertIn("test \"$size\" -ge {0} && printf ''%s\\n''", self.native)
         self.assertIn('test "$available" -ge 1024 && printf', self.qualify)
 
     def test_guest_smoke_commands_are_literal_and_shell_syntax_valid(self):

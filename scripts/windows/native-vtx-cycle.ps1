@@ -1061,6 +1061,11 @@ function Invoke-NativeBackendProbe {
     }
 }
 
+function Test-VagrantSmokeTimeout {
+    param([string]$Message, [string]$Vagrant)
+    return $Message.StartsWith("Timed out after 120s: $Vagrant; output=", [StringComparison]::Ordinal)
+}
+
 function Invoke-VagrantSmokeCommand {
     param(
         [Parameter(Mandatory = $true)][string]$Vagrant,
@@ -1075,8 +1080,8 @@ function Invoke-VagrantSmokeCommand {
             break
         }
         catch {
-            if ($_.Exception.Message -ne "Timed out after 120s: $Vagrant") { throw }
-            if ($attempt -eq 2) { throw "Vagrant native smoke check $Name timed out after 2 bounded attempts" }
+            if (-not (Test-VagrantSmokeTimeout -Message $_.Exception.Message -Vagrant $Vagrant)) { throw }
+            if ($attempt -eq 2) { throw "Vagrant native smoke check $Name timed out after 2 bounded attempts; last_error=$($_.Exception.Message)" }
             Start-Sleep -Seconds 5
         }
     }
@@ -1480,7 +1485,7 @@ function Invoke-NativeRun {
         $result.observations.memory = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'memory' -Command 'awk ''$1 == "MemTotal:" { print $2; exit !($2 >= 3500000) }'' /proc/meminfo'
         $result.vagrant_smoke.expected_memory = 'PASS'
         $diskBytes = [int64]$runtimeContract.resources.disk_mib * 1MB
-        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda) && test "$size" -ge {0} && printf ''%s'' "$size"' -f $diskBytes)
+        $result.observations.disk = Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'disk' -Command ('size=$(lsblk -b -dn -o SIZE /dev/sda) && test "$size" -ge {0} && printf ''%s\n'' "$size"' -f $diskBytes)
         $result.vagrant_smoke.expected_disk = 'PASS'
         [void](Invoke-VagrantSmokeCommand -Vagrant $vagrant -WorkingDirectory $smokeRoot -Environment $smokeEnvironment -Name 'xfs' -Command 'test "$(findmnt -n -o FSTYPE /)" = xfs')
         $result.vagrant_smoke.xfs = 'PASS'
@@ -2329,6 +2334,13 @@ function Invoke-Resume {
 }
 
 function Invoke-SelfTest {
+    $vagrantFixture = 'C:\Program Files\Vagrant\bin\vagrant.exe'
+    if (-not (Test-VagrantSmokeTimeout -Message "Timed out after 120s: $vagrantFixture; output=34359738368" -Vagrant $vagrantFixture)) {
+        throw 'Vagrant smoke timeout with captured guest output was not retried'
+    }
+    if (Test-VagrantSmokeTimeout -Message "Timed out after 120s: $vagrantFixture-other; output=34359738368" -Vagrant $vagrantFixture) {
+        throw 'Vagrant smoke timeout from another executable was accepted'
+    }
     $normal = '{11111111-1111-1111-1111-111111111111}'
     $native = '{22222222-2222-2222-2222-222222222222}'
     $fixture = @"
