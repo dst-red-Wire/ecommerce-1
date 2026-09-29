@@ -1045,6 +1045,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 ),
                 "exact_sha_required": True,
                 "clean_worktree_required": True,
+                "resumable": False,
             }
 
             def fake_git(*args, check=True):
@@ -1173,6 +1174,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         with tempfile.TemporaryDirectory() as directory:
@@ -1273,6 +1275,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
@@ -1359,6 +1362,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         forbidden = [
@@ -1411,7 +1415,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
     def test_rke2_launcher_requires_supported_sizing_before_vm_creation(self):
         workflow = {
             "entrypoint": "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
-            "exact_sha_required": True, "clean_worktree_required": True,
+            "exact_sha_required": True, "clean_worktree_required": True, "resumable": False,
         }
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -1440,6 +1444,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "e" * 40
         with tempfile.TemporaryDirectory() as directory:
@@ -1488,6 +1493,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "e" * 40
         with tempfile.TemporaryDirectory() as directory:
@@ -2167,7 +2173,8 @@ class QualificationStepGuardTests(unittest.TestCase):
 
     def test_policy_schema_rejects_missing_version_unknown_rule_and_status(self):
         policy = MOD.qualification_execution_policy()
-        self.assertFalse(policy["step_qualification"]["resumable"])
+        self.assertTrue(policy["step_qualification"]["resumable"])
+        self.assertFalse(policy["workflows"]["rke2_local_virtualbox"]["resumable"])
         for mutation in (
             lambda value: value.pop("version"),
             lambda value: value.update(kind="WrongKind"),

@@ -12,7 +12,7 @@ step_qualification:
   capacity_check: required
   environment_check: required
   checkpointed: true
-  resumable: false
+  resumable: true
   bounded: true
   reuse_identity: digest
   source_sha_required: true
@@ -1040,6 +1040,7 @@ workflows:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary
     entrypoint: scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json
+    resumable: false
     virtualbox_backend_policy:
       image_execution_required: NATIVE_VTX
       rke2_functional_allowed: [NATIVE_VTX, NEM]

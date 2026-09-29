@@ -10498,6 +10498,8 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
 
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
     workflow = qualification_workflow("rke2_local_virtualbox")
+    if workflow.get("resumable") is not False:
+        return fail("RKE2 local qualification must declare that persisted checkpoints are diagnostic only")
     backend_policy = qualification_execution_policy()["workflows"]["rke2_local_virtualbox"].get(
         "virtualbox_backend_policy"
     )

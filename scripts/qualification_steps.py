@@ -51,7 +51,7 @@ def validate_policy(policy: dict, root: Path) -> dict:
         "evidence_schema": "config/contracts/qualification-step-evidence.schema.json",
         "preflight_before_expensive_work": "required", "fail_fast": True,
         "capacity_check": "required", "environment_check": "required",
-        "checkpointed": True, "resumable": False, "bounded": True,
+        "checkpointed": True, "resumable": True, "bounded": True,
         "reuse_identity": "digest", "source_sha_required": True,
         "input_digest_required": True, "artifact_digest_required_when_applicable": True,
         "mutable_identity": "forbidden", "selective_invalidation": True,
