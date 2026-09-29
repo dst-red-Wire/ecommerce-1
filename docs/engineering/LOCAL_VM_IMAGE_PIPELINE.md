@@ -364,7 +364,7 @@ make local-services-assets OFFLINE=1
 
 The base image contains cloud-init but no shared Vagrant private key. Each owned
 service VM reads a runtime-only public key from a bounded loopback-only
-NoCloud-Net endpoint through the VirtualBox NAT host address, regenerates SSH
+NoCloud endpoint through the VirtualBox NAT host address, regenerates SSH
 host keys, and disables password login.
 The endpoint and Vagrant state live below Windows LocalAppData, which avoids UNC
 working-directory failures. Private keys, service credentials, TLS material and

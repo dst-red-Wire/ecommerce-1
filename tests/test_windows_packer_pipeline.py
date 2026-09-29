@@ -453,6 +453,8 @@ class WindowsPackerPipelineTest(unittest.TestCase):
 
     def test_vagrant_only_owns_lifecycle_and_smoke_transport(self):
         self.assertIn("config.vm.box", self.vagrant)
+        self.assertIn("ds=nocloud;s=http://10.0.2.2:", self.vagrant)
+        self.assertNotIn("nocloud-net", self.vagrant)
         self.assertIn('config.ssh.username = "packer"', self.vagrant)
         self.assertIn('vm.customize ["modifyvm"', self.vagrant)
         self.assertIn('runtime.fetch("nic_type")', self.vagrant)

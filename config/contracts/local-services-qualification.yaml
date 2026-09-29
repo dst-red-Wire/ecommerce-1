@@ -41,7 +41,7 @@ machine_image:
   checksum_file: .artifacts/packer/rocky-10.2/windows/SHA256SUMS
   release_evidence: .context/evidence/rocky-image/rocky-10.2/windows/release.json
   access:
-    datasource: NoCloud-Net
+    datasource: NoCloud
     seed_endpoint: virtualbox-nat-host-loopback-10.0.2.2
     account: qualifier
     ssh_key: runtime-generated-ephemeral

@@ -137,12 +137,13 @@ class LocalServicesQualificationTest(unittest.TestCase):
 
     def test_first_boot_access_has_no_shared_private_key(self):
         access = self.contract["machine_image"]["access"]
-        self.assertEqual("NoCloud-Net", access["datasource"])
+        self.assertEqual("NoCloud", access["datasource"])
         self.assertEqual("runtime-generated-ephemeral", access["ssh_key"])
         self.assertEqual("forbidden", access["password_authentication"])
         self.assertEqual("forbidden", access["shared_private_key"])
         vagrant = (FIXTURE / "Vagrantfile").read_text(encoding="utf-8")
-        self.assertIn("ds=nocloud-net;s=http://10.0.2.2:", vagrant)
+        self.assertIn("ds=nocloud;s=http://10.0.2.2:", vagrant)
+        self.assertNotIn("nocloud-net", vagrant)
         self.assertIn('host_ip: "127.0.0.1"', vagrant)
         self.assertIn('config.vm.communicator = "none"', vagrant)
         self.assertIn('"--nat-localhostreachable1", "on"', vagrant)
