@@ -43,6 +43,9 @@
     "RSYNC_VERSION": "3.2.7",
     "RSYNC_PACKAGE_VERSION": "3.2.7-1ubuntu1.5",
     "RSYNC_SHA256_LINUX_AMD64": "8f952895697d19a6f1caa71f17c7d4e8c1f1fb485eb824ffe3e4c77dd587b338",
+    "IPERF3_VERSION": "3.16",
+    "IPERF3_PACKAGE_VERSION": "3.16-1build2",
+    "IPERF3_SHA256_LINUX_AMD64": "33659f1b60346439ae6ce808c567563c4a0be8a63a22e08ee12f0392e669d72f",
     "GH_VERSION": "2.101.0",
     "GH_SHA256_LINUX_AMD64_TARGZ": "9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8",
     "RIPGREP_VERSION": "15.2.0",
@@ -164,6 +167,9 @@
     "RSYNC_VERSION": {"category": "active-tool", "owner": "rsync"},
     "RSYNC_PACKAGE_VERSION": {"category": "active-tool", "owner": "rsync"},
     "RSYNC_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "rsync"},
+    "IPERF3_VERSION": {"category": "active-tool", "owner": "iperf3"},
+    "IPERF3_PACKAGE_VERSION": {"category": "active-tool", "owner": "iperf3"},
+    "IPERF3_SHA256_LINUX_AMD64": {"category": "explicit-artifact-integrity-reference", "owner": "iperf3"},
     "GH_VERSION": {"category": "active-tool", "owner": "gh"},
     "GH_SHA256_LINUX_AMD64_TARGZ": {"category": "explicit-artifact-integrity-reference", "owner": "gh"},
     "RIPGREP_VERSION": {"category": "active-tool", "owner": "rg"},
@@ -266,6 +272,7 @@
       "ast-grep": {"capability": "ast-grep", "version_ref": "AST_GREP_VERSION", "checksum_ref": "AST_GREP_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "context_tools"}, "scenario_policy": "none"},
       "oras": {"capability": "oras", "version_ref": "ORAS_VERSION", "checksum_ref": "ORAS_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "artifact_transport"}, "consumers": [{"type": "path", "path": "scripts/repoctl.py", "marker": "oras"}], "scenario_policy": "required", "proofs": ["tests/test_packer_image_contract.py"]},
       "rsync": {"capability": "rsync", "version_ref": "RSYNC_VERSION", "checksum_ref": "RSYNC_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "artifact_transport"}, "consumers": [{"type": "path", "path": "scripts/repoctl.py", "marker": "rsync"}], "scenario_policy": "required", "proofs": ["tests/test_packer_image_contract.py"]},
+      "iperf3": {"capability": "iperf3", "version_ref": "IPERF3_VERSION", "checksum_ref": "IPERF3_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "m25_transfer_diagnostics"}, "consumers": [{"type": "path", "path": "scripts/repoctl.py", "marker": "iperf3"}], "scenario_policy": "required", "proofs": ["tests/test_qualification_execution_policy.py"]},
       "gh": {"capability": "gh", "version_ref": "GH_VERSION", "checksum_ref": "GH_SHA256_LINUX_AMD64_TARGZ", "provision": {"type": "ansible", "tags": "gh"}, "scenario_policy": "none"},
       "bazel": {"capability": "bazel", "version_ref": "BAZEL_VERSION", "checksum_ref": "BAZELISK_SHA256_LINUX_AMD64", "provision": {"type": "ansible", "tags": "agent_tools"}, "scenario_policy": "none"},
       "nx": {"capability": "nx", "version_ref": "NX_VERSION", "provision": {"type": "ansible", "tags": "agent_tools"}, "scenario_policy": "none"},
@@ -434,6 +441,23 @@
       "binary": "/usr/bin/rsync",
       "version_command": ["rsync", "--version"],
       "capability": "checksum-aware-local-artifact-synchronization"
+    },
+    "iperf3": {
+      "version_ref": "IPERF3_VERSION",
+      "source": "https://packages.ubuntu.com/noble/iperf3",
+      "artifact": {
+        "url": "https://launchpad.net/ubuntu/+archive/primary/+files/iperf3_3.16-1build2_amd64.deb",
+        "filename": "iperf3_3.16-1build2_amd64.deb",
+        "package_version_ref": "IPERF3_PACKAGE_VERSION"
+      },
+      "sha256_ref": "IPERF3_SHA256_LINUX_AMD64",
+      "architecture": "amd64",
+      "platforms": ["linux/amd64"],
+      "scope": ["developer-workstation", "m2.5-transfer-diagnostic"],
+      "install": {"type": "deb", "package": "iperf3", "system_dependency": true},
+      "binary": "/usr/bin/iperf3",
+      "version_command": ["iperf3", "--version"],
+      "capability": "bounded-network-throughput-measurement"
     },
     "gh": {
       "version_ref": "GH_VERSION",

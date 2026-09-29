@@ -4,6 +4,42 @@ status: enforced
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
 
+step_qualification:
+  properties_authority: config/contracts/execution-properties-policy.yaml
+  evidence_schema: config/contracts/qualification-step-evidence.schema.json
+  preflight_before_expensive_work: required
+  fail_fast: true
+  capacity_check: required
+  environment_check: required
+  checkpointed: true
+  resumable: true
+  bounded: true
+  reuse_identity: digest
+  source_sha_required: true
+  input_digest_required: true
+  artifact_digest_required_when_applicable: true
+  mutable_identity: forbidden
+  selective_invalidation: true
+  unknown_impact: fail_closed
+  unchanged_artifact_rebuild: forbidden
+  diagnostic_artifact_retention: until-final-evidence-or-explicit-cleanup
+  smoke_before_full: required
+  smoke_checks: [runtime_boot, os_identity, network, ssh, ansible_connectivity]
+  staged_network_probes: [runtime_state, network_interface, ip, tcp_port, protocol_handshake, application_probe]
+  monolithic_network_timeout: forbidden
+  bounded_backoff: required
+  content_addressed_transfer: required
+  unchanged_content_full_retransfer: forbidden
+  transfer_manifest: required
+  transfer_digest_verification: required
+  transfer_evidence: required
+  final_candidate_only_full: true
+  runtime_evidence: required
+  declaration_only_evidence: forbidden
+  exact_sha_reviews: [CODE, SECURITY]
+  statuses: [PASS, FAIL, BLOCKED_RUNTIME, SKIPPED_REUSED_VERIFIED]
+  expensive_metrics: [duration_seconds, executed, reused, cache_hit]
+
 principles:
   single_execution_authority: true
   fail_closed_on_unknown_gate: true
@@ -1004,6 +1040,30 @@ workflows:
     owner: platform / M2.5 persistent MGMT bootstrap
     purpose: prove one disposable Rocky control plane can cold-install and start the pinned offline RKE2/Cilium stack under the canonical isolation boundary
     entrypoint: scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json
+    step_graph:
+      preflight: {depends_on: [], level: static, expensive: false}
+      input-lock: {depends_on: [preflight], level: static, expensive: false}
+      image: {depends_on: [input-lock], level: static, expensive: false, artifact: vm_box_sha256}
+      vm-smoke: {depends_on: [image], level: smoke, expensive: true, artifact: vm_box_sha256}
+      network-ssh: {depends_on: [vm-smoke], level: smoke, expensive: true}
+      rocky-runtime: {depends_on: [network-ssh], level: smoke, expensive: true}
+      offline-bundle: {depends_on: [rocky-runtime], level: full, expensive: true, artifact: mgmt_offline_manifest_sha256}
+      rke2-single: {depends_on: [offline-bundle], level: full, expensive: true}
+      recovery: {depends_on: [rke2-single], level: full, expensive: true}
+      evidence: {depends_on: [recovery], level: full, expensive: false}
+      final: {depends_on: [evidence], level: full, expensive: false}
+    impact_inputs:
+      docs_only: []
+      ansible: [vm-smoke]
+      bundle: [offline-bundle]
+      runtime_config: [rocky-runtime]
+      image_inputs: [image]
+    impact_path_rules:
+      docs_only: [docs/**, README.md]
+      ansible: [platform/ansible/**]
+      bundle: [config/artifacts/**]
+      runtime_config: [config/infrastructure/mgmt-bootstrap.yaml, config/infrastructure/network-plan.yaml]
+      image_inputs: [platform/packer/**, config/contracts/machine-image-lock.yaml]
     exit_criteria:
       - fresh-rocky-own-kernel-systemd-selinux-enforcing
       - cold-offline-artifact-install-pass

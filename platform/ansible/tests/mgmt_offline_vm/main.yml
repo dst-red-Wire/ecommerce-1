@@ -22,7 +22,7 @@
     - name: Validate explicit disposable resource inputs
       ansible.builtin.assert:
         that:
-          - vm_action in ['validate', 'create', 'resize', 'test', 'restage', 'tamper', 'server', 'qualify', 'destroy']
+          - vm_action in ['validate', 'create', 'resize', 'diagnostics', 'test', 'restage', 'tamper', 'server', 'qualify', 'destroy']
           - vm_resume_owned_creation | bool in [true, false]
           - vm_name is match('^ecommerce-mgmt-test-[a-z0-9-]+$')
           - vm_vagrant_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
@@ -114,6 +114,9 @@
         - name: Resize and restart the exact owned VM
           ansible.builtin.include_tasks: resize.yml
           when: vm_action == 'resize'
+        - name: Install offline diagnostic tools in the owned VM
+          ansible.builtin.include_tasks: diagnostics.yml
+          when: vm_action == 'diagnostics'
         - name: Execute actual repository artifact role
           ansible.builtin.include_tasks: test.yml
           when: vm_action in ['test', 'restage', 'qualify']

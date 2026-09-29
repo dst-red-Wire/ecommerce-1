@@ -37,6 +37,14 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+try:
+    import qualification_steps
+except ModuleNotFoundError as exc:
+    if exc.name != "qualification_steps":
+        raise
+    # Trusted delivery controllers copy only the stateless repoctl boundary.
+    # Qualification commands still fail closed when their step validator is absent.
+    qualification_steps = None
 
 
 _MODERN_ENGINEERING = None
@@ -1244,6 +1252,8 @@ def _semantic_region_snapshot_unchanged(
 
 def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
+    if qualification_steps is None:
+        raise RuntimeError("qualification step validator is required")
     global _QUALIFICATION_EXECUTION_POLICY
     if _QUALIFICATION_EXECUTION_POLICY is None:
         lock = ruby_yaml("architecture.lock.yaml")
@@ -1251,6 +1261,15 @@ def qualification_execution_policy() -> dict:
         if not isinstance(relative, str) or not relative.strip():
             raise RuntimeError("architecture.lock.yaml must register machine_contracts.qualification_execution_policy")
         policy = ruby_yaml(relative)
+        qualification_steps.validate_policy(policy, ROOT)
+        properties_policy = ruby_yaml(policy["step_qualification"]["properties_authority"])
+        if (
+            properties_policy.get("version") != 1
+            or properties_policy.get("kind") != "ExecutionPropertiesPolicy"
+            or properties_policy.get("status") != "enforced"
+            or not isinstance(properties_policy.get("properties"), dict)
+        ):
+            raise RuntimeError("QualificationExecutionPolicy requires the enforced ExecutionPropertiesPolicy")
         if (
             policy.get("kind") != "QualificationExecutionPolicy"
             or policy.get("architecture_authority") != "architecture.lock.yaml"
@@ -1421,6 +1440,7 @@ def qualification_execution_policy() -> dict:
         workflows = policy.get("workflows")
         if not isinstance(workflows, dict) or not workflows:
             raise RuntimeError("qualification execution policy must declare workflows")
+        qualification_steps.validate_graph(workflows.get("rke2_local_virtualbox", {}))
 
         effective_workflows: dict[str, dict] = {}
         default_keys = set(defaults)
@@ -3404,6 +3424,7 @@ def api_compat(base: str, head: str) -> int:
 
 
 def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) -> int:
+    qualification_execution_policy()
     require("ruby")
     run(["ruby", "scripts/validate-openapi.rb"])
     run(["ruby", "scripts/validate-contract-consistency.rb"])
@@ -4871,6 +4892,21 @@ def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]
         command.append("--strict-unknown")
     p = run(command, capture=True)
     return json.loads(p.stdout)
+
+
+def qualification_impact(base: str, head: str, workflow_name: str) -> dict:
+    workflow = qualification_execution_policy()["workflows"].get(workflow_name)
+    if not isinstance(workflow, dict):
+        raise ValueError(f"unknown qualification workflow: {workflow_name}")
+    graph = qualification_steps.validate_graph(workflow)
+    paths = changed_paths(base, head)
+    components = affected(base, head, strict_unknown=True)
+    classes = qualification_steps.classify_impact(
+        paths, components, workflow["impact_path_rules"]
+    )
+    return {"workflow": workflow_name, "base": base, "head": head,
+            "changed_paths": paths, "affected_components": components,
+            **qualification_steps.invalidate(graph, workflow["impact_inputs"], classes)}
 
 
 def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = None) -> tuple[bool, dict]:
@@ -10257,6 +10293,9 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
 
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
     workflow = qualification_workflow("rke2_local_virtualbox")
+    graph = qualification_steps.validate_graph(
+        qualification_execution_policy()["workflows"]["rke2_local_virtualbox"]
+    )
     expected_entrypoint = (
         "scripts/repoctl.py rke2-local-virtualbox-qualification "
         "--inputs .context/mgmt-vm-inputs.json"
@@ -10321,6 +10360,31 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     frozen_inputs = json.dumps(
         {**input_values, **verified_box}, sort_keys=True, separators=(",", ":")
     )
+    input_digest = hashlib.sha256(frozen_inputs.encode("utf-8")).hexdigest()
+    step_records: dict[str, dict] = {}
+    checkpoint_root = vm_state / "step-checkpoints"
+
+    def record_step(index: int, action: str, step: str, status: str,
+                    started_at: datetime, runtime_file: str | None = None) -> None:
+        runtime_path = vm_state / runtime_file if runtime_file and status == "PASS" else None
+        if runtime_path is not None:
+            if runtime_path.stat().st_mtime < started_at.timestamp() - 1:
+                raise ValueError(f"stale runtime evidence: {runtime_path.name}")
+            runtime_payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if not isinstance(runtime_payload, dict) or not runtime_payload:
+                raise ValueError(f"runtime evidence is empty: {runtime_path.name}")
+        record = qualification_steps.checkpoint(
+            qualification="rke2_local_virtualbox", step=step, source_sha=head_sha,
+            input_digest=input_digest, status=status, started_at=started_at,
+            artifact_digest=verified_box["vm_box_sha256"] if step == "vm-smoke" else None,
+            runtime_path=runtime_path, preflight=(step == "preflight" and status == "PASS"),
+        )
+        checkpoint_root.mkdir(parents=True, exist_ok=True)
+        (checkpoint_root / f"{index:02d}-{action}.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if status == "PASS":
+            step_records[step] = record
 
     def source_is_frozen() -> bool:
         return (
@@ -10337,6 +10401,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         return isinstance(payload, dict) and payload.get("git_sha") == head_sha
 
     require("ansible-playbook")
+    require("iperf3")
     command = [
         "ansible-playbook",
         "-i",
@@ -10352,6 +10417,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     actions = [
         "validate",
         "create",
+        "diagnostics",
         "test",
         "server",
         "server",
@@ -10364,12 +10430,45 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
     observed_actions: list[dict[str, object]] = []
     observed_vm_uuid = ""
     server_count = 0
-    for action in actions:
+    action_step = {
+        "validate": "preflight", "create": "vm-smoke", "test": "offline-bundle",
+        "server": "rke2-single", "restage": "recovery", "tamper": "recovery",
+    }
+    runtime_file = {
+        "create": "preflight.json", "test": "role-result.json",
+        "server": "rke2-result.json", "restage": "role-result.json",
+        "tamper": "tamper-result.json",
+    }
+    for index, action in enumerate(actions):
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed after freeze")
+        step = action_step.get(action)
+        if step and action != "validate":
+            try:
+                qualification_steps.guard_start(
+                    qualification="rke2_local_virtualbox", step=step, graph=graph, source_sha=head_sha,
+                    input_digest=input_digest, checkpoints=step_records,
+                )
+            except ValueError as exc:
+                return fail(f"RKE2 qualification step {action} blocked: {exc}")
+        if action == "destroy":
+            try:
+                qualification_steps.guard_cleanup(
+                    final_evidence_captured=False,
+                    explicitly_authorized=(
+                        len(observed_actions) == len(actions) - 1
+                        and (vm_state / "tamper-result.json").is_file()
+                        and (vm_state / "rke2-result.json").is_file()
+                    ),
+                )
+            except ValueError as exc:
+                return fail(f"RKE2 diagnostic VM cleanup blocked: {exc}")
+        started_at = datetime.now(timezone.utc)
         started = time.monotonic()
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
+            if step:
+                record_step(index, action, step, "FAIL", started_at)
             return result.returncode
         if action == "server" and not source_evidence_matches():
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
@@ -10393,6 +10492,11 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             observation["install_required"] = expected_install
             observation["vm_uuid"] = uuid
             server_count += 1
+        if step:
+            try:
+                record_step(index, action, step, "PASS", started_at, runtime_file.get(action))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 qualification step {action} lacks a valid checkpoint: {exc}")
         observed_actions.append(observation)
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed during execution")
@@ -12449,6 +12553,10 @@ def main() -> int:
     a.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     a.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     a.add_argument("--json", action="store_true")
+    qi = sub.add_parser("qualification-impact")
+    qi.add_argument("--workflow", default="rke2_local_virtualbox")
+    qi.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    qi.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -12723,6 +12831,9 @@ def main() -> int:
         if args.cmd == "affected":
             comps = affected(args.base, args.head)
             print(json.dumps(comps) if args.json else "\n".join(comps))
+            return 0
+        if args.cmd == "qualification-impact":
+            print(json.dumps(qualification_impact(args.base, args.head, args.workflow), sort_keys=True))
             return 0
         if args.cmd == "verify-change":
             return verify_change(args.base, args.head, args.profile)

@@ -35,15 +35,6 @@
     group: root
     mode: "0700"
 
-- name: Transfer approved bundle over existing SSH access
-  ansible.builtin.copy:
-    src: "{{ mgmt_offline_bundle_dir }}/"
-    dest: "{{ mgmt_offline_target_dir }}/"
-    owner: root
-    group: root
-    mode: "0600"
-    directory_mode: "0700"
-
 - name: Create local validator directory
   ansible.builtin.file:
     path: /usr/local/libexec
@@ -59,6 +50,34 @@
     owner: root
     group: root
     mode: "0644"
+
+- name: Check whether the content-addressed target already matches the approved bundle
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - /usr/local/libexec/ecommerce-mgmt-airgap.py
+      - --rpm-metadata-check
+      - --bundle
+      - "{{ mgmt_offline_target_dir }}"
+      - --manifest-sha256
+      - "{{ mgmt_offline_manifest_sha256 }}"
+      - --rke2-version
+      - "{{ rke2_version }}"
+      - --services-json
+      - "{{ {'dns': mgmt_internal_dns, 'ntp': mgmt_internal_ntp} | to_json }}"
+  register: mgmt_offline_existing
+  changed_when: false
+  failed_when: false
+
+- name: Transfer approved bundle only when target content is absent or invalid
+  ansible.builtin.copy:
+    src: "{{ mgmt_offline_bundle_dir }}/"
+    dest: "{{ mgmt_offline_target_dir }}/"
+    owner: root
+    group: root
+    mode: "0600"
+    directory_mode: "0700"
+  when: mgmt_offline_existing.rc != 0
 
 - name: Verify transferred bytes before package installation
   ansible.builtin.command:

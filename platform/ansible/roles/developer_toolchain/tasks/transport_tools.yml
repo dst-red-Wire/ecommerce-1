@@ -1,0 +1,20 @@
+---
+- name: Install pinned artifact transport prerequisite
+  ansible.builtin.apt:
+    name: "rsync={{ rsync_package_version }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  tags: [toolchain, artifact_transport]
+
+- name: Install pinned M2.5 controller network diagnostic
+  ansible.builtin.apt:
+    name: "iperf3={{ iperf3_package_version }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 86400
+  become: true
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+  tags: [toolchain, m25_transfer_diagnostics]

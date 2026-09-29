@@ -1054,6 +1054,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             server_attempts = []
             def fake_run(command, **kwargs):
                 if command[-1] == "vm_action=create":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "preflight.json").write_text('{"ssh":"PASS"}\n', encoding="utf-8")
                     inputs.write_text(
                         __import__("json").dumps(
                             {
@@ -1064,6 +1066,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         + "\n",
                         encoding="utf-8",
                     )
+                if command[-1] == "vm_action=test":
+                    (state / "role-result.json").write_text('{"exit_code":0}\n', encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     server_attempts.append(True)
                     state.mkdir(parents=True, exist_ok=True)
@@ -1109,6 +1113,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             [
                 "vm_action=validate",
                 "vm_action=create",
+                "vm_action=diagnostics",
                 "vm_action=test",
                 "vm_action=server",
                 "vm_action=server",
@@ -1125,7 +1130,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             for call in run.call_args_list
             if call.args and call.args[0] and call.args[0][0] == "ansible-playbook"
         ]
-        self.assertEqual(10, len(ansible_calls))
+        self.assertEqual(11, len(ansible_calls))
         for call in ansible_calls:
             command = call.args[0]
             self.assertIn(f"vm_repo={root}", command)
@@ -1459,6 +1464,11 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 raise AssertionError(args)
 
             def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=create":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "preflight.json").write_text('{"ssh":"PASS"}\n', encoding="utf-8")
+                if command[-1] == "vm_action=test":
+                    (state / "role-result.json").write_text('{"exit_code":0}\n', encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "server-source.json").write_text(
@@ -2057,6 +2067,169 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
         self.assertEqual(["a", "b", "serial", "c"], [record["gate"] for record in records])
+
+
+class QualificationStepGuardTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime, timezone
+
+        self.steps = MOD.qualification_steps
+        self.started = datetime.now(timezone.utc)
+        self.sha = "a" * 40
+        self.digest = "b" * 64
+        self.artifact_digest = "c" * 64
+        self.workflow = MOD.qualification_execution_policy()["workflows"]["rke2_local_virtualbox"]
+        self.graph = self.steps.validate_graph(self.workflow)
+        self.preflight = self.steps.checkpoint(
+            qualification="m2.5", step="preflight", source_sha=self.sha,
+            input_digest=self.digest, status="PASS", started_at=self.started,
+            preflight=True,
+        )
+
+    def test_policy_schema_rejects_missing_version_unknown_rule_and_status(self):
+        policy = MOD.qualification_execution_policy()
+        for mutation in (
+            lambda value: value.pop("version"),
+            lambda value: value.update(kind="WrongKind"),
+            lambda value: value.update(status="draft"),
+            lambda value: value["step_qualification"].pop("checkpointed"),
+            lambda value: value["step_qualification"].update(unknown_rule=True),
+        ):
+            altered = json.loads(json.dumps(policy))
+            mutation(altered)
+            with self.subTest(altered=altered.get("kind")), self.assertRaises(ValueError):
+                self.steps.validate_policy(altered, ROOT)
+
+    def test_preflight_blocks_expensive_work_and_full_requires_smoke(self):
+        with self.assertRaisesRegex(ValueError, "preflight"):
+            self.steps.guard_start(qualification="m2.5", step="vm-smoke", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints={})
+        with self.assertRaisesRegex(ValueError, "SMOKE"):
+            self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints={"preflight": self.preflight})
+
+    def test_compatible_smoke_allows_full_and_other_sha_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proof = Path(temporary) / "runtime.json"
+            proof.write_text('{"observed":true}\n', encoding="utf-8")
+            smoke = self.steps.checkpoint(
+                qualification="m2.5", step="vm-smoke", source_sha=self.sha,
+                input_digest=self.digest, status="PASS", started_at=self.started,
+                artifact_digest=self.artifact_digest, runtime_path=proof,
+            )
+            records = {"preflight": self.preflight, "vm-smoke": smoke}
+            self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints=records)
+            with self.assertRaisesRegex(ValueError, "another source SHA"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha="d" * 40,
+                                       input_digest=self.digest, checkpoints=records)
+            proof.write_text('{"observed":false}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                       input_digest=self.digest, checkpoints=records)
+
+    def test_checkpoint_requires_source_runtime_proof_and_reuse_provenance(self):
+        record = dict(self.preflight)
+        del record["source_sha"]
+        with self.assertRaisesRegex(ValueError, "fields"):
+            self.steps.validate_checkpoint(record)
+        record = dict(self.preflight, step="vm-smoke")
+        with self.assertRaisesRegex(ValueError, "runtime evidence"):
+            self.steps.validate_checkpoint(record, runtime_required=True)
+        record = dict(self.preflight, status="SKIPPED_REUSED_VERIFIED", executed=False,
+                      reused=True, cache_hit=True, artifact_digest=self.artifact_digest)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            self.steps.validate_checkpoint(record)
+        record["reused_from"] = {"source_sha": self.sha, "input_digest": "d" * 64,
+                                 "artifact_digest": self.artifact_digest}
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            self.steps.validate_checkpoint(record)
+        record["reused_from"]["input_digest"] = self.digest
+        self.steps.validate_checkpoint(record)
+
+    def test_verified_artifact_reuse_forbids_rebuild(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "box"
+            artifact.write_bytes(b"verified box")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            self.assertEqual("SKIPPED_REUSED_VERIFIED", self.steps.verified_reuse(
+                path=artifact, source_sha=self.sha, recorded_source_sha="e" * 40,
+                expected_digest=digest, input_digest=self.digest,
+                recorded_input_digest=self.digest, operation="reuse"))
+            with self.assertRaisesRegex(ValueError, "must be reused"):
+                self.steps.verified_reuse(path=artifact, source_sha=self.sha,
+                                          recorded_source_sha="e" * 40, expected_digest=digest,
+                                          input_digest=self.digest, recorded_input_digest=self.digest,
+                                          operation="build")
+            self.assertEqual("REBUILD_REQUIRED", self.steps.verified_reuse(
+                path=artifact, source_sha=self.sha, recorded_source_sha="e" * 40,
+                expected_digest=digest, input_digest=self.digest,
+                recorded_input_digest="e" * 64, operation="reuse"))
+
+    def test_transfer_cleanup_network_and_review_guards(self):
+        with self.assertRaisesRegex(ValueError, "retransferred"):
+            self.steps.guard_transfer(source_digest=self.digest, target_digest=self.digest,
+                                      mode="full", manifest_digest=self.artifact_digest,
+                                      final_digest=self.digest)
+        self.steps.guard_transfer(source_digest=self.digest, target_digest=self.digest,
+                                  mode="skip", manifest_digest=self.artifact_digest)
+        with self.assertRaisesRegex(ValueError, "retained"):
+            self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=False)
+        self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=True)
+        with self.assertRaisesRegex(ValueError, "exact SHA"):
+            self.steps.guard_review(source_sha=self.sha, code_sha=self.sha,
+                                    security_sha="e" * 40)
+        self.steps.guard_review(source_sha=self.sha, code_sha=self.sha, security_sha=self.sha)
+        with self.assertRaisesRegex(ValueError, "staged probes"):
+            self.steps.guard_network(probes=["tcp_port"], elapsed_seconds=120,
+                                     budget_seconds=120, bounded_backoff=False)
+
+    def test_selective_invalidation_and_unknown_impact(self):
+        impacts = self.workflow["impact_inputs"]
+        docs = self.steps.invalidate(self.graph, impacts, ["docs_only"])
+        self.assertEqual([], docs["invalidated_steps"])
+        ansible = self.steps.invalidate(self.graph, impacts, ["ansible"])
+        self.assertIn("image", ansible["reusable_steps"])
+        self.assertIn("rke2-single", ansible["invalidated_steps"])
+        self.assertIn("final", ansible["invalidated_steps"])
+        unknown = self.steps.invalidate(self.graph, impacts, ["unclassified"])
+        self.assertEqual(set(self.graph), set(unknown["invalidated_steps"]))
+
+    def test_qualification_impact_reuses_canonical_affected_classifier(self):
+        rules = self.workflow["impact_path_rules"]
+        self.assertEqual(["docs_only"], self.steps.classify_impact(
+            ["docs/engineering/example.md"], ["global"], rules))
+        self.assertEqual(["ansible"], self.steps.classify_impact(
+            ["platform/ansible/roles/rke2_server/tasks/main.yml"],
+            ["global", "platform:ansible"], rules))
+        self.assertEqual(["unknown"], self.steps.classify_impact(
+            ["platform/ansible/roles/rke2_server/tasks/main.yml"],
+            ["global", "platform:ansible", "system"], rules))
+        with (
+            mock.patch.object(MOD, "changed_paths", return_value=["docs/engineering/example.md"]),
+            mock.patch.object(MOD, "affected", return_value=["global"]) as canonical,
+        ):
+            result = MOD.qualification_impact("base", "head", "rke2_local_virtualbox")
+        canonical.assert_called_once_with("base", "head", strict_unknown=True)
+        self.assertEqual([], result["invalidated_steps"])
+
+    def test_rke2_bundle_transfer_is_skipped_only_after_target_digest_probe(self):
+        import yaml
+
+        tasks = yaml.safe_load((ROOT / "platform/ansible/roles/mgmt_offline_artifacts/tasks/main.yml").read_text(encoding="utf-8"))
+        names = [task["name"] for task in tasks]
+        probe_name = "Check whether the content-addressed target already matches the approved bundle"
+        transfer_name = "Transfer approved bundle only when target content is absent or invalid"
+        verify_name = "Verify transferred bytes before package installation"
+        self.assertLess(names.index(probe_name), names.index(transfer_name))
+        self.assertLess(names.index(transfer_name), names.index(verify_name))
+        probe = tasks[names.index(probe_name)]
+        transfer = tasks[names.index(transfer_name)]
+        self.assertIn("--manifest-sha256", probe["ansible.builtin.command"]["argv"])
+        self.assertEqual("mgmt_offline_existing.rc != 0", transfer["when"])
+        self.assertEqual("mgmt_offline_existing", probe["register"])
 
 
 if __name__ == "__main__":

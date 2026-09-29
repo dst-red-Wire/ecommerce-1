@@ -71,6 +71,20 @@ function New-NativeBootAttempt {
     finally { $stream.Dispose() }
 }
 
+function Write-NativeProgress {
+    param([string]$EvidenceRoot, [string]$SourceSha, [string]$ManifestSha256,
+          [string]$Step, [string]$Status, [string]$Reason = '')
+    if ($SourceSha -notmatch '^[0-9a-f]{40}$' -or $ManifestSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $Step -notmatch '^[a-z0-9-]+$' -or $Status -notin @('PASS', 'FAIL', 'RUNNING')) {
+        throw 'Native progress checkpoint identity is invalid'
+    }
+    Write-Utf8Json -InputObject ([ordered]@{
+        schema=1; policy='QualificationExecutionPolicy'; policy_version=1
+        source_sha=$SourceSha; staging_manifest_sha256=$ManifestSha256
+        step=$Step; status=$Status; observed_at=Get-UtcTimestamp; reason=$Reason
+    }) -Path (Join-Path $EvidenceRoot "progress-$SourceSha.json")
+}
+
 function Initialize-NativeState {
     param([string]$SourceSha, [string]$SourceTree, [string]$ManifestSha256, [string]$NormalBootId)
     $path = Get-NativeStatePath -SourceSha $SourceSha
@@ -1265,8 +1279,10 @@ function Invoke-NativeRun {
             throw 'Native startup state is not bound to this boot and exact staging manifest'
         }
         New-NativeBootAttempt -EvidenceRoot $resultRoot -SourceSha $sourceSha
+        Write-NativeProgress -EvidenceRoot $resultRoot -SourceSha $sourceSha -ManifestSha256 ([string]$prepared.staging_manifest_sha256) -Step 'staging-integrity' -Status 'RUNNING'
         Move-NativePhase -SourceSha $sourceSha -Expected 'NATIVE_BOOT_PENDING' -Next 'NATIVE_BOOTED'
         if (-not (Test-StagingManifest -Root $preparedStage)) { throw 'Native staging integrity verification failed before build' }
+        Write-NativeProgress -EvidenceRoot $resultRoot -SourceSha $sourceSha -ManifestSha256 ([string]$prepared.staging_manifest_sha256) -Step 'staging-integrity' -Status 'PASS'
         $packerEnvironment = Get-StagedPackerEnvironment -Stage $preparedStage
         if ((Get-FileSha256 -Path (Join-Path $preparedStage 'SHA256SUMS')) -ne [string]$prepared.staging_manifest_sha256) {
             throw 'Native staging manifest digest differs from preparation evidence'
@@ -1284,6 +1300,7 @@ function Invoke-NativeRun {
                 throw "Ephemeral qualification key binding failed: $($keyBinding.Name)"
             }
         }
+        Write-NativeProgress -EvidenceRoot $resultRoot -SourceSha $sourceSha -ManifestSha256 ([string]$prepared.staging_manifest_sha256) -Step 'prepared-bindings' -Status 'PASS'
         $transcriptPath = Join-Path $preparedStage 'logs\native-qualification-transcript.txt'
         [void](Start-Transcript -LiteralPath $transcriptPath -Force)
         $transcriptStarted = $true
@@ -1565,6 +1582,9 @@ function Invoke-NativeRun {
     catch {
         $result.error = $_.Exception.Message
         if ($result.error.StartsWith('BLOCKED_RUNTIME ', [StringComparison]::Ordinal)) { $result.status = 'BLOCKED_RUNTIME' }
+        try {
+            Write-NativeProgress -EvidenceRoot $resultRoot -SourceSha $sourceSha -ManifestSha256 ([string]$prepared.staging_manifest_sha256) -Step 'native-run' -Status 'FAIL' -Reason $result.error
+        } catch { }
     }
     finally {
         if ($null -ne $nativeSeedRoot) {
@@ -1615,10 +1635,7 @@ function Invoke-NativeRun {
         try { Set-OneShotBootSequence -BootId ([string]$prepared.normal_boot_id); $result.bootsequence_return_normal = 'PASS' } catch {
             $result.bootsequence_return_normal = 'FAIL'; if ($null -eq $result.error) { $result.error = $_.Exception.Message }
         }
-        try { Remove-NativeTask; $result.native_task_removed = 'PASS' } catch {
-            $result.native_task_removed = 'FAIL'; if ($null -eq $result.error) { $result.error = $_.Exception.Message }
-        }
-        if ($cleanupFailed -or $result.cleanup -ne 'PASS' -or $result.seed_server_cleanup -ne 'PASS' -or $result.qualification_key_cleanup -ne 'PASS' -or $result.bootsequence_return_normal -ne 'PASS' -or $result.native_task_removed -ne 'PASS') {
+        if ($cleanupFailed -or $result.cleanup -ne 'PASS' -or $result.seed_server_cleanup -ne 'PASS' -or $result.qualification_key_cleanup -ne 'PASS' -or $result.bootsequence_return_normal -ne 'PASS') {
             $result.status = 'FAIL'
         }
         if ($transcriptStarted) {
@@ -1647,6 +1664,21 @@ function Invoke-NativeRun {
             $result.status = 'FAIL'
             if ($null -eq $result.error) { $result.error = "Native state checkpoint failed: $($_.Exception.Message)" }
         }
+        # Persist a fail-closed result before unregistering the currently running
+        # startup task. Task Scheduler may terminate its action during removal.
+        $completedStatus = $result.status
+        $result.status = 'FAIL'
+        $result.native_task_removed = 'NOT_EXECUTED'
+        try { Write-Utf8Json -InputObject $result -Path $resultPath }
+        catch {
+            $completedStatus = 'FAIL'
+            if ($null -eq $result.error) { $result.error = "Native provisional result write failed: $($_.Exception.Message)" }
+        }
+        try { Remove-NativeTask; $result.native_task_removed = 'PASS' } catch {
+            $result.native_task_removed = 'FAIL'; $completedStatus = 'FAIL'
+            if ($null -eq $result.error) { $result.error = $_.Exception.Message }
+        }
+        $result.status = $completedStatus
         try { Write-Utf8Json -InputObject $result -Path $resultPath }
         finally { Restart-Computer -Force }
     }
@@ -2417,6 +2449,13 @@ description             $NativeEntryName
         New-NativeBootAttempt -EvidenceRoot $attemptRoot -SourceSha ('b' * 40)
         if (@(Get-ChildItem -LiteralPath $attemptRoot -File).Count -ne 2) {
             throw 'Distinct native source attempts did not remain independent'
+        }
+        Write-NativeProgress -EvidenceRoot $attemptRoot -SourceSha ('a' * 40) -ManifestSha256 ('c' * 64) -Step 'staging-integrity' -Status 'RUNNING'
+        $progress = Read-JsonFile (Join-Path $attemptRoot ("progress-$('a' * 40).json"))
+        if ($progress.policy -ne 'QualificationExecutionPolicy' -or $progress.source_sha -ne ('a' * 40) -or
+            $progress.staging_manifest_sha256 -ne ('c' * 64) -or $progress.step -ne 'staging-integrity' -or
+            $progress.status -ne 'RUNNING') {
+            throw 'Native progress checkpoint lost exact source or manifest binding'
         }
         $watchResult = Join-Path $temporary 'watch-result.json'
         $bootPendingAt = [DateTime]::UtcNow

@@ -1,0 +1,104 @@
+---
+- name: Define pinned Rocky 10.2 diagnostics RPMs
+  ansible.builtin.set_fact:
+    vm_diagnostic_rpm_dir: "{{ vm_repo }}/.context/m2.5/diagnostics/rpms"
+    vm_diagnostic_remote_dir: /home/vagrant/.cache/ecommerce-m25-diagnostics
+    vm_diagnostic_rpms:
+      - file: fio-3.36-5.el10.x86_64.rpm
+        sha256: 90b06626609f4205413b7bbe35e0cf1bd372a6461cc91a207021d35a3f08c6de
+      - file: iperf3-3.17.1-6.el10_2.1.x86_64.rpm
+        sha256: f4af4f5f519f5464afb6c936df3c1c487648c2142c081dee1e1c35648187661c
+      - file: lksctp-tools-1.0.21-1.el10.x86_64.rpm
+        sha256: 053e496dd47cd6450ebc9795b393e8e042895f9a1a00a1dee7c7c735d107696b
+      - file: numactl-libs-2.0.19-3.el10.x86_64.rpm
+        sha256: 98426966b99a7d4221ddabe74607b34ea16c3c010c91beca2082106e8f2bb522
+
+- name: Check every locally cached diagnostic RPM before guest access
+  ansible.builtin.stat:
+    path: "{{ vm_diagnostic_rpm_dir }}/{{ item.file }}"
+    checksum_algorithm: sha256
+  loop: "{{ vm_diagnostic_rpms }}"
+  register: vm_diagnostic_source
+  changed_when: false
+
+- name: Refuse absent or modified diagnostic RPMs
+  ansible.builtin.assert:
+    that:
+      - item.stat.exists
+      - item.stat.isreg
+      - item.stat.checksum == item.item.sha256
+  loop: "{{ vm_diagnostic_source.results }}"
+
+- name: Create a private diagnostic package directory on the guest
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", install, -d, -m, '0700', "{{ vm_diagnostic_remote_dir }}"]
+  changed_when: false
+
+- name: Inspect guest diagnostic package digests
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sha256sum, "{{ vm_diagnostic_remote_dir }}/{{ item.file }}"]
+  loop: "{{ vm_diagnostic_rpms }}"
+  register: vm_diagnostic_existing
+  changed_when: false
+  failed_when: false
+
+- name: Copy only pinned offline diagnostic RPMs through the existing verified SSH access
+  ansible.builtin.command:
+    argv:
+      - scp
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_diagnostic_rpm_dir }}/{{ item.file }}"
+      - "{{ vm_name }}:{{ vm_diagnostic_remote_dir }}/{{ item.file }}"
+  loop: "{{ vm_diagnostic_rpms }}"
+  loop_control:
+    index_var: rpm_index
+  when: >-
+    vm_diagnostic_existing.results[rpm_index].rc != 0
+    or vm_diagnostic_existing.results[rpm_index].stdout.split()[0] != item.sha256
+  changed_when: true
+
+- name: Verify Rocky signatures and package hashes inside the guest before installation
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - sudo
+      - -n
+      - rpm
+      - -Kv
+      - "{{ vm_diagnostic_remote_dir }}/{{ item.file }}"
+  loop: "{{ vm_diagnostic_rpms }}"
+  register: vm_diagnostic_signature
+  changed_when: false
+  failed_when: "vm_diagnostic_signature.rc != 0 or 'Signature, key ID 6fedfc85: OK' not in vm_diagnostic_signature.stdout"
+
+- name: Verify package hashes inside the guest
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sha256sum, "{{ vm_diagnostic_remote_dir }}/{{ item.file }}"]
+  loop: "{{ vm_diagnostic_rpms }}"
+  register: vm_diagnostic_target
+  changed_when: false
+  failed_when: vm_diagnostic_target.rc != 0 or vm_diagnostic_target.stdout.split()[0] != item.sha256
+
+- name: Install diagnostics with every remote repository disabled
+  ansible.builtin.command:
+    argv: >-
+      {{ ['ssh', '-F', vm_state ~ '/ssh_config', vm_name, 'sudo', '-n', 'dnf', '-y',
+          '--disablerepo=*', '--setopt=install_weak_deps=False', 'install']
+         + (vm_diagnostic_rpms | map(attribute='file')
+            | map('regex_replace', '^', vm_diagnostic_remote_dir ~ '/') | list) }}
+  register: vm_diagnostic_install
+  changed_when: "'Nothing to do.' not in vm_diagnostic_install.stdout"
+
+- name: Probe installed guest iperf3 and fio versions
+  ansible.builtin.command:
+    argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", "{{ item.command }}", "{{ item.argument }}"]
+  loop:
+    - {command: iperf3, argument: --version, expected: '3.17.1'}
+    - {command: fio, argument: --version, expected: '3.36'}
+  register: vm_diagnostic_versions
+  changed_when: false
+  failed_when: vm_diagnostic_versions.rc != 0 or item.expected not in vm_diagnostic_versions.stdout
