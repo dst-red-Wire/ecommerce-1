@@ -2927,7 +2927,7 @@ def developer_state_ready(tags: str) -> bool:
     if "cgo" in wanted and not shutil.which("cc"):
         return False
     if "quality_tools" in wanted:
-        for command, key in (("oxlint", "OXLINT_VERSION"), ("oxfmt", "OXFMT_VERSION"), ("ruff", "RUFF_VERSION")):
+        for command, key in (("ruff", "RUFF_VERSION"),):
             executable = shutil.which(command)
             if not executable:
                 return False

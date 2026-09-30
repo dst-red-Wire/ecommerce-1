@@ -28,7 +28,7 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         self.assertIn("role: derived-contract-graph-visualization", topology)
         self.assertIn("role: frontend-task-scheduling-and-local-cache", topology)
 
-    def test_node_and_corepack_are_reconciled_by_ansible(self):
+    def test_node_and_corepack_remain_optional_agent_tooling(self):
         versions = json.loads(
             (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
         )["versions"]
@@ -39,6 +39,19 @@ class AgentEfficiencyContractTest(unittest.TestCase):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text(encoding="utf-8")
         self.assertIn("Download pinned Node archive", tasks)
         self.assertIn("Link Node and Corepack commands", tasks)
+        makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+        self.assertIn(
+            "reconcile --tags workstation,bootstrap,ansible_collections,toolchain,context_tools",
+            makefile,
+        )
+        self.assertIn(
+            "reconcile --tags toolchain,node,agent_tools,context_tools",
+            makefile,
+        )
+        self.assertNotIn(
+            "reconcile --tags workstation,bootstrap,ansible_collections,toolchain,node",
+            makefile,
+        )
 
     def test_prepush_reuses_evidence_only_after_canonical_exact_validation(self):
         text = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")

@@ -438,6 +438,25 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             (repo / "ignored.sh").write_text("#!/bin/sh\n", encoding="utf-8")
             self.assertEqual(["new-helper.sh"], MOD.repository_shell_paths(repo))
 
+    def test_quality_tools_fast_path_requires_ruff_only(self):
+        def fake_run(command, **_kwargs):
+            self.assertEqual(["/bin/ruff", "--version"], command)
+            return subprocess.CompletedProcess(command, 0, "ruff 0.16.6\n", "")
+
+        with (
+            mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
+            mock.patch.object(MOD.shutil, "which", side_effect=lambda name: "/bin/ruff" if name == "ruff" else None),
+            mock.patch.object(MOD, "run", side_effect=fake_run),
+        ):
+            self.assertTrue(MOD.developer_state_ready("quality_tools"))
+
+    def test_quality_tools_fast_path_rejects_missing_ruff(self):
+        with (
+            mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
+            mock.patch.object(MOD.shutil, "which", return_value=None),
+        ):
+            self.assertFalse(MOD.developer_state_ready("quality_tools"))
+
     def test_exact_managed_go_pair_is_detected_without_ansible(self):
         pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}
         commands = {
