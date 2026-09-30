@@ -157,6 +157,59 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual("OWNER_AUTH_REQUIRED", result["state"])
         self.assertEqual(2, trusted.call_count)
 
+    def test_new_qualification_settles_handoff_before_dispatch(self):
+        first = controller()
+        first["qualification"]["source"] = "executed"
+        settled = controller()
+        settled["qualification"]["source"] = "reused"
+        blocked = {
+            **settled,
+            "state": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+            "review_dispatch": {"status": "BLOCKED", "kind": "CODE"},
+        }
+        with (
+            mock.patch.object(
+                transition,
+                "_trusted_transition",
+                side_effect=[(0, first), (0, settled)],
+            ) as trusted,
+            mock.patch.object(
+                transition, "dispatch_controller_result", return_value=blocked
+            ) as dispatch,
+        ):
+            rc, result = transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        self.assertEqual(1, rc)
+        self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+        self.assertEqual(2, trusted.call_count)
+        self.assertIs(settled, dispatch.call_args.args[0])
+
+    def test_unstable_qualification_handoff_blocks_before_dispatch(self):
+        first = controller()
+        first["qualification"]["source"] = "executed"
+        again = controller()
+        again["qualification"]["source"] = "executed"
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", side_effect=[(0, first), (0, again)]
+            ),
+            mock.patch.object(transition, "dispatch_controller_result") as dispatch,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionError, "did not stabilize"
+            ),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        dispatch.assert_not_called()
+
     def test_failed_code_stops_without_dispatch(self):
         failed = {"state": "CODE_FAILED", "pr": 169, "head_sha": HEAD}
         with mock.patch.object(

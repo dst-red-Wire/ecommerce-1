@@ -369,6 +369,51 @@ def transition(
             pr_number,
             dry_run=dry_run,
         )
+        qualification = controller.get("qualification")
+        if (
+            not dry_run
+            and rc == 0
+            and controller.get("state") == "CHATGPT_REVIEW_REQUIRED"
+            and isinstance(qualification, dict)
+            and qualification.get("source") == "executed"
+        ):
+            # The exact-base controller's first handoff includes source=executed.
+            # A later rerun would say source=reused and change the handoff digest.
+            # Let the controller produce its stable handoff before any dispatch.
+            if preflight(target_root, pr_number) != binding:
+                raise ReviewTransitionError(
+                    "exact PR binding changed while stabilizing review request"
+                )
+            initial_identity = (
+                controller.get("pr"),
+                controller.get("head_sha"),
+                controller.get("head_branch"),
+                controller.get("base"),
+                controller.get("review_kind"),
+            )
+            rc, settled = _trusted_transition(
+                trusted_root, target_root, pr_number, dry_run=False
+            )
+            settled_qualification = settled.get("qualification")
+            if (
+                rc != 0
+                or settled.get("state") != "CHATGPT_REVIEW_REQUIRED"
+                or (
+                    settled.get("pr"),
+                    settled.get("head_sha"),
+                    settled.get("head_branch"),
+                    settled.get("base"),
+                    settled.get("review_kind"),
+                )
+                != initial_identity
+                or not isinstance(settled_qualification, dict)
+                or settled_qualification.get("status") != "PASS"
+                or settled_qualification.get("source") != "reused"
+            ):
+                raise ReviewTransitionError(
+                    "exact-base review handoff did not stabilize after qualification"
+                )
+            controller = settled
         if rc or controller.get("state") != "CHATGPT_REVIEW_REQUIRED":
             return rc, controller
         result = dispatch_controller_result(
