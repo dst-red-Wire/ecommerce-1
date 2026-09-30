@@ -75,6 +75,8 @@ def main() -> None:
             failing.append(f"{pod['metadata']['namespace']}/{pod['metadata']['name']}:{phase}")
     if failing:
         raise SystemExit("non-running pods: " + ",".join(sorted(failing)))
+    if pending:
+        raise SystemExit("pending pods: " + ",".join(sorted(pending)))
     public_error = None
     public_denied = False
     probe = socket.socket()

@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 
 VBOX = "/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe"
@@ -38,7 +40,8 @@ def classify_log(log: str) -> str:
 
 
 def probe(vm_name: str, *, expected_cpus: int, expected_memory: int,
-          expected_version: str, minimum_log_mtime: float) -> dict[str, object]:
+          expected_version: str, minimum_log_mtime: float,
+          snapshot_path: Path | None = None) -> dict[str, object]:
     if re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
         raise ValueError("VirtualBox backend probe requires an owned fixture name")
     info = _run([VBOX, "showvminfo", vm_name, "--machinereadable"])
@@ -63,12 +66,30 @@ def probe(vm_name: str, *, expected_cpus: int, expected_memory: int,
         raise ValueError("Windows host CPU or hypervisor capacity is invalid")
     folder = Path(_run(["wslpath", "-u", _field(info, "LogFldr")]))
     log = folder / "VBox.log"
-    if not log.is_file() or log.stat().st_mtime < minimum_log_mtime - 1:
+    if log.is_symlink() or not log.is_file() or log.stat().st_mtime < minimum_log_mtime - 1:
         raise ValueError("current VirtualBox runtime log is absent or stale")
+    if log.stat().st_size > 16 * 1024 * 1024:
+        raise ValueError("current VirtualBox runtime log exceeds the 16 MiB evidence bound")
     log_bytes = log.read_bytes()
+    if len(log_bytes) > 16 * 1024 * 1024:
+        raise ValueError("current VirtualBox runtime log grew beyond the evidence bound")
     backend = classify_log(log_bytes.decode("utf-8", errors="replace"))
     if backend == "NATIVE_VTX" and host["hypervisor_present"]:
         raise ValueError("native VT-x log contradicts the current Windows hypervisor state")
+    if snapshot_path is not None:
+        snapshot_path = Path(snapshot_path)
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(
+            prefix=".backend-VBox-", dir=snapshot_path.parent)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(log_bytes)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary, snapshot_path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     return {
         "schema_version": 1, "status": "PASS", "vm_name": vm_name,
         "vm_uuid": vm_uuid, "virtualbox_version": version,

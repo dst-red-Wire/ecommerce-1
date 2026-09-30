@@ -1021,8 +1021,26 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 script.write_text("def helper():\n    return 2\n", encoding="utf-8")
                 self.assertFalse(MOD._semantic_function_snapshot_unchanged(snapshot))
 
+    def test_rke2_entrypoint_rejects_non_object_inputs_before_capability_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "mgmt-vm-inputs.json"
+            inputs.write_text("[]\n", encoding="utf-8")
+            with (mock.patch.object(MOD, "ROOT", root),
+                  mock.patch.object(sys, "argv", [
+                      "repoctl.py", "rke2-local-virtualbox-qualification",
+                      "--inputs", str(inputs),
+                  ]),
+                  mock.patch.dict(os.environ, {"ECOMMERCE_RUNTIME_ORCHESTRATED": "0"}),
+                  mock.patch("canonical_workspace.check", return_value={
+                      "status": "PASS", "execution_scope": "local",
+                  }),
+                  mock.patch("native_workspace.workspace_error", return_value=None)):
+                self.assertEqual(2, MOD.main())
+
     def test_rke2_registered_entrypoint_executes_complete_existing_fixture_sequence(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        execution_policy = MOD.qualification_execution_policy()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = root / ".context" / "mgmt-vm-inputs.json"
@@ -1125,6 +1143,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
             with (
                 mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_execution_policy", return_value=execution_policy),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
@@ -2207,18 +2226,22 @@ class QualificationStepGuardTests(unittest.TestCase):
                 self.steps.validate_policy(altered, ROOT)
 
     def test_failed_preflight_checkpoint_matches_the_schema(self):
-        import jsonschema
-
         schema = json.loads((ROOT / "config/contracts/qualification-step-evidence.schema.json").read_text())
         failed = self.steps.checkpoint(
             qualification="m2.5", step="preflight", source_sha=self.sha,
             input_digest=self.digest, status="FAIL", started_at=self.started,
         )
-        jsonschema.validate(failed, schema)
+        self.assertNotIn("preflight", schema["required"])
+        self.assertNotIn("preflight", failed)
+        matching_rules = [rule for rule in schema["allOf"] if rule.get("if", {}).get(
+            "properties", {}).get("step", {}).get("const") == "preflight"]
+        self.assertEqual(1, len(matching_rules))
+        self.assertEqual("PASS", matching_rules[0]["if"]["properties"]["status"]["const"])
+        self.assertEqual(["preflight"], matching_rules[0]["then"]["required"])
         self.steps.validate_checkpoint(failed)
         passed_without_proof = dict(failed, status="PASS")
-        with self.assertRaises(jsonschema.ValidationError):
-            jsonschema.validate(passed_without_proof, schema)
+        with self.assertRaisesRegex(ValueError, "preflight lacks"):
+            self.steps.validate_checkpoint(passed_without_proof)
 
     def test_preflight_blocks_expensive_work_and_full_requires_smoke(self):
         with self.assertRaisesRegex(ValueError, "preflight"):
@@ -2276,6 +2299,9 @@ class QualificationStepGuardTests(unittest.TestCase):
                                        input_digest=self.digest, checkpoints=records)
 
     def test_checkpoint_requires_source_runtime_proof_and_reuse_provenance(self):
+        for duration in (True, float("inf"), float("nan")):
+            with self.subTest(duration=duration), self.assertRaisesRegex(ValueError, "duration"):
+                self.steps.validate_checkpoint(dict(self.preflight, duration_seconds=duration))
         record = dict(self.preflight)
         del record["source_sha"]
         with self.assertRaisesRegex(ValueError, "fields"):

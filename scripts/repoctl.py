@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 import contextvars
 import copy
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
@@ -9808,6 +9810,33 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
     return 0
 
 
+NATIVE_SHADOW_BASE = Path("/mnt/c/Program Files/EcommerceNativeSmoke")
+
+
+def _native_shadow_windows_path(path: Path) -> str:
+    parts = path.parts
+    if len(parts) >= 4 and parts[:2] == ("/", "mnt") and len(parts[2]) == 1:
+        return str(PureWindowsPath(parts[2].upper() + ":/", *parts[3:]))
+    return str(path)
+
+
+def _native_shadow_path_safe(root: Path, target: Path) -> bool:
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return False
+    if any(part in {".", ".."} for part in relative.parts):
+        return False
+    current = root
+    if current.is_symlink():
+        return False
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+    return True
+
+
 def lab_network_action(action: str, campaign_id: str) -> int:
     if action not in {"Clean", "Resume"}:
         return fail("unsupported network-smoke action")
@@ -9815,46 +9844,50 @@ def lab_network_action(action: str, campaign_id: str) -> int:
         return fail("network-smoke action requires an exact CAMPAIGN_ID")
     stage = Path("/mnt/c/ecommerce-lab/network-smoke") / campaign_id
     runner = stage / "scripts/windows/LabNetworkSmoke.ps1"
-    if not runner.is_file():
-        return fail(f"network-smoke campaign is absent: {campaign_id}")
     runner_source_sha = ""
+    shadow = None
     if action == "Resume":
         import rocky_box_catalog
 
-        if output(["git", "status", "--porcelain"]).strip():
+        if output(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
             return fail("network SSH resume requires a clean exact-SHA worktree")
         runner_source_sha = output(["git", "rev-parse", "HEAD"]).strip()
-        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8"))
-        box_path = Path(output(["wslpath", "-u", prepared["box_path"]]).strip())
+        shadow = NATIVE_SHADOW_BASE / f"{campaign_id}-{runner_source_sha}"
+        stage = shadow / campaign_id
+        runner = shadow / f"runner-{runner_source_sha}" / "scripts/windows/LabNetworkSmoke.ps1"
+        if (not _native_shadow_path_safe(shadow, stage)
+            or not _native_shadow_path_safe(shadow, runner)
+            or not _native_shadow_path_safe(shadow, stage / "prepared.json")):
+            return fail("network SSH resume protected input is a symlink")
+        if not shadow.is_dir() or not stage.is_dir() or not runner.is_file():
+            return fail("network SSH resume requires the protected exact-SHA shadow campaign")
         try:
+            prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
+            if not isinstance(prepared, dict) or not isinstance(prepared.get("box_path"), str):
+                return fail("network SSH resume protected campaign is malformed")
+            box_path = Path(output(["wslpath", "-u", prepared["box_path"]]).strip())
             rocky_box_catalog.verify(box_path, runner_source_sha)
-        except (OSError, KeyError, ValueError) as exc:
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
             return fail(f"network SSH resume box no longer matches current image inputs: {exc}")
-        runner = ROOT / "scripts/windows/LabNetworkSmoke.ps1"
+    elif not runner.is_file():
+        return fail(f"network-smoke campaign is absent: {campaign_id}")
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     stage_windows = output(["wslpath", "-w", str(stage)]).strip()
     runner_windows = output(["wslpath", "-w", str(runner)]).strip()
     command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows]
     if action == "Resume":
-        command.extend(["-RunnerSourceSha", runner_source_sha])
-    started_at = time.time()
+        command.extend(["-RunnerSourceSha", runner_source_sha,
+                        "-ShadowRoot", output(["wslpath", "-w", str(shadow)]).strip()])
     completed = run(
         command,
         cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
     )
-    if action == "Resume":
-        result_path = Path("/mnt/c/ecommerce-lab/evidence/network-smoke") / campaign_id / "result.json"
-        if result_path.is_file() and result_path.stat().st_mtime >= started_at:
-            result = json.loads(result_path.read_text(encoding="utf-8-sig"))
-            if result.get("resume_runner_source_sha") == runner_source_sha:
-                retained = ROOT / ".context/evidence/network-smoke/current.json"
-                retained.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(result_path, retained)
     return completed.returncode
 
 
-def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab")) -> int:
+def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab"),
+                       shadow_root: Path | None = None) -> int:
     """Import a native-boot result after WSL is restored, without touching the VM."""
     import m25_runtime_evidence
     import rocky_box_catalog
@@ -9864,13 +9897,29 @@ def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("lab-network-import requires a clean exact-SHA worktree")
     head = git("rev-parse", "HEAD").strip()
-    stage = laboratory_root / "network-smoke" / campaign_id
-    result_path = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+    if shadow_root is None:
+        shadow_root = (NATIVE_SHADOW_BASE if laboratory_root == Path("/mnt/c/ecommerce-lab")
+                       else laboratory_root / "protected-shadow")
+    shadow = shadow_root / f"{campaign_id}-{head}"
+    any_shadow = shadow_root.is_symlink() or any(shadow_root.glob(f"{campaign_id}-*"))
+    if any_shadow and (shadow_root.is_symlink() or shadow.is_symlink() or not shadow.is_dir()):
+        return fail("native network-smoke shadow exists but the exact current SHA is absent or unsafe")
+    stage = (shadow / campaign_id if any_shadow
+             else laboratory_root / "network-smoke" / campaign_id)
+    result_path = (shadow / "evidence/network-smoke" / campaign_id / "result.json" if any_shadow
+                   else laboratory_root / "evidence/network-smoke" / campaign_id / "result.json")
     try:
-        if result_path.is_symlink() or not result_path.is_file():
+        if (any_shadow and (not _native_shadow_path_safe(shadow, stage)
+                            or not _native_shadow_path_safe(shadow, result_path))):
+            return fail("native network-smoke protected result traverses a symlink")
+        if stage.is_symlink() or result_path.is_symlink() or not result_path.is_file():
             return fail("native network-smoke result is absent or a symlink")
-        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
-        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        prepared_path = stage / "prepared.json"
+        if any_shadow and not _native_shadow_path_safe(shadow, prepared_path):
+            return fail("native network-smoke protected campaign traverses a symlink")
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8-sig"))
+        result_bytes = result_path.read_bytes()
+        result = json.loads(result_bytes.decode("utf-8-sig"))
         if not isinstance(prepared, dict) or not isinstance(result, dict):
             return fail("native network-smoke campaign or result is malformed")
         manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
@@ -9883,6 +9932,90 @@ def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c
         if original_vagrantfile != (ROOT / vagrant_relative).read_bytes():
             return fail("native network-smoke retained VM definition differs from current source")
         m25_runtime_evidence.validate_current_smoke(ROOT, result, head, manifest)
+        boot_path = (shadow / "native-boot.json" if any_shadow
+                     else laboratory_root / "network-smoke/native-boot.json")
+        if boot_path.is_symlink() or (any_shadow and not _native_shadow_path_safe(shadow, boot_path)):
+            return fail("native network-smoke boot state is a symlink")
+        if any_shadow and not boot_path.is_file():
+            return fail("native network-smoke protected boot state is absent")
+        if boot_path.is_file():
+            boot = json.loads(boot_path.read_text(encoding="utf-8-sig"))
+            if not isinstance(boot, dict):
+                return fail("native network-smoke boot state is malformed")
+            if any_shadow or boot.get("campaign_id") == campaign_id:
+                result_digest = hashlib.sha256(result_bytes).hexdigest()
+                if (boot.get("mode") != "NETWORK_SMOKE_NATIVE"
+                    or boot.get("campaign_id") != campaign_id
+                    or boot.get("phase") != "RECOVERED"
+                    or boot.get("run_status") != "PASS"
+                    or boot.get("source_sha") != head
+                    or boot.get("source_tree_sha") != git("rev-parse", "HEAD^{tree}").strip()
+                    or boot.get("vm_id") != result["cleanup"]["vm_id"]
+                    or (any_shadow and (
+                        not isinstance(boot.get("expected_vm_id"), str)
+                        or boot["expected_vm_id"].casefold() != str(boot.get("vm_id", "")).casefold()
+                    ))
+                    or boot.get("box_sha256") != manifest["box_sha256"]
+                    or boot.get("result_sha256") != result_digest
+                    or (any_shadow and (
+                        not isinstance(boot.get("shadow_root"), str)
+                        or boot["shadow_root"].rstrip("\\").casefold()
+                           != _native_shadow_windows_path(shadow).rstrip("\\").casefold()
+                    ))):
+                    return fail("native network-smoke result differs from the recovered boot run")
+                if any_shadow:
+                    runner_path = shadow / f"runner-{head}" / "runner.json"
+                    if not _native_shadow_path_safe(shadow, runner_path) or not runner_path.is_file():
+                        return fail("native network-smoke protected runner manifest is absent")
+                    runner_bytes = runner_path.read_bytes()
+                    if hashlib.sha256(runner_bytes).hexdigest() != boot.get("runner_manifest_sha256"):
+                        return fail("native network-smoke protected runner manifest differs")
+                    runner = json.loads(runner_bytes.decode("utf-8-sig"))
+                    if (not isinstance(runner, dict)
+                        or runner.get("campaign_id") != campaign_id
+                        or runner.get("source_sha") != head
+                        or runner.get("source_tree_sha") != boot.get("source_tree_sha")
+                        or runner.get("runner_files") != result.get("resume_runner_files")):
+                        return fail("native network-smoke protected runner binding differs")
+                    package_relative = "config/artifacts/rocky-10.2-base-packages.lock.json"
+                    package_path = stage / package_relative
+                    manifest_path = stage / "SHA256SUMS"
+                    if (not _native_shadow_path_safe(shadow, package_path)
+                        or not _native_shadow_path_safe(shadow, manifest_path)):
+                        return fail("native network-smoke package lock traverses a symlink")
+                    package_digest = m25_runtime_evidence._digest(ROOT / package_relative)
+                    if (runner.get("package_lock_sha256") != package_digest
+                        or m25_runtime_evidence._digest(package_path) != package_digest
+                        or f"{package_digest}  {package_relative}" not in
+                           manifest_path.read_text(encoding="utf-8-sig").splitlines()):
+                        return fail("native network-smoke package lock differs from current source")
+                    qualification = result.get("image_qualification")
+                    if (not isinstance(qualification, dict)
+                        or qualification.get("status") != "PASS"
+                        or qualification.get("source_sha") != head
+                        or qualification.get("source_tree_sha") != boot.get("source_tree_sha")
+                        or qualification.get("box_sha256") != manifest["box_sha256"]
+                        or qualification.get("vm_id") != boot.get("vm_id")
+                        or qualification.get("virtualbox_backend") != "NATIVE_VTX"):
+                        return fail("native network-smoke image qualification identity is invalid")
+                    log_relative = qualification.get("virtualbox_log_relative")
+                    if (not isinstance(log_relative, str)
+                        or re.fullmatch(r"logs/ssh-resume-[0-9]{8}T[0-9]{6}Z/VBox\.log",
+                                        log_relative) is None):
+                        return fail("native network-smoke VirtualBox log path is invalid")
+                    log_path = stage / log_relative
+                    if not _native_shadow_path_safe(shadow, log_path) or not log_path.is_file():
+                        return fail("native network-smoke VirtualBox log is absent or redirected")
+                    if log_path.stat().st_size > 16 * 1024 * 1024:
+                        return fail("native network-smoke VirtualBox log exceeds the bounded proof size")
+                    log_bytes = log_path.read_bytes()
+                    log_text = log_bytes.decode("utf-8", errors="replace")
+                    if (qualification.get("virtualbox_log_sha256")
+                            != hashlib.sha256(log_bytes).hexdigest()
+                        or re.search(r"(?im)\bHM:.*(?:VT-x|AMD-V)", log_text) is None
+                        or re.search(r"(?im)Attempting fall back to NEM|\bNEM:|WHvCapabilityCodeHypervisorPresent",
+                                     log_text) is not None):
+                        return fail("native network-smoke VirtualBox log does not prove native VT-x")
         completed_at = datetime.fromisoformat(str(result["completed_at"]).replace("Z", "+00:00"))
         if completed_at.tzinfo is None or not 0 <= time.time() - completed_at.timestamp() <= 86400:
             return fail("native network-smoke result is stale")
@@ -9892,7 +10025,7 @@ def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c
     destination = ROOT / ".context/evidence/network-smoke/current.json"
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".tmp")
-    shutil.copyfile(result_path, temporary)
+    temporary.write_bytes(result_bytes)
     os.replace(temporary, destination)
     print(f"PASS lab-network-import campaign={campaign_id} source_sha={head} evidence={destination}")
     return 0
@@ -9937,70 +10070,435 @@ def lab_network_native_prepare(campaign_id: str,
         if (m25_runtime_evidence._digest(staged_vagrantfile) != current_vagrant_digest
             or m25_runtime_evidence._digest(runtime_vagrantfile) != current_vagrant_digest):
             return fail("native runner preparation requires the current retained VM Vagrantfile")
+        package_relative = "config/artifacts/rocky-10.2-base-packages.lock.json"
+        package_source = ROOT / package_relative
+        package_digest = m25_runtime_evidence._digest(package_source)
         destination = laboratory_root / "network-smoke" / f"runner-{head}" / "scripts/windows"
+        if not _native_shadow_path_safe(laboratory_root, destination):
+            return fail("native runner preparation destination traverses a symlink")
         destination.mkdir(parents=True, exist_ok=True)
+        if not _native_shadow_path_safe(laboratory_root, destination):
+            return fail("native runner preparation destination changed into a symlink")
         digests = {}
         for name in m25_runtime_evidence.NETWORK_RUNNER_FILES:
             source = ROOT / "scripts/windows" / name
             target = destination / name
-            shutil.copyfile(source, target)
+            if not _native_shadow_path_safe(laboratory_root, target):
+                return fail(f"native runner staging traverses a symlink: {name}")
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{name}-", dir=destination)
+            os.close(descriptor)
+            try:
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
             digests[name] = m25_runtime_evidence._digest(target)
             if digests[name] != m25_runtime_evidence._digest(source):
                 return fail(f"native runner staging differs: {name}")
+        runner_package = destination.parent.parent / package_relative
+        if package_source.is_symlink() or not _native_shadow_path_safe(laboratory_root, runner_package):
+            return fail("native runner package lock traverses a symlink")
+        runner_package.parent.mkdir(parents=True, exist_ok=True)
+        if not _native_shadow_path_safe(laboratory_root, runner_package):
+            return fail("native runner package directory changed into a symlink")
+        descriptor, temporary = tempfile.mkstemp(prefix=".packages-", dir=runner_package.parent)
+        os.close(descriptor)
+        try:
+            shutil.copyfile(package_source, temporary)
+            os.replace(temporary, runner_package)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        if m25_runtime_evidence._digest(runner_package) != package_digest:
+            return fail("native runner package lock differs from the current source")
         binding = {"source_sha": head, "source_tree_sha": tree,
                    "campaign_id": campaign_id, "runner_files": digests,
-                   "vagrantfile_sha256": current_vagrant_digest}
-        (destination.parent.parent / "runner.json").write_text(
-            json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
+                   "vagrantfile_sha256": current_vagrant_digest,
+                   "package_lock_sha256": package_digest}
+        runner_manifest = destination.parent.parent / "runner.json"
+        if not _native_shadow_path_safe(laboratory_root, runner_manifest):
+            return fail("native runner manifest traverses a symlink")
+        descriptor, temporary = tempfile.mkstemp(prefix=".runner-", dir=runner_manifest.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output_file:
+                output_file.write(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            os.replace(temporary, runner_manifest)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
     except (OSError, KeyError, ValueError, json.JSONDecodeError,
             subprocess.CalledProcessError) as exc:
         return fail(f"native runner preparation failed: {exc}")
     runner_windows = output(["wslpath", "-w", str(destination / "LabNetworkSmoke.ps1")]).strip()
-    stage_windows = output(["wslpath", "-w", str(stage)]).strip()
+    shadow = NATIVE_SHADOW_BASE / f"{campaign_id}-{head}"
+    protected_runner = _native_shadow_windows_path(
+        shadow / f"runner-{head}" / "scripts/windows/LabNetworkSmoke.ps1"
+    )
+    protected_stage = _native_shadow_windows_path(shadow / campaign_id)
+    protected_root = _native_shadow_windows_path(shadow)
     print(f"PASS lab-network-native-prepare source_sha={head} runner={runner_windows}")
-    print(f"NATIVE_RESUME=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File {runner_windows} -Action Resume -StageRoot {stage_windows} -RunnerSourceSha {head}")
+    print(f"NATIVE_RESUME=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{protected_runner}\" -Action Resume -StageRoot \"{protected_stage}\" -RunnerSourceSha {head} -ShadowRoot \"{protected_root}\"")
     return 0
 
 
-def lab_network_native_boot(action: str, campaign_id: str) -> int:
+def _native_boot_powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _native_boot_encoded(source: str) -> str:
+    return base64.b64encode(source.encode("utf-16-le")).decode("ascii")
+
+
+def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
+                             distribution: str, repo_windows: str,
+                             expected_vm_id: str = "") -> str:
+    """Build the only code run elevated before the protected runner is verified."""
+    if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
+        raise ValueError("unsupported native bootstrap action")
+    if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        raise ValueError("native bootstrap requires an exact source SHA")
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        raise ValueError("native bootstrap requires a WSL distribution")
+    if (not repo_windows.startswith("\\\\wsl.localhost\\" + distribution + "\\")
+        or re.search(r"[\r\n]", repo_windows)):
+        raise ValueError("native bootstrap requires the exact WSL UNC repository")
+    if action == "Prepare" and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id
+    ) is None:
+        raise ValueError("native Prepare requires an explicit VM UUID")
+    token = uuid.uuid4().hex
+    values = {
+        "@@ACTION@@": action,
+        "@@CAMPAIGN@@": campaign_id,
+        "@@SHA@@": source_sha,
+        "@@DISTRO@@": distribution,
+        "@@REPO_WIN@@": repo_windows,
+        "@@REPO_WSL@@": str(ROOT),
+        "@@VM_ID@@": expected_vm_id,
+        "@@TOKEN@@": token,
+    }
+    script = r"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$action = @@ACTION@@
+$campaign = @@CAMPAIGN@@
+$sha = @@SHA@@
+$distro = @@DISTRO@@
+$repoWindows = @@REPO_WIN@@
+$repoWsl = @@REPO_WSL@@
+$expectedVmId = @@VM_ID@@
+$token = @@TOKEN@@
+$system = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+$wsl = Join-Path $system 'System32\wsl.exe'
+$adminSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+$systemSid = [Security.Principal.SecurityIdentifier]'S-1-5-18'
+$usersSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-545'
+$ownerRightsSid = [Security.Principal.SecurityIdentifier]'S-1-3-4'
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $selfEncoded = [Environment]::GetCommandLineArgs()[-1]
+    if ($selfEncoded -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
+        throw 'Native bootstrap cannot recover its encoded command for UAC'
+    }
+    $powershell = Join-Path $system 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $child = Start-Process -FilePath $powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop -ArgumentList (
+        '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $selfEncoded)
+    exit $child.ExitCode
+}
+if ($system -ine 'C:\Windows' -or -not [IO.File]::Exists($wsl)) {
+    throw 'Native bootstrap trusted Windows system tools are unavailable'
+}
+$env:SystemRoot = $system
+$env:PATH = (Join-Path $system 'System32') + ';' + $system
+$env:PSModulePath = Join-Path $system 'System32\WindowsPowerShell\v1.0\Modules'
+
+function Assert-Regular {
+    param([string]$Path, [bool]$Directory)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -ne $Directory -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Native bootstrap path is absent, redirected or has the wrong type: $Path"
+    }
+}
+function New-ProtectedAcl {
+    param([bool]$Directory)
+    $acl = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity }
+           else { New-Object Security.AccessControl.FileSecurity }
+    $acl.SetAccessRuleProtection($true,$false)
+    $acl.SetOwner($adminSid)
+    $inherit = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
+               else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($entry in @(
+        @($adminSid,[Security.AccessControl.FileSystemRights]::FullControl),
+        @($systemSid,[Security.AccessControl.FileSystemRights]::FullControl),
+        @($usersSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute),
+        @($ownerRightsSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    )) {
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $entry[0],$entry[1],$inherit,[Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+    }
+    return $acl
+}
+function Assert-Protected {
+    param([string]$Path, [bool]$Directory)
+    Assert-Regular -Path $Path -Directory $Directory
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $adminSid.Value -or
+        -not $acl.AreAccessRulesProtected) {
+        throw "Native bootstrap protected ACL owner or inheritance differs: $Path"
+    }
+    $expected = @{
+        $adminSid.Value=[Security.AccessControl.FileSystemRights]::FullControl
+        $systemSid.Value=[Security.AccessControl.FileSystemRights]::FullControl
+        $usersSid.Value=([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+        $ownerRightsSid.Value=([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+    }
+    $inherit = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
+               else { [Security.AccessControl.InheritanceFlags]::None }
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne $expected.Count) { throw "Native bootstrap ACL rule set differs: $Path" }
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Value
+        if (-not $expected.ContainsKey($sid) -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne $expected[$sid] -or
+            $rule.InheritanceFlags -ne $inherit -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw "Native bootstrap ACL grants unexpected rights: $Path"
+        }
+    }
+}
+function Assert-ProgramFiles {
+    foreach ($path in @('C:\','C:\Program Files')) {
+        Assert-Regular -Path $path -Directory $true
+        $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin @($adminSid.Value,$systemSid.Value) -and $owner -notmatch '^S-1-5-80-') {
+            throw "Native bootstrap parent has an unprivileged owner: $path"
+        }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -or
+                $rule.IdentityReference.Value -in @($adminSid.Value,$systemSid.Value) -or
+                $rule.IdentityReference.Value -match '^S-1-5-80-') { continue }
+            $mutate = [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
+            if ($path -eq 'C:\Program Files') {
+                $mutate = $mutate -bor [Security.AccessControl.FileSystemRights]::Write -bor
+                    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+            }
+            if (($rule.FileSystemRights -band $mutate) -ne 0) {
+                throw "Native bootstrap parent grants unprivileged mutation rights: $path"
+            }
+        }
+    }
+}
+function Invoke-WslBounded {
+    param([string[]]$Arguments, [int]$TimeoutSeconds)
+    foreach ($argument in $Arguments) {
+        if ($argument -match '[\s"]') { throw 'Native bootstrap WSL argument is unsafe' }
+    }
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $wsl
+    $start.Arguments = ('-d ' + $distro + ' --cd ' + $repoWsl + ' --exec ' + ($Arguments -join ' '))
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill()
+            throw 'Native bootstrap WSL verification timed out'
+        }
+        $out = $stdout.GetAwaiter().GetResult()
+        $err = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $out.Length -gt 65536 -or $err.Length -gt 65536) {
+            throw "Native bootstrap WSL verification failed: $err"
+        }
+        return $out.Trim()
+    }
+    finally { $process.Dispose() }
+}
+function Get-GitBlobSha1 {
+    param([byte[]]$Bytes)
+    $utf8 = [Text.UTF8Encoding]::new($false,$true)
+    $text = $utf8.GetString($Bytes).Replace(([string][char]13 + [char]10),[string][char]10)
+    if ($text.Contains([string][char]13)) { throw 'Native bootstrap script has unsupported newlines' }
+    $content = $utf8.GetBytes($text)
+    $prefix = [Text.Encoding]::ASCII.GetBytes('blob ' + $content.Length + [char]0)
+    $blob = New-Object byte[] ($prefix.Length + $content.Length)
+    [Buffer]::BlockCopy($prefix,0,$blob,0,$prefix.Length)
+    [Buffer]::BlockCopy($content,0,$blob,$prefix.Length,$content.Length)
+    $digest = [Security.Cryptography.SHA1]::Create()
+    try { return -join ($digest.ComputeHash($blob) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $digest.Dispose() }
+}
+function Assert-PublishedHead {
+    foreach ($tool in @('/usr/bin/git','/usr/bin/gh')) {
+        [void](Invoke-WslBounded -Arguments @('/usr/bin/test','-x',$tool) -TimeoutSeconds 20)
+    }
+    $head = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse','HEAD') -TimeoutSeconds 45
+    if ($head -ne $sha) { throw 'Native bootstrap local Git HEAD differs' }
+    $dirty = Invoke-WslBounded -Arguments @('/usr/bin/git','status','--porcelain=v1','--untracked-files=all') -TimeoutSeconds 45
+    if ($dirty) { throw 'Native bootstrap exact-SHA worktree is dirty' }
+    $branch = Invoke-WslBounded -Arguments @('/usr/bin/git','branch','--show-current') -TimeoutSeconds 45
+    if ($branch -notmatch '^[A-Za-z0-9][A-Za-z0-9/_-]*$') { throw 'Native bootstrap branch is invalid' }
+    $published = Invoke-WslBounded -Arguments @('/usr/bin/gh','pr','view',$branch,'--repo','dst-red-Wire/ecommerce-1','--json','headRefOid','-q','.headRefOid') -TimeoutSeconds 60
+    if ($published -ne $sha) { throw 'Native bootstrap PR HEAD differs from exact source SHA' }
+}
+
+Assert-ProgramFiles
+$base = 'C:\Program Files\EcommerceNativeSmoke'
+if (-not [IO.Directory]::Exists($base)) {
+    [void][IO.Directory]::CreateDirectory($base,(New-ProtectedAcl -Directory $true))
+}
+Assert-Protected -Path $base -Directory $true
+$shadow = Join-Path $base ($campaign + '-' + $sha)
+if ($action -in @('Prepare','SelfTest')) {
+    $bootstrap = Join-Path $base ('bootstrap-' + $sha + '-' + $token)
+    [void][IO.Directory]::CreateDirectory($bootstrap,(New-ProtectedAcl -Directory $true))
+    Assert-Protected -Path $bootstrap -Directory $true
+    foreach ($name in @('LabNativeBoot.ps1','RockyImagePipeline.psm1')) {
+        $source = Join-Path (Join-Path $repoWindows 'scripts\windows') $name
+        $target = Join-Path $bootstrap $name
+        $bytes = [IO.File]::ReadAllBytes($source)
+        $stream = [IO.File]::Create($target,4096,[IO.FileOptions]::None,(New-ProtectedAcl -Directory $false))
+        try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        Assert-Protected -Path $target -Directory $false
+        $relative = 'scripts/windows/' + $name
+        $object = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse',($sha + ':' + $relative)) -TimeoutSeconds 45
+        if ($object -notmatch '^[0-9a-f]{40}$' -or
+            (Get-GitBlobSha1 -Bytes ([IO.File]::ReadAllBytes($target))) -ne $object) {
+            throw "Native bootstrap copied script differs from Git object: $name"
+        }
+    }
+    Assert-PublishedHead
+    $runner = Join-Path $bootstrap 'LabNativeBoot.ps1'
+    & $runner -Action SelfTest
+    if (-not $?) { throw 'Protected elevated native boot SelfTest failed' }
+    if ($action -eq 'Prepare') {
+        & $runner -Action Prepare -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl -ExpectedVmId $expectedVmId
+    }
+}
+else {
+    Assert-Protected -Path $shadow -Directory $true
+    $runnerRoot = Join-Path $shadow ('runner-' + $sha)
+    Assert-Protected -Path $runnerRoot -Directory $true
+    $runnerScripts = Join-Path $runnerRoot 'scripts'
+    Assert-Protected -Path $runnerScripts -Directory $true
+    $runnerScripts = Join-Path $runnerScripts 'windows'
+    Assert-Protected -Path $runnerScripts -Directory $true
+    $runner = Join-Path $runnerScripts 'LabNativeBoot.ps1'
+    $module = Join-Path $runnerScripts 'RockyImagePipeline.psm1'
+    Assert-Protected -Path $runner -Directory $false
+    Assert-Protected -Path $module -Directory $false
+    & $runner -Action $action -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl
+}
+"""
+    for marker, value in values.items():
+        script = script.replace(marker, _native_boot_powershell_literal(value))
+    return "\n".join(line.strip() for line in script.splitlines() if line.strip()) + "\n"
+
+
+def _native_boot_elevation_command(powershell: Path, bootstrap: str) -> list[str]:
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+               "Bypass", "-EncodedCommand", _native_boot_encoded(bootstrap)]
+    if len(subprocess.list2cmdline(command)) >= 32767:
+        raise ValueError("native bootstrap exceeds the Windows command-line limit")
+    return command
+
+
+def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
+    """Locate the one protected prepared state without consulting a later Git HEAD."""
+    matches = list(NATIVE_SHADOW_BASE.glob(f"{campaign_id}-" + "[0-9a-f]" * 40))
+    if len(matches) != 1:
+        raise ValueError("native boot requires one protected state for the campaign")
+    shadow = matches[0]
+    state_path = shadow / "native-boot.json"
+    if (not _native_shadow_path_safe(NATIVE_SHADOW_BASE, state_path)
+        or not state_path.is_file() or state_path.stat().st_size > 1024 * 1024):
+        raise ValueError("native boot protected state is absent or redirected")
+    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(state, dict):
+        raise ValueError("native boot protected state is malformed")
+    source_sha = state.get("source_sha")
+    if (not isinstance(source_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or state.get("campaign_id") != campaign_id
+        or not isinstance(state.get("shadow_root"), str)
+        or state["shadow_root"].casefold() != _native_shadow_windows_path(shadow).casefold()
+        or not isinstance(state.get("vm_id"), str)
+        or re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", state["vm_id"]
+        ) is None
+        or not isinstance(state.get("expected_vm_id"), str)
+        or state["vm_id"].casefold() != state["expected_vm_id"].casefold()
+        or (action == "Reboot" and state.get("phase") != "PREPARED")):
+        raise ValueError("native boot protected state identity or phase differs")
+    return source_sha
+
+
+def lab_network_native_boot(action: str, campaign_id: str,
+                            expected_vm_id: str = "") -> int:
     """Manage the retained campaign's one-shot native Windows boot."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         return fail("unsupported native network-smoke boot action")
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
         return fail("native network-smoke boot requires an exact CAMPAIGN_ID")
-    if action in {"Prepare", "Reboot"}:
+    if action == "Prepare" and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id or ""
+    ) is None:
+        return fail("native network-smoke Prepare requires --expected-vm-id UUID")
+    if action == "Prepare":
         if git("status", "--porcelain", "--untracked-files=all").strip():
             return fail("native network-smoke boot requires a clean exact-SHA worktree")
-        if action == "Prepare" and lab_network_native_prepare(campaign_id):
+        if lab_network_native_prepare(campaign_id):
             return 2
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     script = ROOT / "scripts/windows/LabNativeBoot.ps1"
-    if not powershell.is_file() or not script.is_file():
+    if not powershell.is_file() or (action in {"Prepare", "SelfTest"} and not script.is_file()):
         return fail("native network-smoke boot PowerShell entrypoint is unavailable")
     distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
     if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
         return fail("native network-smoke boot requires a WSL distribution")
     try:
-        script_windows = output(["wslpath", "-w", str(script)]).strip()
+        repo_windows = output(["wslpath", "-w", str(ROOT)]).strip()
     except RuntimeError as exc:
-        return fail(f"native network-smoke boot script path is unavailable: {exc}")
-    if not script_windows.startswith("\\\\"):
-        return fail("native network-smoke boot script must resolve through the WSL UNC bridge")
-    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-               "-File", script_windows, "-Action", action, "-CampaignId", campaign_id,
-               "-SourceSha", git("rev-parse", "HEAD").strip(), "-LabRoot", r"C:\ecommerce-lab",
-               "-WslDistribution", distribution, "-WslRepoRoot", str(ROOT)]
+        return fail(f"native network-smoke boot repository path is unavailable: {exc}")
+    try:
+        source_sha = (git("rev-parse", "HEAD").strip()
+                      if action in {"Prepare", "SelfTest"}
+                      else _native_boot_shadow_source_sha(campaign_id, action))
+        bootstrap = _native_bootstrap_script(
+            action, campaign_id, source_sha,
+            distribution, repo_windows, expected_vm_id)
+        command = _native_boot_elevation_command(powershell, bootstrap)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail(str(exc))
     return run(command, cwd=Path("/mnt/c/Windows"),
                env=_windows_powershell_environment(), check=False).returncode
 
 
-def lab_network_native_boot_with_runtime(command: str, campaign_id: str) -> int:
+def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
+                                         expected_vm_id: str = "") -> int:
     """Serialize BCD and retained VirtualBox state checks with the runtime lock."""
     records: list[dict] = []
 
     def execute(runtime_env: dict[str, str]) -> int:
-        result = run(_controller_command(command, "--campaign-id", campaign_id),
+        child = [command, "--campaign-id", campaign_id]
+        if command == "lab-network-native-boot-prepare":
+            child.extend(["--expected-vm-id", expected_vm_id])
+        result = run(_controller_command(*child),
                      check=False, env=runtime_env)
         records.append({"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL",
                         "exit_code": result.returncode})
@@ -10757,6 +11255,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                         (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
                     )["versions"]["VIRTUALBOX_VERSION"],
                     minimum_log_mtime=started_at.timestamp(),
+                    snapshot_path=vm_state / "backend-VBox.log",
                 )
                 backend_probe["head_sha"] = head_sha
                 backend_probe["head_tree_sha"] = git("rev-parse", "HEAD^{tree}").strip()
@@ -10777,6 +11276,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                 if cold_path.stat().st_mtime < started_at.timestamp() - 1:
                     return fail("RKE2 cold role result predates the current test action")
                 cold_result = json.loads(cold_path.read_text(encoding="utf-8"))
+                if not isinstance(cold_result, dict):
+                    return fail("RKE2 cold role result must be a JSON object")
                 trial = cold_result.get("trial")
                 if (cold_result.get("exit_code") != 0 or not isinstance(trial, dict)
                     or trial.get("cold_trial") is not True
@@ -10805,6 +11306,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                 invocation = json.loads((vm_state / "server-invocation.json").read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
                 return fail(f"RKE2 server replay decision is missing: {exc}")
+            if not isinstance(invocation, dict):
+                return fail("RKE2 server replay decision must be a JSON object")
             expected_install = (True, False, True)[server_count]
             uuid = invocation.get("vm_uuid")
             if (invocation.get("install_required") is not expected_install
@@ -10870,6 +11373,8 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         tamper = json.loads((vm_state / "tamper-result.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         return fail(f"RKE2 campaign source result is missing: {exc}")
+    if not all(isinstance(value, dict) for value in (role, rke2, tamper)):
+        return fail("RKE2 role, server, and tamper results must be JSON objects")
     if (role.get("exit_code") != 0 or role.get("vm_uuid") != observed_vm_uuid
         or rke2.get("node_ready") is not True or rke2.get("cilium_ready") != 1
         or tamper.get("blocked_task") != "Revalidate every staged byte immediately before privileged installation"):
@@ -12990,6 +13495,8 @@ def main() -> int:
                  "lab-network-native-boot-recover", "lab-network-native-boot-self-test"):
         native_boot = sub.add_parser(name)
         native_boot.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+        if name == "lab-network-native-boot-prepare":
+            native_boot.add_argument("--expected-vm-id", required=True)
     lab_status = sub.add_parser("lab-network-status")
     lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
@@ -13248,7 +13755,8 @@ def main() -> int:
             "lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
             "lab-network-native-boot-recover",
         } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
-            return lab_network_native_boot_with_runtime(args.cmd, args.campaign_id)
+            return lab_network_native_boot_with_runtime(
+                args.cmd, args.campaign_id, getattr(args, "expected_vm_id", ""))
         if args.cmd == "image-rocky-preflight":
             return windows_image_pipeline("preflight")
         if args.cmd == "image-rocky-build":
@@ -13300,7 +13808,8 @@ def main() -> int:
                 "lab-network-native-boot-recover": "Recover",
                 "lab-network-native-boot-self-test": "SelfTest",
             }[args.cmd]
-            return lab_network_native_boot(action, args.campaign_id)
+            return lab_network_native_boot(
+                action, args.campaign_id, getattr(args, "expected_vm_id", ""))
         if args.cmd == "lab-network-status":
             return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":
@@ -13332,8 +13841,10 @@ def main() -> int:
                     input_path = ROOT / input_path
                 try:
                     input_values = json.loads(input_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    input_values = {}
+                except (OSError, json.JSONDecodeError) as exc:
+                    return fail(f"RKE2 local qualification inputs are invalid JSON: {exc}")
+                if not isinstance(input_values, dict):
+                    return fail("RKE2 local qualification inputs must be a JSON object")
                 contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
                 resources = contract["mgmt_local_vm_contract"]["resources"]
                 defaults = resources["artifact_default"]

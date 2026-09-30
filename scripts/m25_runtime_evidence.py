@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
-import subprocess
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import yaml
@@ -15,8 +15,9 @@ import yaml
 try:
     import rocky_box_catalog
     import qualification_steps
+    import rke2_virtualbox_backend
 except ModuleNotFoundError:
-    from scripts import rocky_box_catalog, qualification_steps
+    from scripts import rocky_box_catalog, qualification_steps, rke2_virtualbox_backend
 
 
 VM_NAME = re.compile(r"^ecommerce-mgmt-test-[a-z0-9-]+$")
@@ -24,22 +25,26 @@ UUID = re.compile(r"^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$")
 OUTPUT = Path(".context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json")
 IMAGE = Path(".context/evidence/rocky-image/rocky-10.2/windows")
 NETWORK_SMOKE = Path(".context/evidence/network-smoke/current.json")
+SHADOW_ROOT = Path("/mnt/c/Program Files/EcommerceNativeSmoke")
+SHADOW_WINDOWS_ROOT = PureWindowsPath(r"C:\Program Files\EcommerceNativeSmoke")
 NETWORK_RUNNER_FILES = (
-    "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1", "NativeVagrantSshSmoke.ps1",
+    "LabNativeBoot.ps1", "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1", "NativeVagrantSshSmoke.ps1",
     "LabNetworkSeed.ps1", "LabSshIdentity.ps1", "local-services-seed-server.ps1",
 )
-IMAGE_QUALIFICATION_FILES = (
-    "scripts/windows/native-vtx-cycle.ps1",
-    "scripts/windows/native-cycle-launch.ps1",
-    "scripts/windows/qualify-rocky-image.ps1",
-    "scripts/windows/RockyImagePipeline.psm1",
-    "scripts/windows/NativeVagrantSshSmoke.ps1",
-    "scripts/windows/LabNetworkSeed.ps1",
-    "scripts/windows/LabSshIdentity.ps1",
-    "scripts/windows/local-services-seed-server.ps1",
-    "platform/vagrant/rocky-image-smoke/Vagrantfile",
-    "scripts/validate_guest_smoke_commands.py",
-    "config/contracts/machine-image-lock.yaml",
+RKE2_SERVER_SOURCE_FILES = (
+    "platform/ansible/tests/mgmt_offline_vm/server.yml",
+    "platform/ansible/tests/mgmt_offline_vm/rke2_probe.py",
+    "platform/ansible/tests/mgmt_offline_vm/private_interface.py",
+    "platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py",
+    "platform/ansible/roles/rke2_server/tasks/main.yml",
+    "platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2",
+    "scripts/mgmt_airgap.py",
+)
+IMAGE_CHECKS = (
+    "rocky_release", "kernel", "architecture_cpu", "memory", "disk", "xfs",
+    "lvm_absent", "swap_absent", "rpm_profile", "systemd", "network",
+    "fundamental_tools", "rke2_prerequisites", "security", "package_inventory",
+    "supply_chain",
 )
 
 
@@ -48,11 +53,6 @@ def _paths(vm_name: str) -> dict[str, Path]:
         raise ValueError("invalid M2.5 fixture name")
     state = Path(".context/mgmt-offline-vm") / vm_name
     return {
-        "image_build": IMAGE / "build.json",
-        "image_qualification": IMAGE / "qualification.json",
-        "image_release": IMAGE / "release.json",
-        "native_import": IMAGE / "native-import.json",
-        "native_result": IMAGE / "native-result.json",
         "image_reuse": IMAGE / "reuse.json",
         "current_network_smoke": NETWORK_SMOKE,
         "backend_probe": state / "backend-probe.json",
@@ -79,16 +79,6 @@ def _require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
-def _qualification_sources_match(root: Path, qualified_sha: str, head: str) -> bool:
-    result = subprocess.run(
-        ["git", "diff", "--quiet", qualified_sha, head, "--", *IMAGE_QUALIFICATION_FILES],
-        cwd=root, capture_output=True, check=False,
-    )
-    if result.returncode not in {0, 1}:
-        raise ValueError("M2.5 native qualification source comparison failed")
-    return result.returncode == 0
-
-
 def _sources(root: Path, evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
     vm_name = evidence.get("vm_name")
     _require(isinstance(vm_name, str), "M2.5 VM name missing")
@@ -105,14 +95,155 @@ def _sources(root: Path, evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
         _require(path.resolve().is_relative_to(root.resolve())
                  and path.is_file() and not path.is_symlink(),
                  f"M2.5 {name} is missing or escapes the repository")
-        _require(ref.get("sha256") == _digest(path), f"M2.5 {name} digest differs")
         try:
-            payload = json.loads(path.read_text(encoding="utf-8-sig"))
-        except (OSError, json.JSONDecodeError) as exc:
+            data = path.read_bytes()
+            _require(ref.get("sha256") == hashlib.sha256(data).hexdigest(),
+                     f"M2.5 {name} digest differs")
+            payload = json.loads(data.decode("utf-8-sig"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"M2.5 {name} is not JSON") from exc
         _require(isinstance(payload, dict), f"M2.5 {name} is not an object")
         values[name] = payload
     return values
+
+
+def validate_protected_smoke(
+    root: Path, smoke: dict[str, Any], smoke_digest: str, head: str, tree: str,
+    manifest: dict[str, Any],
+) -> None:
+    """Bind the imported result to the recovered, protected native boot run."""
+    campaign = smoke["campaign_id"]
+    shadow = SHADOW_ROOT / f"{campaign}-{head}"
+    boot_path = shadow / "native-boot.json"
+    result_path = shadow / "evidence/network-smoke" / campaign / "result.json"
+    runner_path = shadow / f"runner-{head}" / "runner.json"
+    _require(SHADOW_ROOT.is_dir() and not SHADOW_ROOT.is_symlink(),
+             "M2.5 protected native smoke root is absent")
+    resolved_root = SHADOW_ROOT.resolve(strict=True)
+    for path in (shadow, boot_path, result_path, runner_path):
+        _require(not path.is_symlink() and path.resolve().is_relative_to(resolved_root),
+                 "M2.5 protected native smoke path is redirected")
+    _require(shadow.is_dir() and all(path.is_file() for path in (boot_path, result_path, runner_path)),
+             "M2.5 protected native smoke proof is missing")
+    try:
+        boot = json.loads(boot_path.read_text(encoding="utf-8-sig"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("M2.5 protected native boot state is malformed") from exc
+    _require(isinstance(boot, dict), "M2.5 protected native boot state is not an object")
+    expected_shadow = SHADOW_WINDOWS_ROOT / f"{campaign}-{head}"
+    _require(boot.get("mode") == "NETWORK_SMOKE_NATIVE"
+             and boot.get("phase") == "RECOVERED" and boot.get("run_status") == "PASS"
+             and boot.get("campaign_id") == campaign
+             and boot.get("source_sha") == head and boot.get("source_tree_sha") == tree
+             and boot.get("vm_name") == smoke["vm_name"]
+             and boot.get("vm_id") == smoke["cleanup"]["vm_id"]
+             and boot.get("box_sha256") == manifest["box_sha256"]
+             and PureWindowsPath(str(boot.get("shadow_root", ""))) == expected_shadow
+             and boot.get("result_sha256") == smoke_digest == _digest(result_path)
+             and boot.get("runner_manifest_sha256") == _digest(runner_path),
+             "M2.5 current smoke differs from its protected recovered native run")
+    qualification = smoke.get("image_qualification")
+    _require(isinstance(qualification, dict)
+             and qualification.get("status") == "PASS"
+             and qualification.get("source_sha") == head
+             and qualification.get("source_tree_sha") == tree
+             and qualification.get("box_sha256") == manifest["box_sha256"]
+             and qualification.get("vm_id") == smoke["cleanup"]["vm_id"]
+             and qualification.get("virtualbox_backend") == "NATIVE_VTX",
+             "M2.5 current-head native image qualification identity is invalid")
+    checks = qualification.get("checks")
+    observations = qualification.get("observations")
+    _require(isinstance(checks, dict) and set(checks) == set(IMAGE_CHECKS)
+             and all(checks[name] == "PASS" for name in IMAGE_CHECKS)
+             and isinstance(observations, dict) and set(observations) == set(IMAGE_CHECKS),
+             "M2.5 native image qualification checks are incomplete")
+    for name in IMAGE_CHECKS:
+        observation = observations[name]
+        _require(isinstance(observation, dict)
+                 and observation.get("status") == "PASS"
+                 and type(observation.get("exit_code")) is int
+                 and observation["exit_code"] == 0
+                 and isinstance(observation.get("stdout"), str)
+                 and bool(observation["stdout"])
+                 and isinstance(observation.get("stderr"), str)
+                 and type(observation.get("stdout_truncated")) is bool,
+                 f"M2.5 native image qualification observation is invalid: {name}")
+    package_lock = root / "config/artifacts/rocky-10.2-base-packages.lock.json"
+    _require(qualification.get("package_lock_sha256") == _digest(package_lock),
+             "M2.5 native image package lock differs from current source")
+    lock = json.loads(package_lock.read_text(encoding="utf-8"))
+    profiles = lock.get("profiles") if isinstance(lock, dict) else None
+    base = profiles.get("base") if isinstance(profiles, dict) else None
+    rke2_profile = profiles.get("rke2") if isinstance(profiles, dict) else None
+    base_roots = base.get("roots") if isinstance(base, dict) else None
+    rke2_roots = rke2_profile.get("roots") if isinstance(rke2_profile, dict) else None
+    _require(isinstance(base_roots, list) and isinstance(rke2_roots, list),
+             "M2.5 current image package roots are malformed")
+    roots = base_roots + rke2_roots
+    _require(isinstance(roots, list) and len(roots) >= 10
+             and all(isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9+_.-]+", name)
+                     for name in roots)
+             and len(set(roots)) == len(roots),
+             "M2.5 current image package roots are invalid")
+    supply = qualification.get("supply_chain")
+    _require(isinstance(supply, dict) and supply.get("artifact_sha256") == manifest["box_sha256"],
+             "M2.5 native image supply-chain artifact is invalid")
+    package_manifest = supply.get("package_manifest")
+    profile = supply.get("profile_inventory")
+    sbom = supply.get("sbom")
+    _require(isinstance(package_manifest, dict)
+             and package_manifest.get("format") == "rpm-nevra-v1"
+             and isinstance(profile, dict) and profile.get("profile") == "rke2"
+             and isinstance(sbom, dict) and sbom.get("bomFormat") == "CycloneDX"
+             and sbom.get("specVersion") == "1.5"
+             and type(sbom.get("version")) is int and sbom["version"] == 1,
+             "M2.5 native image supply-chain format is invalid")
+    required = profile.get("required_packages")
+    packages = package_manifest.get("packages")
+    components = sbom.get("components")
+    _require(isinstance(required, list) and len(required) == len(roots)
+             and all(isinstance(name, str) for name in required)
+             and set(required) == set(roots)
+             and isinstance(packages, list) and len(packages) >= 50
+             and all(isinstance(line, str) for line in packages)
+             and len(set(packages)) == len(packages)
+             and isinstance(components, list) and len(components) == len(packages),
+             "M2.5 native image RPM inventory is invalid")
+    installed: set[str] = set()
+    for line, component in zip(packages, components, strict=True):
+        _require(isinstance(line, str), "M2.5 native image RPM entry is malformed")
+        entry = re.fullmatch(r"([A-Za-z0-9+_.-]+)\|([^\s|]+)", line)
+        _require(entry is not None and isinstance(component, dict)
+                 and component.get("type") == "library"
+                 and component.get("name") == entry.group(1)
+                 and component.get("version") == entry.group(2),
+                 "M2.5 native image SBOM differs from its RPM inventory")
+        installed.add(entry.group(1))
+    _require(set(roots) <= installed, "M2.5 native image required RPMs are absent")
+    metadata = sbom.get("metadata")
+    component = metadata.get("component") if isinstance(metadata, dict) else None
+    hashes = component.get("hashes") if isinstance(component, dict) else None
+    _require(isinstance(component, dict) and component.get("type") == "file"
+             and component.get("name") == "rocky-10.2-rke2-virtualbox.box"
+             and isinstance(hashes, list) and len(hashes) == 1
+             and isinstance(hashes[0], dict) and hashes[0] == {
+                 "alg": "SHA-256", "content": manifest["box_sha256"]},
+             "M2.5 native image SBOM artifact binding is invalid")
+    relative_log = qualification.get("virtualbox_log_relative")
+    _require(isinstance(relative_log, str)
+             and re.fullmatch(r"logs/ssh-resume-[0-9]{8}T[0-9]{6}Z/VBox\.log", relative_log),
+             "M2.5 native VirtualBox log path is invalid")
+    log_path = shadow / campaign / relative_log
+    _require(not log_path.is_symlink() and log_path.resolve().is_relative_to(shadow.resolve())
+             and log_path.is_file() and log_path.stat().st_size <= 16 * 1024 * 1024
+             and qualification.get("virtualbox_log_sha256") == _digest(log_path),
+             "M2.5 native VirtualBox log digest is invalid")
+    log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    _require(re.search(r"Attempting fall back to NEM|\bNEM:|WHvCapabilityCodeHypervisorPresent",
+                       log_text, re.IGNORECASE | re.MULTILINE) is None
+             and re.search(r"\bHM:.*(?:VT-x|AMD-V)", log_text,
+                           re.IGNORECASE | re.MULTILINE) is not None,
+             "M2.5 native VirtualBox log does not prove VT-x")
 
 
 def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifest: dict[str, Any]) -> None:
@@ -144,17 +275,28 @@ def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifes
              and smoke.get("box_digest_verified") == "PASS"
              and smoke.get("box_digest") == manifest["box_sha256"]
              and isinstance(smoke_packer, dict)
+             and smoke_packer.get("status") == "REUSED"
+             and smoke_packer.get("build") == "NOT_EXECUTED"
              and smoke_packer.get("inputs_digest") == manifest["inputs_digest"]
              and smoke.get("guest_security") == "PASS"
              and smoke.get("vm_recreate") == "NOT_REQUIRED"
+             and smoke.get("vm_restart") in {"NOT_REQUIRED", "EXECUTED_EXISTING_VM"}
+             and smoke.get("resume_seed_server") in {"PASS", "NOT_REQUIRED"}
+             and (smoke.get("vm_restart") != "EXECUTED_EXISTING_VM"
+                  or smoke.get("resume_seed_server") == "PASS")
              and isinstance(smoke_cleanup, dict)
+             and smoke_cleanup.get("status") == "PASS"
+             and smoke_cleanup.get("seed_server") == "PASS"
+             and smoke_cleanup.get("lock") == "PASS"
              and smoke_cleanup.get("vm_preserved") is True
              and smoke_cleanup.get("vm_name") == smoke_vm
              and isinstance(smoke_cleanup.get("vm_id"), str)
              and UUID.fullmatch(smoke_cleanup["vm_id"]) is not None
              and isinstance(smoke_checkpoints, dict)
              and all(smoke_checkpoints.get(name) == "PASS" for name in (
-                 "03-vm-smoke", "04-network-ssh", "05-rocky-runtime"))
+                 "03-vm-smoke", "04-network-ssh", "05-rocky-runtime",
+                 "06-image-qualification"))
+             and smoke.get("resume_from") == "downstream-qualification"
              and isinstance(smoke_checks, dict)
              and smoke_checks.get("vm_name") == smoke_vm
              and smoke_checks.get("tcp_22_ready") == "PASS"
@@ -167,7 +309,8 @@ def validate_current_smoke(root: Path, smoke: dict[str, Any], head: str, manifes
 
 def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None:
     """Raise on any missing, stale-by-identity, or contradictory runtime source."""
-    _require(evidence.get("schema_version") == 1 and evidence.get("status") == "PASS"
+    _require(type(evidence.get("schema_version")) is int and evidence["schema_version"] == 1
+             and evidence.get("status") == "PASS"
              and evidence.get("milestone") == "M2.5" and evidence.get("environment") == "lab"
              and evidence.get("outcome") == "PASS"
              and evidence.get("exact_commit_evidence") is True
@@ -181,7 +324,8 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              "M2.5 VM runtime identity is invalid")
     _require(evidence.get("ready_for_real_provisioning") is True
              and evidence.get("deployment_state") == "NOT_DEPLOYED"
-             and evidence.get("paid_resources_created") == 0
+             and type(evidence.get("paid_resources_created")) is int
+             and evidence["paid_resources_created"] == 0
              and evidence.get("six_node_rocky_rke2") == "pending-real-target-and-service-inputs",
              "M2.5 deployment boundary is invalid")
     image = yaml.safe_load((root / "config/contracts/machine-image-lock.yaml").read_text(encoding="utf-8"))["packer_image"]
@@ -223,86 +367,19 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              }, "M2.5 current image reuse has invalid execution provenance")
     smoke = sources["current_network_smoke"]
     validate_current_smoke(root, smoke, head, manifest)
-    build = sources["image_build"]
-    qualified = sources["image_qualification"]
-    release = sources["image_release"]
-    native_import = sources["native_import"]
-    native_result = sources["native_result"]
-    native_smoke = native_result.get("vagrant_smoke")
-    native_observations = native_result.get("observations")
-    _require(isinstance(native_smoke, dict) and isinstance(native_observations, dict),
-             "M2.5 native qualification observations are malformed")
-    qualification_sha = build.get("source_sha")
-    _require(isinstance(qualification_sha, str)
-             and rocky_box_catalog.GIT_SHA.fullmatch(qualification_sha) is not None,
-             "M2.5 native image qualification source SHA is invalid")
-    qualification_tree = rocky_box_catalog.source_tree(qualification_sha)
-    _require(_qualification_sources_match(root, qualification_sha, head),
-             "M2.5 native image qualification logic changed since its execution")
-    for name, payload in (("image build", build), ("image qualification", qualified),
-                          ("image release", release)):
-        _require(payload.get("status") == "PASS" and payload.get("source_sha") == qualification_sha,
-                 f"M2.5 {name} does not belong to the native image qualification")
-    packer_mode = build.get("packer_build")
-    native_packer = native_result.get("packer")
-    _require(isinstance(native_packer, dict), "M2.5 native Packer result is absent")
-    if packer_mode == "PASS":
-        _require(qualification_sha == original_sha and native_packer.get("build") == "PASS"
-                 and native_result.get("staging_manifest_sha256") == manifest["staging_manifest_sha256"],
-                 "M2.5 original Packer execution differs from its immutable manifest")
-    elif packer_mode == "REUSED":
-        _require(qualification_sha != original_sha
-                 and build.get("reuse_source_sha") == original_sha
-                 and build.get("packer_inputs_digest") == manifest["inputs_digest"]
-                 and native_packer.get("build") == "REUSED"
-                 and native_packer.get("reuse_source_sha") == original_sha
-                 and native_packer.get("inputs_digest") == manifest["inputs_digest"],
-                 "M2.5 native image reuse has invalid original execution provenance")
-    else:
-        raise ValueError("M2.5 Packer mode is neither an original execution nor verified reuse")
-    _require(build.get("source_tree") == qualification_tree and build.get("sha256") == manifest["box_sha256"]
-             and build.get("artifact") == filename and build.get("virtualbox_backend") == "NATIVE_VTX"
-             and build.get("virtualbox_version") == vbox_version
-             and build.get("packer_build") == native_packer.get("build"),
-             "M2.5 native image qualification differs from its build result")
-    required_image_checks = {"boot", "ssh", "rocky_release", "kernel", "systemd",
-                             "rke2_prerequisites", "security", "cleanup", "key_cleanup",
-                             "swap_absent", "rpm_profile"}
-    image_checks = qualified.get("qualification")
-    _require(qualified.get("artifact_sha256") == manifest["box_sha256"]
-             and qualified.get("artifact") == filename
-             and isinstance(image_checks, dict)
-             and all(image_checks.get(key) == "PASS" for key in required_image_checks),
-             "M2.5 image qualification is incomplete")
-    release_checks = release.get("checks")
-    _require(release.get("artifact_sha256") == manifest["box_sha256"]
-             and release.get("artifact") == filename
-             and isinstance(release_checks, dict)
-             and all(release_checks.get(key) == "PASS" for key in (
-                 "exact_source_sha", "build_evidence", "checksum", "qualification_evidence",
-                 "cleanup", "ephemeral_key_absent", "sbom", "package_manifest", "profile_inventory")),
-             "M2.5 image release is incomplete")
-    _require(native_import.get("status") == "PASS"
-             and native_import.get("source_git_sha") == qualification_sha
-             and native_import.get("source_tree_sha") == qualification_tree
-             and native_import.get("artifact_sha256") == manifest["box_sha256"]
-             and native_import.get("staging_manifest_sha256") == native_result.get("staging_manifest_sha256")
-             and native_import.get("virtualbox_backend") == "NATIVE_VTX"
-             and native_import.get("wsl2_restored") == "PASS"
-             and native_import.get("bcd_restored") == "PASS",
-             "M2.5 native import is incomplete")
-    _require(native_result.get("status") == "PASS"
-             and native_result.get("source_git_sha") == qualification_sha
-             and native_result.get("source_tree_sha") == qualification_tree
-             and native_result.get("artifact_sha256") == manifest["box_sha256"]
-             and re.fullmatch(r"[0-9a-f]{64}", str(native_result.get("staging_manifest_sha256", "")))
-             and native_result.get("native_vtx") == "PASS"
-             and native_result.get("nem_detected") is False
-             and native_result.get("virtualbox_backend") == "NATIVE_VTX"
-             and native_packer.get("build") == packer_mode
-             and native_smoke.get("rocky_version") == "PASS"
-             and "Rocky Linux release 10.2" in str(native_observations.get("rocky_version", "")),
-             "M2.5 original native Rocky 10.2 execution proof is invalid")
+    validate_protected_smoke(
+        root, smoke, evidence["source_evidence"]["current_network_smoke"]["sha256"],
+        head, tree, manifest,
+    )
+    execution = evidence.get("original_image_execution")
+    _require(isinstance(execution, dict) and execution == {
+        "source_sha": original_sha,
+        "source_tree_sha": original_tree,
+        "packer_build": "PASS",
+        "packer_log_sha256": manifest["packer_log_sha256"],
+    } and manifest["packer_build"] == "PASS"
+             and manifest["native_vtx"] == "PASS" and manifest["nem_detected"] is False,
+             "M2.5 original Packer/native execution provenance is invalid")
     source = sources["server_source"]
     preflight = sources["vm_preflight"]
     rke2 = sources["rke2_result"]
@@ -320,7 +397,9 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
         "rke2_functional_allowed": ["NATIVE_VTX", "NEM"],
         "observed_backend_evidence": ".context/mgmt-offline-vm/<name>/backend-probe.json",
     }, "M2.5 VirtualBox backend policy is invalid")
-    _require(backend_probe.get("schema_version") == 1 and backend_probe.get("status") == "PASS"
+    _require(type(backend_probe.get("schema_version")) is int
+             and backend_probe["schema_version"] == 1
+             and backend_probe.get("status") == "PASS"
              and backend_probe.get("head_sha") == head
              and backend_probe.get("head_tree_sha") == tree
              and backend_probe.get("box_sha256") == manifest["box_sha256"]
@@ -340,7 +419,24 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and backend_probe.get("vm_memory_mib") == campaign["vm_memory_mib"]
              and re.fullmatch(r"[0-9a-f]{64}", str(backend_probe.get("virtualbox_log_sha256", ""))),
              "M2.5 observed RKE2 VirtualBox backend or host capacity is invalid")
+    backend_log = root / ".context/mgmt-offline-vm" / evidence["vm_name"] / "backend-VBox.log"
+    _require(backend_log.is_file() and not backend_log.is_symlink()
+             and backend_log.resolve().is_relative_to(root.resolve())
+             and 0 < backend_log.stat().st_size <= 16 * 1024 * 1024,
+             "M2.5 RKE2 VirtualBox backend log snapshot is missing or redirected")
+    backend_log_bytes = backend_log.read_bytes()
+    _require(hashlib.sha256(backend_log_bytes).hexdigest() == backend_probe["virtualbox_log_sha256"],
+             "M2.5 RKE2 VirtualBox backend log digest differs")
+    _require(rke2_virtualbox_backend.classify_log(
+        backend_log_bytes.decode("utf-8", errors="replace")) == backend_probe["virtualbox_backend"],
+        "M2.5 RKE2 VirtualBox backend log classification differs")
     _require(source.get("git_sha") == head, "M2.5 RKE2 source SHA differs")
+    expected_server_hashes = [
+        f"{_digest(root / relative)}  {(root / relative).resolve()}"
+        for relative in RKE2_SERVER_SOURCE_FILES
+    ]
+    _require(source.get("source_sha256") == expected_server_hashes,
+             "M2.5 RKE2 server source bytes differ from their recorded execution")
     _require(preflight.get("rocky_release") == "Rocky Linux release 10.2 (Red Quartz)"
              and isinstance(preflight.get("kernel"), str) and bool(preflight["kernel"])
              and preflight.get("systemd") == "running"
@@ -352,12 +448,12 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and preflight.get("public_connect_errno") == 101
              and preflight.get("cold_artifact_target") is True,
              "M2.5 cold Rocky VM preflight is incomplete")
-    _require(role.get("exit_code") == 0
+    _require(type(role.get("exit_code")) is int and role["exit_code"] == 0
              and role.get("vm_uuid") == identity["id"]
              and role.get("bundle_manifest_sha256") == lock["approved_manifest_sha256"],
              "M2.5 offline role or VM identity differs")
     cold_trial = cold_role.get("trial")
-    _require(cold_role.get("exit_code") == 0
+    _require(type(cold_role.get("exit_code")) is int and cold_role["exit_code"] == 0
              and cold_role.get("vm_uuid") == identity["id"]
              and cold_role.get("bundle_manifest_sha256") == lock["approved_manifest_sha256"]
              and isinstance(cold_trial, dict)
@@ -370,11 +466,15 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
         qualification_steps.validate_transfer_record(
             result.get("transfer"), approved_manifest=lock["approved_manifest_sha256"]
         )
-    _require(rke2.get("node_ready") is True and rke2.get("cilium_ready") == 1
+    public_error = rke2.get("public_connect_error")
+    _require(rke2.get("node_ready") is True
+             and type(rke2.get("cilium_ready")) is int and rke2["cilium_ready"] == 1
+             and rke2.get("pending_pods") == []
              and rke2.get("rke2_service") == "active"
              and rke2.get("selinux") == "Enforcing"
              and rke2.get("nft_policies") == {"output": "drop", "forward": "drop"}
-             and rke2.get("public_connect_error") is not None
+             and ((type(public_error) is int and public_error in {1, 101, 110, 113})
+                  or public_error == "TimeoutError")
              and lock["rke2_version"] in str(rke2.get("rke2_version", "")),
              "M2.5 RKE2/Cilium runtime proof is incomplete")
     mutation = tamper.get("mutation")
@@ -383,10 +483,13 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              and isinstance(mutation, dict)
              and all(isinstance(mutation.get(key), str)
                      and re.fullmatch(r"[0-9a-f]{64}", mutation[key]) for key in ("before_sha256", "after_sha256"))
+             and mutation["before_sha256"] == lock["release_artifacts"]["binary"]["sha256"]
              and mutation["before_sha256"] != mutation["after_sha256"],
              "M2.5 tampered artifact was not rejected")
     actions = campaign.get("actions")
-    _require(campaign.get("schema_version") == 1 and campaign.get("status") == "PASS"
+    _require(type(campaign.get("schema_version")) is int
+             and campaign["schema_version"] == 1
+             and campaign.get("status") == "PASS"
              and campaign.get("head_sha") == head and campaign.get("head_tree_sha") == tree
              and campaign.get("vm_uuid") == identity["id"]
              and campaign.get("box_sha256") == manifest["box_sha256"]
@@ -399,7 +502,8 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              ]
              and len(actions) == 11
              and all(item.get("status") == "PASS"
-                     and isinstance(item.get("duration_seconds"), (int, float))
+                     and type(item.get("duration_seconds")) in (int, float)
+                     and math.isfinite(item["duration_seconds"])
                      and item["duration_seconds"] >= 0 for item in actions),
              "M2.5 RKE2 campaign sequence is incomplete")
     transfers = [item for item in actions if item["action"] in {"test", "restage"}]
@@ -430,8 +534,8 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
         smoke_epoch = int(smoke_time.timestamp())
     except (TypeError, ValueError) as exc:
         raise ValueError("M2.5 current smoke completion time is invalid") from exc
-    _require(campaign_epoch - max_age <= smoke_epoch <= campaign_epoch,
-             "M2.5 current smoke is stale or later than the RKE2 campaign")
+    _require(0 <= current_epoch - smoke_epoch <= max_age,
+             "M2.5 current smoke is stale or future-dated")
 
 
 def create(root: Path, head: str, tree: str, vm_name: str) -> Path:
@@ -452,6 +556,12 @@ def create(root: Path, head: str, tree: str, vm_name: str) -> Path:
         "virtualbox_version": manifest["virtualbox_version"],
         "box_sha256": manifest["box_sha256"], "inputs_digest": manifest["inputs_digest"],
         "native_vtx": manifest["native_vtx"], "nem_detected": manifest["nem_detected"],
+        "original_image_execution": {
+            "source_sha": manifest["source_sha"],
+            "source_tree_sha": manifest["source_tree_sha"],
+            "packer_build": manifest["packer_build"],
+            "packer_log_sha256": manifest["packer_log_sha256"],
+        },
         "ready_for_real_provisioning": True, "deployment_state": "NOT_DEPLOYED",
         "paid_resources_created": 0,
         "six_node_rocky_rke2": "pending-real-target-and-service-inputs",

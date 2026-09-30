@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import time
@@ -45,13 +46,22 @@ class Rke2VirtualBoxBackendTests(unittest.TestCase):
                 raise AssertionError(argv)
 
             with mock.patch.object(backend, "_run", side_effect=fake_run):
+                snapshot = Path(temporary) / "evidence" / "backend-VBox.log"
                 result = backend.probe(
                     "ecommerce-mgmt-test-proof", expected_cpus=4,
                     expected_memory=4096, expected_version="7.2.18",
                     minimum_log_mtime=time.time() - 1,
+                    snapshot_path=snapshot,
                 )
                 self.assertEqual("NEM", result["virtualbox_backend"])
                 self.assertEqual(8, result["host_logical_processors"])
+                frozen = snapshot.read_bytes()
+                self.assertEqual(hashlib.sha256(frozen).hexdigest(),
+                                 result["virtualbox_log_sha256"])
+                self.assertEqual(backend.classify_log(frozen.decode("utf-8")),
+                                 result["virtualbox_backend"])
+                log.write_text("HM: HMR3Init: VT-x w/ nested paging\n")
+                self.assertEqual(frozen, snapshot.read_bytes())
                 with self.assertRaisesRegex(ValueError, "stale"):
                     backend.probe("ecommerce-mgmt-test-proof", expected_cpus=4,
                                   expected_memory=4096, expected_version="7.2.18",

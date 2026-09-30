@@ -2,7 +2,7 @@
 - name: Define pinned Rocky 10.2 diagnostics RPMs
   ansible.builtin.set_fact:
     vm_diagnostic_rpm_dir: "{{ vm_repo }}/.context/m2.5/diagnostics/rpms"
-    vm_diagnostic_remote_dir: /home/vagrant/.cache/ecommerce-m25-diagnostics
+    vm_diagnostic_remote_dir: /home/packer/.cache/ecommerce-m25-diagnostics
     vm_diagnostic_rpms:
       - file: fio-3.36-5.el10.x86_64.rpm
         sha256: 90b06626609f4205413b7bbe35e0cf1bd372a6461cc91a207021d35a3f08c6de
@@ -10,8 +10,6 @@
         sha256: f4af4f5f519f5464afb6c936df3c1c487648c2142c081dee1e1c35648187661c
       - file: lksctp-tools-1.0.21-1.el10.x86_64.rpm
         sha256: 053e496dd47cd6450ebc9795b393e8e042895f9a1a00a1dee7c7c735d107696b
-      - file: numactl-libs-2.0.19-3.el10.x86_64.rpm
-        sha256: 98426966b99a7d4221ddabe74607b34ea16c3c010c91beca2082106e8f2bb522
 
 - name: Check every locally cached diagnostic RPM before guest access
   ansible.builtin.stat:
@@ -28,6 +26,26 @@
       - item.stat.isreg
       - item.stat.checksum == item.item.sha256
   loop: "{{ vm_diagnostic_source.results }}"
+
+- name: Require the exact bundle-owned fio dependency before diagnostic package changes
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - sudo
+      - -n
+      - rpm
+      - -q
+      - --queryformat
+      - '%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}'
+      - numactl-libs
+  register: vm_diagnostic_numactl
+  changed_when: false
+  failed_when: >-
+    vm_diagnostic_numactl.rc != 0
+    or vm_diagnostic_numactl.stdout | trim != 'numactl-libs-0:2.0.19-3.el10.x86_64'
 
 - name: Create a private diagnostic package directory on the guest
   ansible.builtin.command:

@@ -23,6 +23,10 @@
       - "{{ vm_hostonly_adapter }}"
       - --mac
       - "{{ vm_mac }}"
+      - --uuid
+      - "{{ vm_server_id.content | b64decode | trim }}"
+      - --cable
+      - 'on'
       - --cpus
       - "{{ vm_cpus }}"
       - --memory
@@ -97,6 +101,7 @@
       - sha256sum
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/server.yml"
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/rke2_probe.py"
+      - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/private_interface.py"
       - "{{ vm_repo }}/platform/ansible/tests/mgmt_offline_vm/virtualbox_probe.py"
       - "{{ vm_repo }}/platform/ansible/roles/rke2_server/tasks/main.yml"
       - "{{ vm_repo }}/platform/ansible/roles/mgmt_private_network/templates/mgmt-egress.nft.j2"
@@ -117,6 +122,26 @@
     content: >-
       {{ {'git_sha': vm_server_git_sha.stdout | trim,
           'source_sha256': vm_server_source_hashes.stdout_lines} | to_nice_json }}
+
+- name: Preserve exact server source checksums for post-role verification
+  ansible.builtin.copy:
+    dest: "{{ vm_state }}/server-source.sha256"
+    mode: '0600'
+    content: "{{ vm_server_source_hashes.stdout }}\n"
+
+- name: Derive the actual private interface from the owned VM MAC
+  ansible.builtin.command:
+    argv:
+      - ssh
+      - -F
+      - "{{ vm_state }}/ssh_config"
+      - "{{ vm_name }}"
+      - python3
+      - '-'
+      - "{{ vm_mac }}"
+    stdin: "{{ lookup('file', playbook_dir ~ '/private_interface.py') }}"
+  register: vm_server_interface
+  changed_when: false
 
 - name: Generate an invocation-local RKE2 token when absent
   ansible.builtin.command:
@@ -139,7 +164,7 @@
     content: >-
       {{ {
           'all': {'hosts': {vm_name: {
-            'ansible_user': 'vagrant',
+            'ansible_user': 'packer',
             'ansible_become': true,
             'ansible_python_interpreter': '/usr/bin/python3',
             'ansible_ssh_common_args': '-F ' ~ (vm_state ~ '/ssh_config') | quote}}},
@@ -175,7 +200,7 @@
           rke2_server_url: ''
           rke2_cluster_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.pod_cidr | to_json }}
           rke2_service_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.service_cidr | to_json }}
-          mgmt_private_interface: eth0
+          mgmt_private_interface: {{ vm_server_interface.stdout | trim | to_json }}
           mgmt_private_dhcp_server: {{ vm_host_address | to_json }}
           mgmt_private_block: {{ (vm_host_address | regex_replace('\.[0-9]+$', '.0/24')) | to_json }}
           mgmt_pod_cidr: {{ (lookup('file', vm_repo ~ '/config/infrastructure/network-plan.yaml') | from_yaml).kubernetes.mgmt.pod_cidr | to_json }}
@@ -201,6 +226,11 @@
               owner: root
               group: root
               mode: '0600'
+          - name: Start the installed local firewalld before loading its private zone
+            ansible.builtin.systemd_service:
+              name: firewalld.service
+              enabled: true
+              state: started
           - name: Activate canonical private firewall zone
             ansible.builtin.command:
               argv: [firewall-cmd, --reload]
@@ -275,6 +305,29 @@
             ansible.builtin.command:
               argv: [nmcli, connection, up, ecommerce-offline-default]
             changed_when: true
+          - name: Create RKE2 manifest directory for this single-node fixture
+            ansible.builtin.file:
+              path: /var/lib/rancher/rke2/server/manifests
+              state: directory
+              owner: root
+              group: root
+              mode: '0755'
+          - name: Keep the Cilium operator schedulable on the single fixture node
+            ansible.builtin.copy:
+              dest: /var/lib/rancher/rke2/server/manifests/rke2-cilium-config.yaml
+              owner: root
+              group: root
+              mode: '0644'
+              content: |
+                apiVersion: helm.cattle.io/v1
+                kind: HelmChartConfig
+                metadata:
+                  name: rke2-cilium
+                  namespace: kube-system
+                spec:
+                  valuesContent: |-
+                    operator:
+                      replicas: 1
           - name: Invoke the actual RKE2 server role
             ansible.builtin.include_role:
               name: {{ (vm_repo ~ '/platform/ansible/roles/rke2_server') | to_json }}
@@ -362,3 +415,8 @@
   ansible.builtin.assert:
     that: [vm_server_role.rc == 0]
     fail_msg: Inspect the ignored rke2-server.log; no network or SELinux gate was bypassed.
+
+- name: Require server sources unchanged through the nested role invocation
+  ansible.builtin.command:
+    argv: [sha256sum, --check, "{{ vm_state }}/server-source.sha256"]
+  changed_when: false

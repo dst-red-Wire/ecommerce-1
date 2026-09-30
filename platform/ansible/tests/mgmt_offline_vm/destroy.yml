@@ -62,6 +62,40 @@
             path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
             state: absent
           when: (vm_id_file.content | b64decode | trim) not in vm_registered.stdout
+    - name: Recheck registrations before releasing the boot seed
+      ansible.builtin.command:
+        argv: ["{{ vm_vbox }}", list, vms]
+      register: vm_after_destroy
+      changed_when: false
+    - name: Refuse seed cleanup while the owned VM remains registered
+      ansible.builtin.assert:
+        that:
+          - ('"' ~ vm_name ~ '"') not in vm_after_destroy.stdout
+          - >-
+            not vm_owned_id.stat.exists
+            or ('{' ~ (vm_id_file.content | b64decode | trim) ~ '}') not in vm_after_destroy.stdout
+    - name: Inspect remaining local Vagrant identity
+      ansible.builtin.stat:
+        path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+      register: vm_final_identity
+    - name: Refuse a redirected Vagrant identity
+      ansible.builtin.assert:
+        that:
+          - not vm_final_identity.stat.islnk | default(false)
+    - name: Remove only stale local Vagrant identity after VM absence is proven
+      ansible.builtin.file:
+        path: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+        state: absent
+      when: vm_final_identity.stat.exists
+    - name: Archive bounded bootstrap diagnostics and remove only owned seed files
+      ansible.builtin.command:
+        argv: >-
+          {{ [vm_python, playbook_dir ~ '/cleanup_seed.py', '--state', vm_windows_state,
+              '--vm-name', vm_name]
+             + (['--vm-uuid', vm_id_file.content | b64decode | trim]
+                if vm_owned_id.stat.exists else []) }}
+      register: vm_seed_cleanup
+      changed_when: (vm_seed_cleanup.stdout | from_json).archived
   always:
     - name: Remove generated local credentials and rendered token-bearing inputs
       ansible.builtin.file:
@@ -69,6 +103,7 @@
         state: absent
       loop:
         - "{{ vm_state }}/identity"
+        - "{{ vm_state }}/identity.pub"
         - "{{ vm_state }}/rke2-token"
         - "{{ vm_state }}/server.yml"
         - "{{ vm_state }}/server-inventory.json"

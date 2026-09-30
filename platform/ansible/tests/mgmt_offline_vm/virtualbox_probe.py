@@ -14,6 +14,7 @@ def machine_values(document: str) -> dict[str, str]:
         if "=" not in line:
             continue
         key, raw = line.split("=", 1)
+        key = key.strip('"')
         try:
             value = json.loads(raw)
         except json.JSONDecodeError:
@@ -25,13 +26,23 @@ def machine_values(document: str) -> dict[str, str]:
 def require_isolated(values: dict[str, str], *, name: str, nic1: str,
                      adapter: str | None = None, mac: str | None = None,
                      cpus: int | None = None, memory: int | None = None,
-                     running: bool = False) -> None:
+                     running: bool = False, cable: str | None = None,
+                     uuid: str | None = None, seed_iso: str | None = None) -> None:
     if values.get("name") != name:
         raise ValueError("VirtualBox machine name differs from the owned fixture")
     if values.get("ioapic") != "on":
         raise ValueError("fixture IO-APIC must remain enabled")
     if values.get("nic1") != nic1:
         raise ValueError("fixture primary adapter differs from the requested isolation mode")
+    if cable is not None and values.get("cableconnected1") != cable:
+        raise ValueError("fixture primary cable differs from the requested isolation mode")
+    if uuid is not None and values.get("UUID", "").lower() != uuid.lower():
+        raise ValueError("fixture UUID differs from the owned Vagrant identity")
+    if seed_iso is not None:
+        mounted = values.get("IDE-1-0", "").replace("/", "\\").casefold()
+        expected = seed_iso.replace("/", "\\").casefold()
+        if mounted != expected:
+            raise ValueError("fixture NoCloud ISO differs from the verified seed")
     for index in range(2, 9):
         if values.get(f"nic{index}") != "none":
             raise ValueError(f"fixture adapter {index} must be disconnected")
@@ -57,12 +68,16 @@ def main() -> int:
     parser.add_argument("--cpus", type=int)
     parser.add_argument("--memory", type=int)
     parser.add_argument("--running", action="store_true")
+    parser.add_argument("--cable", choices=("on", "off"))
+    parser.add_argument("--uuid")
+    parser.add_argument("--seed-iso")
     args = parser.parse_args()
     try:
         require_isolated(
             machine_values(sys.stdin.read()), name=args.name, nic1=args.nic1,
             adapter=args.adapter, mac=args.mac, cpus=args.cpus,
-            memory=args.memory, running=args.running,
+            memory=args.memory, running=args.running, cable=args.cable,
+            uuid=args.uuid, seed_iso=args.seed_iso,
         )
     except ValueError as error:
         parser.exit(1, f"FAIL: {error}\n")

@@ -29,6 +29,7 @@ BUILD_FILES = (
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 NETWORK_RUNNER_FILES = (
+    "scripts/windows/LabNativeBoot.ps1",
     "scripts/windows/LabNetworkSmoke.ps1",
     "scripts/windows/LabSshIdentity.ps1",
     "scripts/windows/LabNetworkSeed.ps1",
@@ -36,6 +37,7 @@ NETWORK_RUNNER_FILES = (
     "scripts/windows/RockyImagePipeline.psm1",
     "scripts/windows/local-services-seed-server.ps1",
     "platform/vagrant/rocky-image-smoke/Vagrantfile",
+    "config/artifacts/rocky-10.2-base-packages.lock.json",
 )
 
 

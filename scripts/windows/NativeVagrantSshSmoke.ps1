@@ -53,6 +53,94 @@ function Test-LabVirtualizationReady {
     return @($FirmwareEnabled | Where-Object { -not $_ }).Count -eq 0
 }
 
+function New-NativeSmokeProcessEnvironment {
+    param([Parameter(Mandatory = $true)][string]$VagrantHome)
+
+    $labRoot = [IO.Path]::GetFullPath('C:\ecommerce-lab\network-smoke').TrimEnd('\')
+    $protectedRoot = [IO.Path]::GetFullPath((Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'EcommerceNativeSmoke')).TrimEnd('\')
+    $vagrantRoot = [IO.Path]::GetFullPath($VagrantHome)
+    $matchedRoot = @($labRoot, $protectedRoot) | Where-Object {
+        $vagrantRoot.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase)
+    } | Select-Object -First 1
+    if (-not $matchedRoot) {
+        throw 'Vagrant home is outside the governed network-smoke roots'
+    }
+    $ancestor = $vagrantRoot
+    while ($ancestor.StartsWith($matchedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-Path -LiteralPath $ancestor) {
+            $item = Get-Item -LiteralPath $ancestor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Vagrant home traverses a Windows reparse point'
+            }
+        }
+        if ($ancestor -ieq $matchedRoot) { break }
+        $ancestor = Split-Path -Parent $ancestor
+    }
+    $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows).TrimEnd('\')
+    $profile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile).TrimEnd('\')
+    $roaming = [Environment]::GetFolderPath([Environment+SpecialFolder]::ApplicationData).TrimEnd('\')
+    $local = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData).TrimEnd('\')
+    $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData).TrimEnd('\')
+    $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles).TrimEnd('\')
+    $programFilesX86 = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFilesX86).TrimEnd('\')
+    foreach ($path in @($windows,$profile,$roaming,$local,$programData,$programFiles,$programFilesX86)) {
+        if (-not $path -or $path.StartsWith('\\') -or -not [IO.Path]::IsPathRooted($path)) {
+            throw 'A required Windows special folder is absent or not local'
+        }
+    }
+    $temp = Join-Path $local 'Temp'
+    if (-not (Test-Path -LiteralPath $temp -PathType Container)) {
+        throw 'The current Windows profile has no local temporary directory'
+    }
+    $system32 = Join-Path $windows 'System32'
+    $modulePath = Join-Path $system32 'WindowsPowerShell\v1.0\Modules'
+    if (-not (Test-Path -LiteralPath $modulePath -PathType Container)) {
+        throw 'The built-in Windows PowerShell module path is absent'
+    }
+    $toolPaths = @(
+        $system32, $windows, (Join-Path $system32 'Wbem'),
+        (Join-Path $system32 'WindowsPowerShell\v1.0'),
+        (Join-Path $system32 'OpenSSH'),
+        (Join-Path $programFiles 'Vagrant\bin'),
+        (Join-Path $programFiles 'Oracle\VirtualBox')
+    )
+    $trustedPath = (@($toolPaths | Where-Object { Test-Path -LiteralPath $_ -PathType Container } | Select-Object -Unique) -join ';')
+    $profileDrive = [IO.Path]::GetPathRoot($profile).TrimEnd('\')
+    if ($profileDrive -notmatch '^[A-Za-z]:$') { throw 'The Windows profile must be on a local drive' }
+    $principal = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $separator = $principal.LastIndexOf('\')
+    if ($separator -lt 1 -or $separator -eq $principal.Length - 1) {
+        throw 'The current Windows account name is invalid'
+    }
+    return [ordered]@{
+        SystemRoot = $windows; windir = $windows; SystemDrive = [IO.Path]::GetPathRoot($windows).TrimEnd('\')
+        ComSpec = (Join-Path $system32 'cmd.exe'); OS = 'Windows_NT'
+        USERPROFILE = $profile; HOMEDRIVE = $profileDrive; HOMEPATH = $profile.Substring($profileDrive.Length)
+        USERDOMAIN = $principal.Substring(0, $separator); USERNAME = $principal.Substring($separator + 1)
+        APPDATA = $roaming; LOCALAPPDATA = $local; TEMP = $temp; TMP = $temp
+        ProgramData = $programData; ALLUSERSPROFILE = $programData
+        ProgramFiles = $programFiles; 'ProgramFiles(x86)' = $programFilesX86; ProgramW6432 = $programFiles
+        PATH = $trustedPath; PATHEXT = '.COM;.EXE;.BAT;.CMD'; PSModulePath = $modulePath
+        PROCESSOR_ARCHITECTURE = if ([Environment]::Is64BitProcess) { 'AMD64' } else { 'x86' }
+        NUMBER_OF_PROCESSORS = [string][Environment]::ProcessorCount
+        VAGRANT_HOME = $vagrantRoot; VAGRANT_DEFAULT_PROVIDER = 'virtualbox'
+        VAGRANT_CHECKPOINT_DISABLE = '1'; VAGRANT_NO_PLUGINS = '1'
+    }
+}
+
+function Set-NativeSmokeProcessEnvironment {
+    param([Parameter(Mandatory = $true)][string]$VagrantHome)
+    $trusted = New-NativeSmokeProcessEnvironment -VagrantHome $VagrantHome
+    foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if (-not $trusted.Contains([string]$key)) {
+            [Environment]::SetEnvironmentVariable([string]$key, $null, 'Process')
+        }
+    }
+    foreach ($key in $trusted.Keys) {
+        [Environment]::SetEnvironmentVariable([string]$key, [string]$trusted[$key], 'Process')
+    }
+}
+
 function Get-NativeLastErrorLine {
     param([string]$StdErr, [string]$StdOut)
     $source = if ($StdErr.Trim()) { $StdErr } else { $StdOut }
@@ -125,6 +213,7 @@ function Invoke-NativeDirectSshProbe {
     $knownHosts = Join-Path $WorkingDirectory 'ssh_known_hosts'
     if (-not (Test-Path -LiteralPath $knownHosts -PathType Leaf)) { throw 'Pinned SSH known_hosts is absent' }
     return Invoke-BoundedProcess -FilePath $SshExecutable -Arguments @(
+        '-F', 'none',
         '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
         '-o', 'StrictHostKeyChecking=yes', '-o', "UserKnownHostsFile=$knownHosts",
         '-o', 'ConnectTimeout=5', '-o', 'ConnectionAttempts=1',
@@ -197,6 +286,7 @@ function Update-NativeSshSmokeEvidence {
     $Evidence.ssh_probe_count = [int]$Evidence.ssh_probe_count + 1
     $knownHosts = Join-Path $WorkingDirectory 'ssh_known_hosts'
     $ssh = Invoke-BoundedProcess -FilePath $SshExecutable -Arguments @(
+        '-F', 'none',
         '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
         '-o', 'StrictHostKeyChecking=accept-new', '-o', "UserKnownHostsFile=$knownHosts",
         '-o', 'ConnectTimeout=5', '-o', 'NumberOfPasswordPrompts=0',
@@ -229,10 +319,23 @@ function Complete-NativeSshSmokeEvidence {
         [System.Collections.IDictionary]$Evidence, [string]$VBoxManage,
         [string]$Vagrant, [string]$VmName, [string]$WorkingDirectory,
         [hashtable]$Environment, [string]$PrivateKey, [string]$SshExecutable,
-        $VagrantUpResult
+        $VagrantUpResult, [string]$ProtectedRoot = ''
     )
     $diagnostics = [string]$Evidence.diagnostics_directory
-    [void](New-Item -ItemType Directory -Path $diagnostics -Force)
+    if ($ProtectedRoot) {
+        $base = [IO.Path]::GetFullPath($ProtectedRoot).TrimEnd('\')
+        $path = [IO.Path]::GetFullPath($diagnostics)
+        if (-not $path.StartsWith($base + '\', [StringComparison]::OrdinalIgnoreCase) -or
+            (Test-Path -LiteralPath $path)) {
+            throw 'Native SSH protected diagnostics path is outside the shadow or already exists'
+        }
+        $parent = Split-Path -Parent $path
+        Assert-NativeShadowInput -Root $base -Path $parent
+        Assert-NativeProtectedEvidenceAcl -Path $parent -Directory $true
+        [void][IO.Directory]::CreateDirectory($path,(New-NativeProtectedEvidenceAcl -Directory $true))
+        Assert-NativeProtectedEvidenceAcl -Path $path -Directory $true
+    }
+    else { [void](New-Item -ItemType Directory -Path $diagnostics -Force) }
     try {
         $acl = Get-Acl -LiteralPath $PrivateKey -ErrorAction Stop
         [IO.File]::WriteAllText((Join-Path $diagnostics 'private-key-acl.txt'), ($acl | Format-List Owner,AccessToString | Out-String))
@@ -242,6 +345,7 @@ function Complete-NativeSshSmokeEvidence {
         $Evidence.vagrant_ready = 'PASS'
         $Evidence.vagrant_ready_at = [DateTime]::UtcNow.ToString('o')
     }
+    $machineInfoText = ''
     foreach ($entry in @(
         @{ Name = 'showvminfo.txt'; Args = @('showvminfo', $VmName, '--machinereadable') },
         @{ Name = 'guestproperty.txt'; Args = @('guestproperty', 'enumerate', $VmName) },
@@ -251,15 +355,39 @@ function Complete-NativeSshSmokeEvidence {
     )) {
         try {
             $capture = Invoke-BoundedProcess -FilePath $VBoxManage -Arguments $entry.Args -TimeoutSeconds 15 -WorkingDirectory $WorkingDirectory
+            if ($entry.Name -eq 'showvminfo.txt' -and $capture.ExitCode -eq 0) {
+                $machineInfoText = [string]$capture.StdOut
+            }
             [IO.File]::WriteAllText((Join-Path $diagnostics $entry.Name), "exit=$($capture.ExitCode)`n$($capture.StdOut)`n$($capture.StdErr)")
         }
         catch { [IO.File]::WriteAllText((Join-Path $diagnostics $entry.Name), $_.Exception.Message) }
     }
-    $machineInfoPath = Join-Path $diagnostics 'showvminfo.txt'
-    if ((Test-Path -LiteralPath $machineInfoPath) -and [IO.File]::ReadAllText($machineInfoPath) -match '(?m)^LogFldr="([^"]+)"') {
+    if ($machineInfoText -match '(?m)^LogFldr="([^"]+)"') {
         $vboxLogPath = Join-Path $Matches[1] 'VBox.log'
         if (Test-Path -LiteralPath $vboxLogPath -PathType Leaf) {
-            try { Copy-Item -LiteralPath $vboxLogPath -Destination (Join-Path $diagnostics 'VBox.log') }
+            try {
+                $logDestination = Join-Path $diagnostics 'VBox.log'
+                if ($ProtectedRoot) {
+                    $logItem = Get-Item -LiteralPath $vboxLogPath -Force -ErrorAction Stop
+                    if (($logItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                        $logItem.Length -gt 16777216) {
+                        throw 'Native SSH VirtualBox source log is redirected or exceeds 16 MiB'
+                    }
+                    $bytes = [IO.File]::ReadAllBytes($vboxLogPath)
+                    if ($bytes.Length -gt 16777216 -or (Test-Path -LiteralPath $logDestination)) {
+                        throw 'Native SSH protected VirtualBox snapshot exceeds 16 MiB or already exists'
+                    }
+                    $stream = [IO.File]::Create($logDestination,4096,[IO.FileOptions]::None,
+                        (New-NativeProtectedEvidenceAcl))
+                    try {
+                        $stream.Write($bytes,0,$bytes.Length)
+                        $stream.Flush($true)
+                    }
+                    finally { $stream.Dispose() }
+                    Assert-NativeProtectedEvidenceAcl -Path $logDestination
+                }
+                else { Copy-Item -LiteralPath $vboxLogPath -Destination $logDestination }
+            }
             catch { [IO.File]::WriteAllText((Join-Path $diagnostics 'VBox-log-copy-error.txt'), $_.Exception.Message) }
         }
     }
@@ -323,7 +451,7 @@ function Complete-NativeSshSmokeEvidence {
     if ($Evidence.rocky_runtime -eq 'PASS') {
         $Evidence.vagrant_ssh_command_attempts = 1
         try {
-            $wrapper = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', 'true') -TimeoutSeconds 20 -WorkingDirectory $WorkingDirectory -Environment $Environment
+            $wrapper = Invoke-BoundedProcess -FilePath $Vagrant -Arguments @('ssh', '-c', 'true', '--', '-F', 'none') -TimeoutSeconds 20 -WorkingDirectory $WorkingDirectory -Environment $Environment
             $Evidence.vagrant_ssh_command = if ($wrapper.ExitCode -eq 0) { 'PASS' } else { 'FAIL_NON_BLOCKING' }
             [IO.File]::WriteAllText((Join-Path $diagnostics 'vagrant-ssh-command.txt'), "exit=$($wrapper.ExitCode)`n$($wrapper.StdOut)`n$($wrapper.StdErr)")
         }

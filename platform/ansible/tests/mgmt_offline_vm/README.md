@@ -85,16 +85,26 @@ Direct `ansible-playbook` invocations are diagnostic-only. They do not create
 merge-authoritative RKE2 qualification evidence and must not replace the registered
 `repoctl` lifecycle.
 
-`create` boots with every network adapter disconnected. Through the private serial
-pipe, it installs a fresh SSH key and a persistent output/forward default-deny nftables
-boundary before attaching the existing host-only adapter. There is no NAT, forwarded
-port or shared folder. Host keys are pinned from the serial console, password access
-is disabled, and the guest must report its own Rocky kernel, systemd and SELinux
+`create` generates a local NoCloud `CIDATA` ISO for the disposable VM. It carries
+only the campaign's public SSH key, a static host-only address without a default
+route, and the guest bootstrap script; the private key stays on the controller.
+The host-only adapter starts with its cable disconnected. The guest applies a
+persistent output/forward default-deny nftables boundary and key-only SSH, then
+writes a campaign-specific readiness marker and its SSH host key to an owned serial
+log. The controller verifies the ISO digest, VM identity and fresh marker before
+connecting that cable and pinning the host key. There is no NAT, forwarded port or
+shared folder. The guest must report its own Rocky kernel, systemd and SELinux
 `Enforcing` before artifact work begins.
 
 Only a fresh `create` followed by the first `test` is a cold artifact qualification.
-The registered lifecycle runs `diagnostics` afterward because its `numactl-libs`
-dependency is also part of the RKE2 bundle and must not preinstall that dependency.
+Fresh creation requires an empty per-VM Vagrant box cache so Vagrant imports the
+digest-checked local archive. After destroying a diagnostic VM, use a new VM name
+and state directory for a new canonical cold campaign; the old cache and evidence
+remain available for diagnosis.
+The registered lifecycle runs `diagnostics` afterward. It verifies the exact
+`numactl-libs` package already present on the guest and installs only pinned
+diagnostic RPMs absent from the RKE2 bundle. The `numactl-libs` package may be
+present in the base image; its presence alone does not prove the cold role installed it.
 The artifact role validates the independently approved manifest, image contents,
 RPM metadata and signatures before installing with every repository disabled.
 `server` activates the canonical nftables and firewalld templates, invokes the real

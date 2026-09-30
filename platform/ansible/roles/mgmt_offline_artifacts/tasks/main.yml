@@ -140,11 +140,39 @@
   register: mgmt_offline_signed
   changed_when: false
 
-- name: Import only manifest-approved offline RPM signing keys
-  ansible.builtin.rpm_key:
-    key: "{{ mgmt_offline_target_dir }}/{{ item }}"
-    state: present
+- name: Inventory system RPM public keys before approved import
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/rpm
+      - -q
+      - --queryformat
+      - '%{NAME}-%{VERSION}-%{RELEASE}\n'
+      - gpg-pubkey
+  register: mgmt_offline_keys_before
+  changed_when: false
+  failed_when: mgmt_offline_keys_before.rc not in [0, 1]
+
+- name: Import only manifest-approved offline RPM signing keys without gpg2
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/rpm
+      - --import
+      - "{{ mgmt_offline_target_dir }}/{{ item }}"
   loop: "{{ (mgmt_offline_validated.stdout | from_json).signing_keys }}"
+  changed_when: false
+
+- name: Inventory system RPM public keys after approved import
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/rpm
+      - -q
+      - --queryformat
+      - '%{NAME}-%{VERSION}-%{RELEASE}\n'
+      - gpg-pubkey
+  register: mgmt_offline_keys_after
+  changed_when: >-
+    (mgmt_offline_keys_before.stdout_lines | sort)
+    != (mgmt_offline_keys_after.stdout_lines | sort)
 
 - name: Install complete local RPM set with all repositories disabled
   ansible.builtin.dnf:

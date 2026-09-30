@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 
@@ -160,7 +161,9 @@ def validate_checkpoint(record: dict, *, source_sha: str | None = None,
     for name in ("started_at", "finished_at"):
         _require(isinstance(record[name], str) and record[name].endswith("Z"), f"checkpoint {name} is invalid")
         datetime.fromisoformat(record[name].replace("Z", "+00:00"))
-    _require(type(record["duration_seconds"]) in (int, float) and record["duration_seconds"] >= 0,
+    _require(type(record["duration_seconds"]) in (int, float)
+             and math.isfinite(record["duration_seconds"])
+             and record["duration_seconds"] >= 0,
              "checkpoint duration is invalid")
     _require(all(type(record[name]) is bool for name in ("executed", "reused", "cache_hit")),
              "checkpoint execution metrics are invalid")

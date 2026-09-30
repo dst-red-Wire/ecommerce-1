@@ -212,7 +212,7 @@ lab-network-native-prepare: ## Stage exact-head Windows runner for a native-boot
 	@$(PYTHON) scripts/repoctl.py lab-network-native-prepare --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-native-boot-prepare: ## Prepare the retained campaign's guarded one-shot native Windows entry; no reboot
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-prepare --campaign-id "$(CAMPAIGN_ID)"
+	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-prepare --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)"
 
 lab-network-native-boot-reboot: ## Explicitly start the one-shot native boot for the retained campaign
 	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-reboot --campaign-id "$(CAMPAIGN_ID)"

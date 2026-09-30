@@ -95,13 +95,18 @@
         mode: '0600'
         content: >-
           {{ {'name': vm_name, 'memory': vm_memory | int, 'cpus': vm_cpus | int, 'mac': vm_mac,
+              'hostonly_adapter': vm_hostonly_adapter,
               'address': vm_address, 'box_name': vm_box_name, 'box_url': vm_box_url,
               'box_sha256': vm_box_sha256,
               'vagrant_version': vm_vagrant_version,
               'vagrant_windows': vm_vagrant_windows} | to_nice_json }}
     - name: Run native Vagrant validation
       ansible.builtin.command:
-        argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, validate]
+        argv: >-
+          {{ [vm_python, vm_bridge, 'vagrant', '--state', vm_windows_state]
+             + (['--fresh-box'] if vm_action in ['validate', 'create', 'qualify']
+                and not vm_resume_owned_creation | bool else [])
+             + ['--', 'validate'] }}
       changed_when: false
     - name: Execute requested lifecycle and always clean a complete qualification attempt
       block:

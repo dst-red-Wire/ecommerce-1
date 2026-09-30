@@ -20,10 +20,16 @@ function Invoke-BoundedProcess {
         }
         'ssh' {
             if ($TimeoutSeconds -ne 20) { throw 'Optional Vagrant SSH wrapper timeout is not bounded at 20 seconds' }
+            if (($Arguments -join '|') -cne 'ssh|-c|true|--|-F|none') {
+                throw 'Vagrant SSH wrapper did not disable the user SSH config'
+            }
             $script:VagrantAttempts++
             throw 'Synthetic Vagrant SSH wrapper timeout'
         }
         default {
+            if ($Arguments[0] -ne '-F' -or $Arguments[1] -ne 'none') {
+                throw 'Direct SSH inherited an interactive user configuration'
+            }
             if ($Arguments -contains 'StrictHostKeyChecking=yes') {
                 $script:DirectAttempts++
                 if ($Arguments[-1] -eq 'printf "REMOTE_COMMAND_OK\n"') {
@@ -128,4 +134,31 @@ if ((Get-NativeSshFailureCode -Stage 'ssh_auth_ready' -Detail $failure.last_ssh_
     (Get-NativeSshFailureCode -Stage 'tcp_22_ready' -Detail 'VirtualBox NAT SSH forwarding is absent') -ne 'VBOX_NETWORK_ERROR') {
     throw 'SSH authentication and VirtualBox network failure codes are not distinct'
 }
-Write-Output 'PASS NativeVagrantSshSmoke synthetic VM, TCP, authentication, UTC timing, direct SSH, Rocky runtime and optional Vagrant wrapper evidence'
+
+$rejected = $false
+try { [void](New-NativeSmokeProcessEnvironment -VagrantHome 'C:\Users\admin\untrusted-vagrant-home') }
+catch { $rejected = $_.Exception.Message -match 'outside the governed' }
+if (-not $rejected) { throw 'Native smoke accepted an ungoverned Vagrant home' }
+$governedHome = 'C:\ecommerce-lab\network-smoke\fixture\vagrant-home'
+$protectedHome = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'EcommerceNativeSmoke\fixture\smoke-run\vagrant-home'
+if ((New-NativeSmokeProcessEnvironment -VagrantHome $protectedHome).VAGRANT_HOME -ne $protectedHome) {
+    throw 'Native smoke rejected the protected Vagrant home'
+}
+$env:PATH = "$script:FixtureRoot;$env:PATH"
+$env:PSModulePath = "$script:FixtureRoot;$env:PSModulePath"
+$env:RUBYOPT = '-rmalicious'
+$env:RUBYLIB = $script:FixtureRoot
+$env:GEM_HOME = $script:FixtureRoot
+$env:BUNDLE_GEMFILE = (Join-Path $script:FixtureRoot 'Gemfile')
+$env:VAGRANT_CWD = $script:FixtureRoot
+$env:SSH_AUTH_SOCK = $script:FixtureRoot
+Set-NativeSmokeProcessEnvironment -VagrantHome $governedHome
+foreach ($key in @('RUBYOPT','RUBYLIB','GEM_HOME','BUNDLE_GEMFILE','VAGRANT_CWD','SSH_AUTH_SOCK')) {
+    if ([Environment]::GetEnvironmentVariable($key, 'Process')) { throw "Untrusted child environment remained: $key" }
+}
+if ($env:PATH -like "*$script:FixtureRoot*" -or $env:PSModulePath -like "*$script:FixtureRoot*" -or
+    $env:VAGRANT_HOME -ne $governedHome -or $env:VAGRANT_NO_PLUGINS -ne '1' -or
+    $env:PATH -notlike '*System32*' -or $env:PSModulePath -notlike '*WindowsPowerShell*') {
+    throw 'Native smoke child environment was not sealed to the Windows toolchain'
+}
+Write-Output 'PASS NativeVagrantSshSmoke direct SSH isolation, synthetic smoke evidence and sealed child environment'

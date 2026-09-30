@@ -64,49 +64,20 @@
     argv: [ssh-keygen, -q, -t, ed25519, -N, '', -C, ecommerce-local-vm-test, -f, "{{ vm_state }}/identity"]
     creates: "{{ vm_state }}/identity"
   no_log: true
-- name: Authorize cleanup only for this fresh creation attempt
-  ansible.builtin.set_fact:
-    vm_creation_authorized: true
-- name: Boot through Vagrant with no connected network and no shared folders
-  ansible.builtin.command:
-    argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, up, --provider, virtualbox, --no-provision]
-  changed_when: true
-- name: Read only the owned Vagrant machine UUID
-  ansible.builtin.slurp:
-    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
-  register: vm_id_file
-- name: Preserve owned machine identity
-  ansible.builtin.set_fact:
-    vm_uuid: "{{ vm_id_file.content | b64decode | trim }}"
-- name: Inspect adapter configuration before any guest bootstrap
-  ansible.builtin.command:
-    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_uuid }}", --machinereadable]
-  register: vm_initial
-  changed_when: false
-- name: Require actual network isolation and bounded VM resources
-  ansible.builtin.command:
-    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
-           --name, "{{ vm_name }}", --nic1, 'null',
-           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
-    stdin: "{{ vm_initial.stdout }}"
-  changed_when: false
-- name: Record initial VM isolation
-  ansible.builtin.copy:
-    content: "{{ vm_initial.stdout }}\n"
-    dest: "{{ vm_state }}/vm-before-network.txt"
-    mode: '0600'
 - name: Render guest-only access and persistent egress protection
   ansible.builtin.copy:
     dest: "{{ vm_state }}/guest-access.txt"
     mode: '0600'
     content: |
       set -eu
+      set -o pipefail
+      trap 'rc=$?; printf "MGMT_GUEST_ACCESS_FAIL line=%s rc=%s\n" "$LINENO" "$rc" >&2' ERR
       test "$(getenforce)" = Enforcing
-      install -d -m 0700 -o vagrant -g vagrant /home/vagrant/.ssh
-      printf '%s\n' '{{ lookup("file", vm_state ~ "/identity.pub") }}' > /home/vagrant/.ssh/authorized_keys
-      chmod 0600 /home/vagrant/.ssh/authorized_keys
-      chown vagrant:vagrant /home/vagrant/.ssh/authorized_keys
-      restorecon -RF /home/vagrant/.ssh
+      install -d -m 0700 -o packer -g packer /home/packer/.ssh
+      printf '%s\n' '{{ lookup("file", vm_state ~ "/identity.pub") }}' > /home/packer/.ssh/authorized_keys
+      chmod 0600 /home/packer/.ssh/authorized_keys
+      chown packer:packer /home/packer/.ssh/authorized_keys
+      restorecon -RF /home/packer/.ssh
       cat > /etc/ssh/sshd_config.d/00-ecommerce-test.conf <<'SSH'
       PasswordAuthentication no
       KbdInteractiveAuthentication no
@@ -144,15 +115,104 @@
       UNIT
       systemctl daemon-reload
       systemctl enable ecommerce-test-offline.service
-      nmcli connection add type ethernet con-name ecommerce-offline ifname '*' 802-3-ethernet.mac-address {{ vm_mac | regex_replace('(..)(?!$)', '\1:') }} ipv4.method manual ipv4.addresses {{ vm_address }}/24 ipv4.never-default yes ipv6.method disabled
-      getenforce
-      printf 'MGMT_HOST_KEY:'
-      cat /etc/ssh/ssh_host_ed25519_key.pub
-- name: Configure guest exclusively through its private local serial pipe
+      nmcli -g UUID connection show | while IFS= read -r connection_uuid; do
+        test -n "$connection_uuid" || continue
+        connection_type=$(nmcli -g connection.type connection show "$connection_uuid")
+        case "$connection_type" in ethernet|802-3-ethernet) ;; *) continue ;; esac
+        ipv4_method=$(nmcli -g ipv4.method connection show "$connection_uuid")
+        if test "$ipv4_method" = auto; then
+          nmcli connection modify "$connection_uuid" connection.autoconnect no ipv4.method disabled ipv6.method disabled
+          nmcli connection down "$connection_uuid" >/dev/null 2>&1 || true
+        fi
+      done
+      test -z "$(ip -4 route show default)"
+      test -z "$(ip -6 route show default)"
+- name: Build or strictly reuse local NoCloud seed before VM power-on
   ansible.builtin.command:
-    argv: ["{{ vm_python }}", "{{ vm_bridge }}", console, --state, "{{ vm_windows_state }}", --script, "{{ vm_state }}/guest-access.txt"]
-  register: vm_console
+    argv: >-
+      {{ [vm_python, playbook_dir ~ '/seed_iso.py', '--state', vm_windows_state,
+          '--guest-script', vm_state ~ '/guest-access.txt',
+          '--public-key', vm_state ~ '/identity.pub', '--vm-name', vm_name,
+          '--vm-address', vm_address, '--host-address', vm_host_address,
+          '--vm-mac', vm_mac]
+         + (['--reuse-existing'] if vm_resume_owned_creation | bool else []) }}
+  register: vm_seed_generated
+  changed_when: not vm_resume_owned_creation | bool
+- name: Bind the generated seed to this exact campaign
+  ansible.builtin.set_fact:
+    vm_seed_record: "{{ vm_seed_generated.stdout | from_json }}"
+- name: Require a complete NoCloud seed result
+  ansible.builtin.assert:
+    that:
+      - vm_seed_record.schema_version == 1
+      - vm_seed_record.status == 'PASS'
+      - vm_seed_record.vm_name == vm_name
+      - vm_seed_record.nonce is match('^[0-9a-f]{32}$')
+      - vm_seed_record.sha256 is match('^[0-9a-f]{64}$')
+      - vm_seed_record.iso_path is match('^[A-Za-z]:')
+- name: Inspect prior serial file before this boot
+  ansible.builtin.stat:
+    path: "{{ vm_windows_state }}/bootstrap-serial.log"
+  register: vm_serial_before
+- name: Refuse an old serial proof for a fresh machine
+  ansible.builtin.assert:
+    that:
+      - not vm_serial_before.stat.exists or vm_resume_owned_creation | bool
+- name: Timestamp this VM boot attempt for fresh serial proof
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", -c, 'import time; print(time.time_ns())']
+  register: vm_boot_started_ns
+  changed_when: false
+- name: Authorize cleanup only for this fresh creation attempt
+  ansible.builtin.set_fact:
+    vm_creation_authorized: true
+- name: Boot through Vagrant with no connected network and no shared folders
+  ansible.builtin.command:
+    argv: >-
+      {{ [vm_python, vm_bridge, 'vagrant', '--state', vm_windows_state]
+         + (['--fresh-box'] if not vm_resume_owned_creation | bool else [])
+         + ['--', 'up', '--provider', 'virtualbox', '--no-provision'] }}
   changed_when: true
+- name: Read only the owned Vagrant machine UUID
+  ansible.builtin.slurp:
+    src: "{{ vm_windows_state }}/.vagrant/machines/default/virtualbox/id"
+  register: vm_id_file
+- name: Preserve owned machine identity
+  ansible.builtin.set_fact:
+    vm_uuid: "{{ vm_id_file.content | b64decode | trim }}"
+- name: Inspect adapter configuration before any guest bootstrap
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_uuid }}", --machinereadable]
+  register: vm_initial
+  changed_when: false
+- name: Require actual network isolation and bounded VM resources
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, hostonly, --cable, 'off',
+           --adapter, "{{ vm_hostonly_adapter }}", --mac, "{{ vm_mac }}",
+           --uuid, "{{ vm_uuid }}", --seed-iso, "{{ vm_seed_record.iso_path }}",
+           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
+    stdin: "{{ vm_initial.stdout }}"
+  changed_when: false
+- name: Record initial VM isolation
+  ansible.builtin.copy:
+    content: "{{ vm_initial.stdout }}\n"
+    dest: "{{ vm_state }}/vm-before-network.txt"
+    mode: '0600'
+- name: Wait for the fresh NoCloud success marker in the private serial file
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ vm_bridge }}", console,
+           --state, "{{ vm_windows_state }}", --nonce, "{{ vm_seed_record.nonce }}",
+           --minimum-mtime-ns, "{{ vm_boot_started_ns.stdout | trim }}",
+           --offset, "{{ vm_serial_before.stat.size | default(0) }}"]
+  register: vm_console
+  changed_when: false
+- name: Require the exact one-line NoCloud marker and guest host key
+  ansible.builtin.assert:
+    that:
+      - >-
+        vm_console.stdout | trim is match('^MGMT_BOOTSTRAP_READY:' ~ vm_seed_record.nonce
+        ~ ' MGMT_HOST_KEY:ssh-ed25519 [A-Za-z0-9+/=]+$')
 - name: Preserve console bootstrap result
   ansible.builtin.copy:
     content: "{{ vm_console.stdout }}\n"
@@ -164,14 +224,55 @@
     mode: '0600'
     content: >-
       {{ vm_address }} {{ (vm_console.stdout | regex_search('MGMT_HOST_KEY:(ssh-ed25519 [A-Za-z0-9+/=]+)', '\1')) | first }}
-- name: Attach only selected existing host-only network after guest output is denied
+- name: Reverify every local seed byte immediately before connecting the cable
   ansible.builtin.command:
-    argv: ["{{ vm_vbox }}", controlvm, "{{ vm_uuid }}", nic1, hostonly, "{{ vm_hostonly_adapter }}"]
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/seed_iso.py", --state, "{{ vm_windows_state }}",
+           --guest-script, "{{ vm_state }}/guest-access.txt",
+           --public-key, "{{ vm_state }}/identity.pub", --vm-name, "{{ vm_name }}",
+           --vm-address, "{{ vm_address }}", --host-address, "{{ vm_host_address }}",
+           --vm-mac, "{{ vm_mac }}", --reuse-existing]
+  register: vm_seed_verified
+  changed_when: false
+- name: Require the NoCloud seed identity to be unchanged during bootstrap
+  ansible.builtin.assert:
+    that:
+      - (vm_seed_verified.stdout | from_json) == vm_seed_record
+- name: Inspect the exact VM and ISO again before connecting the cable
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_uuid }}", --machinereadable]
+  register: vm_before_link
+  changed_when: false
+- name: Require the verified ISO on the still-disconnected owned VM
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, hostonly, --cable, 'off',
+           --adapter, "{{ vm_hostonly_adapter }}", --mac, "{{ vm_mac }}",
+           --uuid, "{{ vm_uuid }}", --seed-iso, "{{ vm_seed_record.iso_path }}",
+           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
+    stdin: "{{ vm_before_link.stdout }}"
+  changed_when: false
+- name: Connect only the already selected host-only cable after guest output is denied
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", controlvm, "{{ vm_uuid }}", setlinkstate1, 'on']
   register: vm_attach
   until: vm_attach.rc == 0
   retries: 3
   delay: 2
   changed_when: true
+- name: Inspect host-only link state after activation
+  ansible.builtin.command:
+    argv: ["{{ vm_vbox }}", showvminfo, "{{ vm_uuid }}", --machinereadable]
+  register: vm_after_link
+  changed_when: false
+- name: Require no adapter or ISO change while activating the link
+  ansible.builtin.command:
+    argv: ["{{ vm_python }}", "{{ playbook_dir }}/virtualbox_probe.py",
+           --name, "{{ vm_name }}", --nic1, hostonly, --cable, 'on',
+           --adapter, "{{ vm_hostonly_adapter }}", --mac, "{{ vm_mac }}",
+           --uuid, "{{ vm_uuid }}", --seed-iso, "{{ vm_seed_record.iso_path }}",
+           --cpus, "{{ vm_cpus }}", --memory, "{{ vm_memory }}", --running]
+    stdin: "{{ vm_after_link.stdout }}"
+  changed_when: false
 - name: Render isolated SSH transport with a controller-only key
   ansible.builtin.copy:
     dest: "{{ vm_state }}/ssh_config"
@@ -179,7 +280,7 @@
     content: |
       Host {{ vm_name }}
         HostName {{ vm_address }}
-        User vagrant
+        User packer
         IdentityFile {{ vm_state }}/identity
         IdentitiesOnly yes
         UserKnownHostsFile {{ vm_state }}/known_hosts
