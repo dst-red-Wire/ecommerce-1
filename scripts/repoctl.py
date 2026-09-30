@@ -9720,12 +9720,12 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
             image_inputs = rocky_box_catalog.build_inputs(source_sha)
         except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
             return fail(f"cannot bind Packer semantic image inputs: {exc}")
-        command.extend(["-PackerInputsDigest", image_inputs["inputs_digest"],
-                        "-PackerTemplateDigest", image_inputs["packer_template_digest"]])
+        packer_inputs_digest = image_inputs["inputs_digest"]
         try:
             box = rocky_box_catalog.find_matching_box(source_sha)
             manifest = rocky_box_catalog.verify(box, source_sha)
             box_windows = output(["wslpath", "-w", str(box)]).strip()
+            packer_inputs_digest = manifest["inputs_digest"]
             command.extend(["-ReuseBoxPath", box_windows, "-ReuseBoxSha256", manifest["box_sha256"],
                             "-ReuseBoxInputsDigest", manifest["inputs_digest"]])
             print(f"PACKER_REBUILD_DECISION=REUSE box_sha256={manifest['box_sha256']}")
@@ -9733,6 +9733,8 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
             if "found 0" not in str(exc):
                 return fail(f"ambiguous Packer box reuse decision: {exc}")
             print(f"PACKER_REBUILD_DECISION=BUILD reason={exc}")
+        command.extend(["-PackerInputsDigest", packer_inputs_digest,
+                        "-PackerTemplateDigest", image_inputs["packer_template_digest"]])
     if action == "prepare":
         preflight_command = command.copy()
         preflight_command[preflight_command.index("Prepare")] = "Preflight"

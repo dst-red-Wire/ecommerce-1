@@ -250,8 +250,8 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
         for name, value in (("find_matching_box", Path("/unused/box")),
                             ("verify", self.manifest),
-                            ("build_inputs", {"inputs_digest": INPUTS,
-                                              "packer_template_digest": TEMPLATE})):
+                            ("semantic_build_inputs", {"inputs_digest": INPUTS,
+                                                       "packer_template_digest": TEMPLATE})):
             patcher = mock.patch.object(m25.rocky_box_catalog, name, return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -339,9 +339,11 @@ class M25RuntimeEvidenceTests(unittest.TestCase):
         self.assertFalse(self.result()[0])
 
     def test_changed_input_digest_and_box_digest_are_rejected(self):
-        with mock.patch.object(m25.rocky_box_catalog, "build_inputs",
-                               return_value={"inputs_digest": "f" * 64,
-                                             "packer_template_digest": TEMPLATE}):
+        with mock.patch.object(m25.rocky_box_catalog, "semantic_build_inputs",
+                               side_effect=lambda sha: {
+                                   "inputs_digest": "f" * 64 if sha == HEAD else INPUTS,
+                                   "packer_template_digest": TEMPLATE,
+                               }):
             self.assertFalse(self.result()[0])
         self.manifest["box_sha256"] = "f" * 64
         self.assertFalse(self.result()[0])

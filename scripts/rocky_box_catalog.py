@@ -26,6 +26,9 @@ BUILD_FILES = (
     "scripts/materialize_packer_rpm_repo.py",
     "scripts/install_packer_tools.py",
 )
+TOOLCHAIN_LOCK = "config/contracts/toolchain-lock.json"
+IMAGE_TOOL_PROFILES = ("base", "rke2", "admin-qualification")
+WINDOWS_BUILD_TOOLS = ("packer", "virtualbox", "vagrant")
 SHA256 = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 NETWORK_RUNNER_FILES = (
@@ -69,19 +72,34 @@ def source_tree(source_sha: str) -> str:
     ).stdout.strip()
 
 
+def _mapping(value: object, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _image(source_sha: str) -> dict:
+    contract = _mapping(
+        yaml.safe_load(source_file(source_sha, "config/contracts/machine-image-lock.yaml")),
+        "machine image contract",
+    )
+    return _mapping(contract.get("packer_image"), "Packer image")
+
+
 def image_identity(source_sha: str) -> tuple[str, str, str]:
-    image = yaml.safe_load(source_file(source_sha, "config/contracts/machine-image-lock.yaml"))["packer_image"]
+    image = _image(source_sha)
     return (
-        str(image["os"]["version"]),
-        str(image["outputs"]["rke2"]["virtualbox"]),
-        str(image["build"]["virtualbox"]["version"]),
+        str(_mapping(image.get("os"), "image OS")["version"]),
+        str(_mapping(_mapping(image.get("outputs"), "image outputs").get("rke2"),
+                     "RKE2 outputs")["virtualbox"]),
+        str(_mapping(_mapping(image.get("build"), "image build").get("virtualbox"),
+                     "VirtualBox build")["version"]),
     )
 
 
-def build_inputs(source_sha: str) -> dict[str, str]:
+def _build_file_digests(source_sha: str) -> dict[str, str]:
     files = {path: hashlib.sha256(source_file(source_sha, path)).hexdigest() for path in BUILD_FILES}
-    contract = yaml.safe_load(source_file(source_sha, "config/contracts/machine-image-lock.yaml"))
-    image = contract["packer_image"]
+    image = _image(source_sha)
     selected = {
         key: image[key]
         for key in (
@@ -90,10 +108,17 @@ def build_inputs(source_sha: str) -> dict[str, str]:
             "kubernetes_prerequisites",
         )
     }
-    selected["build"] = {key: value for key, value in image["build"].items() if key != "credential"}
+    selected["build"] = {
+        key: value for key, value in _mapping(image.get("build"), "image build").items()
+        if key != "credential"
+    }
     files["contracted_image_build"] = hashlib.sha256(
         json.dumps(selected, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+    return files
+
+
+def _input_digests(files: dict[str, str]) -> dict[str, str]:
     canonical = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return {
         "packer_template_digest": hashlib.sha256(
@@ -101,6 +126,70 @@ def build_inputs(source_sha: str) -> dict[str, str]:
         ).hexdigest(),
         "inputs_digest": hashlib.sha256(canonical).hexdigest(),
     }
+
+
+def build_inputs(source_sha: str) -> dict[str, str]:
+    """Return the original v1 input digest used by immutable box manifests."""
+    return _input_digests(_build_file_digests(source_sha))
+
+
+def _version_references(value: object) -> set[str]:
+    """Collect the lock keys read by the selected tool definitions."""
+    if isinstance(value, dict):
+        references: set[str] = set()
+        for key, item in value.items():
+            if key.endswith("_ref"):
+                if not isinstance(item, str) or not item:
+                    raise ValueError(f"selected tool {key} must name a version lock key")
+                references.add(item)
+        for item in value.values():
+            references.update(_version_references(item))
+        return references
+    if isinstance(value, list):
+        references: set[str] = set()
+        for item in value:
+            references.update(_version_references(item))
+        return references
+    return set()
+
+
+def _consumed_toolchain(source_sha: str) -> dict[str, object]:
+    """Select values read by the image materializer and Windows preflight."""
+    image = _image(source_sha)
+    lock = _mapping(json.loads(source_file(source_sha, TOOLCHAIN_LOCK)), "toolchain lock")
+    profiles = _mapping(image.get("profiles"), "image profiles")
+    profile_tools: set[str] = set()
+    for profile in IMAGE_TOOL_PROFILES:
+        definition = _mapping(profiles.get(profile), f"image profile {profile}")
+        names = definition.get("external_tools")
+        if not isinstance(names, list) or any(not isinstance(name, str) or not name for name in names):
+            raise ValueError(f"image profile {profile} external tools must be names")
+        profile_tools.update(names)
+    names = sorted(profile_tools.union(WINDOWS_BUILD_TOOLS))
+    definitions = _mapping(lock.get("tools"), "toolchain tools")
+    tools = {name: _mapping(definitions.get(name), f"toolchain tool {name}") for name in names}
+    references = set().union(*(_version_references(tool) for tool in tools.values()))
+    versions = _mapping(lock.get("versions"), "toolchain versions")
+    lifecycle = _mapping(lock.get("tool_lifecycle"), "tool lifecycle")
+    active = _mapping(lifecycle.get("active"), "active tool lifecycle")
+    return {
+        "tools": tools,
+        "versions": {name: versions[name] for name in sorted(references)},
+        "windows_build_lifecycle": {
+            name: _mapping(active.get(name), f"Windows tool lifecycle {name}")
+            for name in WINDOWS_BUILD_TOOLS
+        },
+    }
+
+
+def semantic_build_inputs(source_sha: str) -> dict[str, str]:
+    """Compare actual build dependencies without changing the historical v1 digest."""
+    files = _build_file_digests(source_sha)
+    toolchain = _consumed_toolchain(source_sha)
+    files[TOOLCHAIN_LOCK] = hashlib.sha256(
+        json.dumps(toolchain, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return _input_digests(files)
 
 
 def verify_staging(stage: Path, expected_manifest_sha256: str) -> None:
@@ -177,7 +266,7 @@ def adopt(result_path: Path, stage: Path, box: Path) -> dict[str, object]:
 
 def verify(box: Path, source_sha: str) -> dict[str, object]:
     manifest_path = box.parent / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = _mapping(json.loads(manifest_path.read_text(encoding="utf-8")), "box manifest")
     rocky_version, box_filename, virtualbox_version = image_identity(source_sha)
     if (rocky_version != "10.2" or manifest.get("schema") != 1
         or manifest.get("box_filename") != box.name or box.name != box_filename):
@@ -205,28 +294,30 @@ def verify(box: Path, source_sha: str) -> dict[str, object]:
         raise ValueError("box checksum file differs")
     if digest_file(box.parent / "packer.log") != manifest.get("packer_log_sha256"):
         raise ValueError("Packer log differs from manifest")
-    current = build_inputs(source_sha)
-    if current != {key: manifest.get(key) for key in current}:
+    original_sha = str(manifest["source_sha"])
+    original = build_inputs(original_sha)
+    if original != {key: manifest.get(key) for key in original}:
+        raise ValueError("Packer image inputs changed; rebuild required")
+    if semantic_build_inputs(original_sha) != semantic_build_inputs(source_sha):
         raise ValueError("Packer image inputs changed; rebuild required")
     return manifest
 
 
 def find_matching_box(source_sha: str, artifact_root: Path = Path("/mnt/c/ecommerce-lab/artifacts")) -> Path:
     """Find an immutable local artifact by semantic build inputs, then verify its bytes."""
-    expected = build_inputs(source_sha)
+    semantic_build_inputs(source_sha)
     matches: list[Path] = []
     for manifest_path in sorted(artifact_root.glob("*/manifest.json")):
         try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if any(manifest.get(key) != value for key, value in expected.items()):
-                continue
+            manifest = _mapping(json.loads(manifest_path.read_text(encoding="utf-8")), "box manifest")
             filename = manifest.get("box_filename")
             if not isinstance(filename, str) or Path(filename).name != filename:
                 continue
             box = manifest_path.parent / filename
             verify(box, source_sha)
             matches.append(box)
-        except (OSError, KeyError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError):
+        except (FileNotFoundError, NotADirectoryError, KeyError, TypeError, ValueError,
+                subprocess.CalledProcessError):
             continue
     if len(matches) != 1:
         raise ValueError(f"expected exactly one verified matching box; found {len(matches)}")

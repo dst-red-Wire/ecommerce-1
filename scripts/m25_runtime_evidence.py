@@ -341,15 +341,14 @@ def validate(root: Path, evidence: dict[str, Any], head: str, tree: str) -> None
              "M2.5 image identity or native VT-x proof is invalid")
     box = rocky_box_catalog.find_matching_box(head)
     manifest = rocky_box_catalog.verify(box, head)
-    current_inputs = rocky_box_catalog.build_inputs(head)
-    _require(current_inputs["inputs_digest"] == manifest["inputs_digest"]
-             and current_inputs["packer_template_digest"] == manifest["packer_template_digest"],
+    original_sha = manifest["source_sha"]
+    _require(rocky_box_catalog.semantic_build_inputs(head)
+             == rocky_box_catalog.semantic_build_inputs(original_sha),
              "M2.5 semantic image inputs differ from the native artifact")
     _require(evidence.get("box_sha256") == manifest["box_sha256"]
              and evidence.get("inputs_digest") == manifest["inputs_digest"],
              "M2.5 Rocky box digest or semantic inputs differ")
     sources = _sources(root, evidence)
-    original_sha = manifest["source_sha"]
     original_tree = rocky_box_catalog.source_tree(original_sha)
     _require(manifest["source_tree_sha"] == original_tree,
              "M2.5 original image source tree differs")
