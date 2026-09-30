@@ -1,11 +1,13 @@
 """The PR-head adapter can request review but cannot create review authority."""
 
 import hashlib
+import json
 import os
 import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
 
+from scripts import pr_monitor
 from scripts import pr_review_dispatch_transition as transition
 from scripts.exact_pr_binding import ExactPRBinding
 
@@ -13,6 +15,8 @@ HEAD = "a" * 40
 BASE = "b" * 40
 BRANCH = "feature/exact-review"
 REPOSITORY = "dst-red-Wire/ecommerce-1"
+TREE = "c" * 40
+EVIDENCE_DIGEST = "sha256:" + "d" * 64
 
 
 def controller(kind="CODE", *, pr=169, head=HEAD, base=BASE):
@@ -55,6 +59,32 @@ def controller(kind="CODE", *, pr=169, head=HEAD, base=BASE):
         "review_request": review,
         "blockers": [],
     }
+
+
+def structured_controller(kind="CODE", *, tree=TREE):
+    result = controller(kind)
+    result["review_kind"] = kind
+    result["qualification"]["compatibility_digest"] = EVIDENCE_DIGEST
+    result["handoff"] = pr_monitor.build_handoff(
+        repository=REPOSITORY,
+        pr=169,
+        review_kind=kind,
+        base_sha=BASE,
+        head_sha=HEAD,
+        tree_sha=tree,
+        changed_files=["scripts/repoctl.py"],
+        qualification_status="PASS",
+        qualification_evidence_digest=EVIDENCE_DIGEST,
+        previous_validated_verdict="CODE_PASS" if kind == "SECURITY" else None,
+        previous_head=HEAD if kind == "SECURITY" else None,
+    )
+    if kind == "SECURITY":
+        result["code_review"] = {
+            "status": "PASS",
+            "head_sha": HEAD,
+            "blocking_findings": 0,
+        }
+    return result
 
 
 class PRReviewDispatchTransitionTest(TestCase):
@@ -102,6 +132,92 @@ class PRReviewDispatchTransitionTest(TestCase):
         resolver.assert_called_once_with(
             REPOSITORY, HEAD, BRANCH, "main", BASE, gh=self.gh_path
         )
+
+    def test_structured_handoff_is_the_actual_dispatched_text(self):
+        source = structured_controller()
+        record = {
+            "state": "BLOCKED",
+            "reason": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+            "identity": "c" * 64,
+            "outbox_path": "/tmp/request.json",
+            "verdict_authority": False,
+        }
+        dispatch = mock.Mock(return_value=record)
+        with mock.patch.object(
+            transition, "_git", side_effect=["", HEAD, BRANCH, TREE]
+        ):
+            result = transition.dispatch_controller_result(
+                source,
+                pr_number=169,
+                target_root=Path("/repo"),
+                resolver=lambda *args, **kwargs: self.binding,
+                dispatcher=dispatch,
+                marker_lookup=lambda *_: None,
+            )
+        request = dispatch.call_args.args[0]
+        text = json.dumps(
+            source["handoff"],
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        self.assertEqual(text, request["handoff"])
+        self.assertEqual(len(text.encode()), request["handoff_bytes"])
+        self.assertEqual(
+            hashlib.sha256(text.encode()).hexdigest(), request["handoff_sha256"]
+        )
+        self.assertNotEqual(
+            source["handoff"]["handoff_sha256"], request["handoff_sha256"]
+        )
+        self.assertEqual(request, result["review_request"])
+        self.assertEqual(
+            request["handoff_sha256"], result["review_dispatch"]["handoff_sha256"]
+        )
+
+    def test_structured_handoff_rejects_wrong_tree_and_malformed_present_v1(self):
+        wrong_tree = structured_controller(tree="e" * 40)
+        with (
+            mock.patch.object(transition, "_git", side_effect=["", HEAD, BRANCH, TREE]),
+            self.assertRaisesRegex(transition.ReviewTransitionError, "tree differs"),
+        ):
+            transition.dispatch_controller_result(
+                wrong_tree,
+                pr_number=169,
+                target_root=Path("/repo"),
+                resolver=lambda *args, **kwargs: self.binding,
+                dispatcher=mock.Mock(),
+            )
+        for field, value in (
+            ("handoff_sha256", "0" * 64),
+            ("head_sha", "e" * 40),
+            (
+                "qualification",
+                {"status": "PASS", "evidence_digest": "sha256:" + "f" * 64},
+            ),
+            ("changed_files", ["../unsafe.py"]),
+        ):
+            with self.subTest(field=field):
+                source = structured_controller()
+                source["handoff"][field] = value
+                with self.assertRaisesRegex(
+                    transition.ReviewTransitionError, "structured handoff is malformed"
+                ):
+                    transition._request_from_controller(source, self.binding)
+
+    def test_compatibility_controller_cannot_fall_back_to_legacy_handoff(self):
+        source = structured_controller()
+        del source["handoff"]
+        with self.assertRaisesRegex(
+            transition.ReviewTransitionError, "omitted structured handoff"
+        ):
+            transition._request_from_controller(source, self.binding)
+
+    def test_structured_security_requires_controller_code_pass(self):
+        source = structured_controller("SECURITY")
+        source["code_review"]["status"] = "MISSING"
+        with self.assertRaisesRegex(transition.ReviewTransitionError, "CODE PASS"):
+            transition._request_from_controller(source, self.binding)
 
     def test_security_cannot_dispatch_without_exact_code_pass(self):
         with (
@@ -333,9 +449,7 @@ class PRReviewDispatchTransitionTest(TestCase):
                         transition,
                         "resolve_exact_open_pr",
                     ) as resolver,
-                    self.assertRaisesRegex(
-                        transition.ReviewTransitionError, failure
-                    ),
+                    self.assertRaisesRegex(transition.ReviewTransitionError, failure),
                 ):
                     self.managed_gh.side_effect = ValueError(failure)
                     transition.review_dispatch_status(Path("/repo"), 169, "CODE")

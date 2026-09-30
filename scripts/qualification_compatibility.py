@@ -7,11 +7,12 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path, PurePosixPath
 import re
 import stat
+import subprocess
 import tempfile
-from typing import Callable
+from collections.abc import Callable
+from pathlib import Path, PurePosixPath
 
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -19,6 +20,7 @@ _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _MAX_PROOF_BYTES = 16 * 1024 * 1024
 _MAX_ENVELOPE_BYTES = 1024 * 1024
 _RELATIVE = Path(".context/evidence/controller-compatibility/v1")
+_TRUSTED_GIT = "/usr/bin/git"
 
 
 class CompatibilityError(RuntimeError):
@@ -92,11 +94,47 @@ def _read_file(root: Path, path: Path, limit: int) -> bytes:
     return data
 
 
-def _controller_bytes(controller_path: Path) -> bytes:
+def _controller_bytes(controller_path: Path, base_sha: str) -> bytes:
     controller = Path(controller_path)
     if controller.name != "repoctl.py" or controller.parent.name != "scripts":
         raise CompatibilityError("trusted controller path is invalid")
-    return _read_file(controller.parent.parent, controller, _MAX_PROOF_BYTES)
+    if not isinstance(base_sha, str) or _SHA.fullmatch(base_sha) is None:
+        raise CompatibilityError("trusted controller base SHA is invalid")
+    root = controller.parent.parent.resolve(strict=True)
+    on_disk = _read_file(root, controller, _MAX_PROOF_BYTES)
+    environment = {
+        name: value for name, value in os.environ.items() if not name.startswith("GIT_")
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    environment["PATH"] = "/usr/bin:/bin"
+
+    def git_bytes(*args: str) -> bytes:
+        try:
+            result = subprocess.run(
+                [_TRUSTED_GIT, "-C", str(root), *args],
+                capture_output=True,
+                check=False,
+                timeout=30,
+                env=environment,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise CompatibilityError("trusted controller Git lookup failed") from exc
+        if result.returncode != 0:
+            raise CompatibilityError("trusted controller Git lookup failed")
+        return result.stdout
+
+    try:
+        git_root = Path(
+            git_bytes("rev-parse", "--show-toplevel").decode("utf-8").strip()
+        ).resolve(strict=True)
+    except (OSError, UnicodeDecodeError) as exc:
+        raise CompatibilityError("trusted controller repository is invalid") from exc
+    if git_root != root or git_bytes("cat-file", "-t", base_sha).strip() != b"commit":
+        raise CompatibilityError("trusted controller base commit is invalid")
+    committed = git_bytes("cat-file", "blob", f"{base_sha}:scripts/repoctl.py")
+    if len(committed) > _MAX_PROOF_BYTES or on_disk != committed:
+        raise CompatibilityError("trusted controller differs from exact base Git blob")
+    return on_disk
 
 
 def _store_once(root: Path, relative: Path, data: bytes) -> Path:
@@ -340,7 +378,7 @@ def verify_envelope(
         raise CompatibilityError("archived qualification is not an object")
     if audit.get("head_sha") != head_sha or audit.get("base_sha") != base_sha:
         raise CompatibilityError("archived performance audit binding differs")
-    controller_digest = _digest(_controller_bytes(controller_path))
+    controller_digest = _digest(_controller_bytes(controller_path, base_sha))
     expected = _payload(
         repository,
         pr_number,
@@ -399,7 +437,7 @@ def create_envelope(
         raise CompatibilityError("performance audit is not bound to exact PR")
     raw_digest = _digest(raw_bytes)
     audit_digest = _digest(audit_bytes)
-    controller_digest = _digest(_controller_bytes(controller_path))
+    controller_digest = _digest(_controller_bytes(controller_path, base_sha))
     payload = _payload(
         repository,
         pr_number,
@@ -450,40 +488,40 @@ def find_envelope(
     head_sha: str,
     tree_sha: str,
     controller_path: Path,
+    expected_digest: str,
     validate_raw: Callable[[Path], bool],
     validate_audit: Callable[[Path], bool],
 ) -> dict | None:
-    """Return a verified current envelope, never a self-declared status."""
+    """Verify only the envelope named by the fresh, process-local witness."""
     _check_binding(repository, pr_number, base_sha, head_sha, tree_sha)
+    if (
+        not isinstance(expected_digest, str)
+        or _DIGEST.fullmatch(expected_digest) is None
+    ):
+        raise CompatibilityError("expected compatibility envelope digest is invalid")
     root = root.resolve(strict=True)
-    directory = _under_root(root, _envelope_dir(pr_number, head_sha))
-    if not directory.is_dir():
+    path = _under_root(
+        root,
+        _envelope_dir(pr_number, head_sha)
+        / (expected_digest.removeprefix("sha256:") + ".json"),
+    )
+    if not path.exists():
         return None
-    try:
-        candidates = sorted(directory.iterdir())
-    except OSError as exc:
-        raise CompatibilityError(
-            "compatibility envelope inventory is unreadable"
-        ) from exc
-    if len(candidates) > 64:
-        raise CompatibilityError("too many compatibility envelopes for exact PR")
-    for path in reversed(candidates):
-        try:
-            return verify_envelope(
-                root,
-                path,
-                repository=repository,
-                pr_number=pr_number,
-                base_sha=base_sha,
-                head_sha=head_sha,
-                tree_sha=tree_sha,
-                controller_path=controller_path,
-                validate_raw=validate_raw,
-                validate_audit=validate_audit,
-            )
-        except CompatibilityError:
-            continue
-    return None
+    result = verify_envelope(
+        root,
+        path,
+        repository=repository,
+        pr_number=pr_number,
+        base_sha=base_sha,
+        head_sha=head_sha,
+        tree_sha=tree_sha,
+        controller_path=controller_path,
+        validate_raw=validate_raw,
+        validate_audit=validate_audit,
+    )
+    if result["envelope_sha256"] != expected_digest:
+        raise CompatibilityError("compatibility envelope witness digest differs")
+    return result
 
 
 def archive_head_artifacts(

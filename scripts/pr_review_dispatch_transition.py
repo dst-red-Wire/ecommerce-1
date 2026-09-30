@@ -20,6 +20,7 @@ from typing import Any
 if __package__:
     from .chatgpt_review_dispatcher import (
         ReviewDispatchError,
+        canonical_structured_handoff,
         dispatch_review_request,
         dispatch_status,
         github_owner_marker_lookup,
@@ -35,6 +36,7 @@ if __package__:
 else:
     from chatgpt_review_dispatcher import (
         ReviewDispatchError,
+        canonical_structured_handoff,
         dispatch_review_request,
         dispatch_status,
         github_owner_marker_lookup,
@@ -192,10 +194,16 @@ def _request_from_controller(
         or not isinstance(original.get("handoff"), str)
         or not isinstance(original.get("handoff_sha256"), str)
         or _DIGEST.fullmatch(original["handoff_sha256"]) is None
+        or original["handoff_bytes"] != len(original["handoff"].encode("utf-8"))
         or hashlib.sha256(original["handoff"].encode("utf-8")).hexdigest()
         != original["handoff_sha256"]
     ):
         raise ReviewTransitionError("trusted controller review request is malformed")
+    if (
+        controller.get("review_kind", original["review_kind"])
+        != original["review_kind"]
+    ):
+        raise ReviewTransitionError("trusted controller review kind conflicts")
     if original["review_kind"] == "SECURITY":
         code = controller.get("code_review")
         if (
@@ -205,7 +213,7 @@ def _request_from_controller(
             or code.get("blocking_findings") != 0
         ):
             raise ReviewTransitionError("SECURITY dispatch requires exact CODE PASS")
-    return {
+    request = {
         **original,
         "schema_version": 1,
         "repository": binding.repository,
@@ -213,6 +221,30 @@ def _request_from_controller(
         "base_sha": binding.base_sha,
         "head_branch": binding.head_branch,
     }
+    if "compatibility_digest" in qualification and "handoff" not in controller:
+        raise ReviewTransitionError("trusted controller omitted structured handoff")
+    if "handoff" in controller:
+        try:
+            handoff = canonical_structured_handoff(
+                controller["handoff"],
+                binding,
+                qualification_digest=qualification.get("compatibility_digest"),
+            )
+        except ReviewDispatchError as exc:
+            raise ReviewTransitionError(
+                "trusted structured handoff is malformed"
+            ) from exc
+        if controller["handoff"]["review_kind"] != request["review_kind"]:
+            raise ReviewTransitionError(
+                "trusted structured handoff review kind conflicts"
+            )
+        encoded = handoff.encode("utf-8")
+        request.update(
+            handoff=handoff,
+            handoff_bytes=len(encoded),
+            handoff_sha256=hashlib.sha256(encoded).hexdigest(),
+        )
+    return request
 
 
 def dispatch_controller_result(
@@ -269,6 +301,13 @@ def dispatch_controller_result(
             "resolved exact PR number differs from requested PR"
         )
     request = _request_from_controller(controller, binding)
+    if "handoff" in controller:
+        tree_sha = _git(target_root, "show", "-s", "--format=%T", "HEAD")
+        if controller["handoff"]["tree_sha"] != tree_sha:
+            raise ReviewTransitionError(
+                "structured handoff tree differs from exact HEAD"
+            )
+    controller["review_request"] = request
     if dry_run:
         controller["review_dispatch"] = {
             "status": "NOT_REQUESTED",

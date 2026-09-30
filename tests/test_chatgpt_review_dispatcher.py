@@ -17,6 +17,8 @@ BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
 NEXT_HEAD_SHA = "c" * 40
 PR = 169
+TREE_SHA = "d" * 40
+EVIDENCE_DIGEST = "sha256:" + "e" * 64
 
 
 class FakeTransport:
@@ -113,6 +115,42 @@ class ReviewDispatcherTests(unittest.TestCase):
             },
         }
 
+    def structured_request(self, kind="CODE"):
+        request = self.request(kind)
+        payload = pr_monitor.build_handoff(
+            repository=REPOSITORY,
+            pr=PR,
+            review_kind=kind,
+            base_sha=BASE_SHA,
+            head_sha=HEAD_SHA,
+            tree_sha=TREE_SHA,
+            changed_files=["scripts/repoctl.py"],
+            qualification_status="PASS",
+            qualification_evidence_digest=EVIDENCE_DIGEST,
+            previous_validated_verdict="CODE_PASS" if kind == "SECURITY" else None,
+            previous_head=HEAD_SHA if kind == "SECURITY" else None,
+        )
+        self.set_structured_text(request, payload)
+        return request
+
+    @staticmethod
+    def set_structured_text(request, payload, *, update_internal=False):
+        if update_internal:
+            unsigned = {
+                key: value for key, value in payload.items() if key != "handoff_sha256"
+            }
+            payload["handoff_sha256"] = hashlib.sha256(
+                json.dumps(
+                    unsigned, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                ).encode()
+            ).hexdigest()
+        text = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        request["handoff"] = text
+        request["handoff_bytes"] = len(text.encode())
+        request["handoff_sha256"] = hashlib.sha256(text.encode()).hexdigest()
+
     def proof(self, kind, *, binding=None):
         binding = binding or self.binding
         return {
@@ -153,6 +191,67 @@ class ReviewDispatcherTests(unittest.TestCase):
         artifact = json.loads(Path(result["outbox_path"]).read_text(encoding="utf-8"))
         self.assertEqual(request, artifact["request"])
         self.assertEqual(result["identity"], self.dispatch(request)["identity"])
+
+    def test_structured_v1_is_dispatched_and_outboxed_with_transport_digest(self):
+        request = self.structured_request()
+        payload = json.loads(request["handoff"])
+        transport = FakeTransport()
+        result = self.dispatch(request, transport=transport)
+        self.assertEqual("REQUESTED", result["state"])
+        self.assertEqual(request, transport.submissions[0][0])
+        self.assertEqual(request["handoff_sha256"], result["handoff_sha256"])
+        self.assertNotEqual(payload["handoff_sha256"], result["handoff_sha256"])
+        artifact = json.loads(Path(result["outbox_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(request, artifact["request"])
+
+    def test_structured_v1_rejects_tampering_even_with_recomputed_outer_digest(self):
+        for field, value, repair_internal in (
+            ("handoff_sha256", "0" * 64, False),
+            ("head_sha", NEXT_HEAD_SHA, True),
+            ("review_kind", "SECURITY", True),
+            ("changed_files", ["../unsafe.py"], True),
+            ("delta", {"changed_file_count": True}, True),
+            ("qualification", {"status": "PASS", "evidence_digest": "wrong"}, True),
+        ):
+            with self.subTest(field=field):
+                request = self.structured_request()
+                payload = json.loads(request["handoff"])
+                payload[field] = value
+                self.set_structured_text(
+                    request, payload, update_internal=repair_internal
+                )
+                with self.assertRaises(dispatcher.ReviewDispatchError):
+                    self.dispatch(request)
+        self.assertFalse(self.outbox.exists())
+
+    def test_structured_v1_rejects_over_budget_before_outbox(self):
+        request = self.structured_request()
+        payload = json.loads(request["handoff"])
+        payload["changed_files"] = [
+            f"tests/{index:03d}-" + "x" * 35 + ".py" for index in range(220)
+        ]
+        payload["delta"]["changed_file_count"] = 220
+        self.set_structured_text(request, payload, update_internal=True)
+        self.assertGreater(request["handoff_bytes"], 8192)
+        with self.assertRaisesRegex(dispatcher.ReviewDispatchError, "byte budget"):
+            self.dispatch(request)
+        self.assertFalse(self.outbox.exists())
+
+    def test_structured_v1_security_still_requires_exact_owner_code_marker(self):
+        request = self.structured_request("SECURITY")
+        transport = FakeTransport()
+        waiting = self.dispatch(request, transport=transport)
+        self.assertEqual("WAITING_CODE_REVIEW", waiting["reason"])
+        self.assertEqual([], transport.submissions)
+        result = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lambda binding, kind: (
+                self.proof("CODE") if kind == "code" else None
+            ),
+        )
+        self.assertEqual("REQUESTED", result["state"])
+        self.assertEqual(request, transport.submissions[0][0])
 
     def test_tampered_request_artifact_cannot_be_reused_or_reported(self):
         request = self.request()
@@ -350,9 +449,7 @@ class ReviewDispatcherTests(unittest.TestCase):
             calls += 1
             if calls == 1:
                 return binding
-            raise ExactPRBindingChanged(
-                "HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA
-            )
+            raise ExactPRBindingChanged("HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA)
 
         stale = self.dispatch(self.request(), binding_revalidator=revalidate)
         self.assertEqual("SUPERSEDED", stale["state"])
@@ -373,9 +470,7 @@ class ReviewDispatcherTests(unittest.TestCase):
             calls += 1
             if calls <= 2:
                 return binding
-            raise ExactPRBindingChanged(
-                "HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA
-            )
+            raise ExactPRBindingChanged("HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA)
 
         result = self.dispatch(
             self.request(),

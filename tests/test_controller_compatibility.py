@@ -5,12 +5,12 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import yaml
@@ -40,6 +40,37 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
         (self.base / "scripts").mkdir(parents=True)
         self.controller = self.base / "scripts/repoctl.py"
         self.controller.write_text("trusted base controller\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "init", "-q", str(self.base)],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.base), "add", "scripts/repoctl.py"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.base),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "exact base",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        self.BASE = subprocess.check_output(
+            ["git", "-C", str(self.base), "rev-parse", "HEAD"], text=True
+        ).strip()
         self.raw = self.target / ".context/evidence" / f"{self.HEAD}.json"
         self.audit = self.target / ".context/performance" / f"{self.HEAD}.json"
         self.proof = {
@@ -126,6 +157,15 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
             **self.arguments(),
         )
 
+    def find(self, digest: str, **overrides):
+        arguments = self.arguments()
+        arguments.update(overrides)
+        return compatibility.find_envelope(
+            self.target,
+            expected_digest=digest,
+            **arguments,
+        )
+
     def test_archived_base_proof_and_gate_provenance_are_reverified(self):
         created = self.create()
         self.assertEqual("PASS", created["status"])
@@ -140,14 +180,13 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
             self.proof["created_at_epoch"],
             envelope["qualification"]["created_at_epoch"],
         )
-        found = compatibility.find_envelope(self.target, **self.arguments())
+        found = self.find(created["envelope_sha256"])
         self.assertEqual(created["envelope_sha256"], found["envelope_sha256"])
 
     def test_head_only_envelope_does_not_grant_delivery_authority(self):
-        self.create()
-        arguments = self.arguments()
-        arguments["validate_raw"] = lambda _path: False
-        self.assertIsNone(compatibility.find_envelope(self.target, **arguments))
+        created = self.create()
+        with self.assertRaises(compatibility.CompatibilityError):
+            self.find(created["envelope_sha256"], validate_raw=lambda _path: False)
 
     def test_tampered_envelope_and_raw_archive_fail_closed(self):
         created = self.create()
@@ -173,7 +212,70 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
         )
         raw_archive = self.target / created["raw_proof_path"]
         raw_archive.write_text(raw_archive.read_text() + " ", encoding="utf-8")
-        self.assertIsNone(compatibility.find_envelope(self.target, **self.arguments()))
+        with self.assertRaises(compatibility.CompatibilityError):
+            self.find(created["envelope_sha256"])
+
+    def test_witness_selects_one_envelope_and_corruption_never_falls_back(self):
+        first = self.create()
+        self.proof["created_at_epoch"] += 1
+        self.raw.write_text(json.dumps(self.proof), encoding="utf-8")
+        second = self.create()
+        self.assertNotEqual(first["envelope_sha256"], second["envelope_sha256"])
+        self.assertEqual(
+            first["envelope_sha256"],
+            self.find(first["envelope_sha256"])["envelope_sha256"],
+        )
+        self.assertEqual(
+            second["envelope_sha256"],
+            self.find(second["envelope_sha256"])["envelope_sha256"],
+        )
+        self.assertIsNone(self.find("sha256:" + "0" * 64))
+        with self.assertRaises(compatibility.CompatibilityError):
+            self.find("sha256:invalid")
+
+        (self.target / first["path"]).write_text("invalid JSON", encoding="utf-8")
+        with self.assertRaises(compatibility.CompatibilityError):
+            self.find(first["envelope_sha256"])
+        self.assertEqual(
+            second["envelope_sha256"],
+            self.find(second["envelope_sha256"])["envelope_sha256"],
+        )
+
+    def test_inherited_path_cannot_substitute_trusted_git(self):
+        fake_bin = Path(self.temp.name) / "fake-bin"
+        fake_bin.mkdir()
+        fake_git = fake_bin / "git"
+        marker = Path(self.temp.name) / "fake-git-was-called"
+        fake_git.write_text(
+            f"#!/bin/sh\nprintf called > {marker}\nexit 79\n",
+            encoding="utf-8",
+        )
+        fake_git.chmod(0o755)
+        with mock.patch.dict(
+            compatibility.os.environ, {"PATH": f"{fake_bin}:/usr/bin:/bin"}
+        ):
+            created = self.create()
+            self.assertEqual(
+                created["envelope_sha256"],
+                self.find(created["envelope_sha256"])["envelope_sha256"],
+            )
+        self.assertFalse(marker.exists())
+
+    def test_mutated_trusted_controller_is_rejected_by_git_blob_comparison(self):
+        created = self.create()
+        self.controller.write_text("modified base controller\n", encoding="utf-8")
+        with self.assertRaisesRegex(
+            compatibility.CompatibilityError, "differs from exact base Git blob"
+        ):
+            compatibility.verify_envelope(
+                self.target,
+                self.target / created["path"],
+                **self.arguments(),
+            )
+        with self.assertRaisesRegex(
+            compatibility.CompatibilityError, "differs from exact base Git blob"
+        ):
+            self.create()
 
     def test_wrong_pr_or_tree_cannot_reuse_envelope(self):
         created = self.create()
@@ -181,9 +283,11 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
         for field, value in (("pr_number", self.PR + 1), ("tree_sha", "e" * 40)):
             arguments = self.arguments()
             arguments[field] = value
-            with self.subTest(field=field):
-                with self.assertRaises(compatibility.CompatibilityError):
-                    compatibility.verify_envelope(self.target, envelope, **arguments)
+            with (
+                self.subTest(field=field),
+                self.assertRaises(compatibility.CompatibilityError),
+            ):
+                compatibility.verify_envelope(self.target, envelope, **arguments)
 
     def test_head_proof_is_archived_as_data_before_base_requalification(self):
         raw_bytes, audit_bytes = self.raw.read_bytes(), self.audit.read_bytes()
@@ -263,18 +367,22 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
                     RuntimeError, "not executing the exact-base trusted controller"
                 ):
                     repoctl._trusted_pr_execution_context(required=True)
-                with mock.patch.dict(
-                    repoctl.os.environ,
-                    {"REPOCTL_TRUSTED_BASE_SHA": "c" * 40},
+                with (
+                    mock.patch.dict(
+                        repoctl.os.environ,
+                        {"REPOCTL_TRUSTED_BASE_SHA": "c" * 40},
+                    ),
+                    self.assertRaises(RuntimeError),
                 ):
-                    with self.assertRaises(RuntimeError):
-                        repoctl._toolchain_policy_root()
-                with mock.patch.dict(
-                    repoctl.os.environ,
-                    {"REPOCTL_TRUSTED_CONTROLLER": str(copied_head_module)},
+                    repoctl._toolchain_policy_root()
+                with (
+                    mock.patch.dict(
+                        repoctl.os.environ,
+                        {"REPOCTL_TRUSTED_CONTROLLER": str(copied_head_module)},
+                    ),
+                    self.assertRaises(RuntimeError),
                 ):
-                    with self.assertRaises(RuntimeError):
-                        repoctl._toolchain_policy_root()
+                    repoctl._toolchain_policy_root()
                 controller.write_text("modified base controller\n", encoding="utf-8")
                 with self.assertRaises(RuntimeError):
                     repoctl._toolchain_policy_root()
