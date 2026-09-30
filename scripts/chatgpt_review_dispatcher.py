@@ -41,6 +41,13 @@ OUTBOX_ROOT = ROOT / ".context/review-dispatch"
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_LEGACY_BOOTSTRAP_SCOPE = (
+    "dst-red-Wire/ecommerce-1",
+    172,
+    "main",
+    "ced96d663c1dca1c885d450104f344c10431738d",
+    "feat/controller-compat-bootstrap",
+)
 _REQUEST_KEYS = frozenset(
     {
         "schema_version",
@@ -136,6 +143,43 @@ def _sha(value: Any) -> bool:
 
 def _digest(value: Any) -> bool:
     return isinstance(value, str) and _DIGEST.fullmatch(value) is not None
+
+
+def validate_legacy_bootstrap_binding(
+    value: str | None, binding: ExactPRBinding
+) -> None:
+    """Validate explicit transport-only consent for this exact bootstrap PR."""
+    if (
+        not isinstance(binding, ExactPRBinding)
+        or (
+            binding.repository,
+            binding.pr_number,
+            binding.base,
+            binding.base_sha,
+            binding.head_branch,
+        )
+        != _LEGACY_BOOTSTRAP_SCOPE
+        or not _sha(binding.head_sha)
+        or type(value) is not str
+        or value != f"{binding.base_sha}:{binding.head_sha}"
+    ):
+        raise ReviewDispatchError(
+            "legacy handoff requires the explicit exact bootstrap base:head binding"
+        )
+
+
+def _handoff_protocol(
+    request: Mapping[str, Any],
+    binding: ExactPRBinding,
+    legacy_bootstrap_binding: str | None,
+) -> str:
+    """Require invocation consent independently of any saved outbox record."""
+    if legacy_bootstrap_binding is not None:
+        validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
+    if request["handoff"].startswith("{"):
+        return "structured-v1"
+    validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
+    return "legacy-bootstrap"
 
 
 def _load_policy(path: Path) -> dict[str, Any]:
@@ -559,6 +603,33 @@ def _read(path: Path, identity: str) -> dict[str, Any]:
             }
         )
         _validate_request(request, binding, _POLICY)
+        structured = request["handoff"].startswith("{")
+        if "handoff_protocol" not in value and "legacy_bootstrap_binding" not in value:
+            # Historical data can be read or superseded without invocation consent.
+            value["handoff_protocol"] = (
+                "structured-v1" if structured else "legacy-historical"
+            )
+            value["legacy_bootstrap_binding"] = None
+        protocol = value.get("handoff_protocol")
+        if "legacy_bootstrap_binding" not in value:
+            raise ReviewDispatchError("review dispatch protocol trace is incomplete")
+        if structured:
+            if (
+                protocol != "structured-v1"
+                or value["legacy_bootstrap_binding"] is not None
+            ):
+                raise ReviewDispatchError("review dispatch protocol trace was changed")
+        elif protocol == "legacy-historical":
+            if value["legacy_bootstrap_binding"] is not None:
+                raise ReviewDispatchError(
+                    "historical legacy record claims an exception"
+                )
+        elif protocol == "legacy-bootstrap":
+            validate_legacy_bootstrap_binding(
+                value["legacy_bootstrap_binding"], binding
+            )
+        else:
+            raise ReviewDispatchError("review dispatch protocol trace was changed")
         if dispatch_identity(request) != identity or any(
             value.get(key) != request[key]
             for key in ("repository", "pr", "head_sha", "review_kind", "handoff_sha256")
@@ -929,6 +1000,7 @@ def dispatch_review_request(
     request: Mapping[str, Any],
     *,
     binding: ExactPRBinding,
+    legacy_bootstrap_binding: str | None = None,
     transport: ReviewTransport | None = None,
     outbox_root: Path = OUTBOX_ROOT,
     policy_path: Path = POLICY_PATH,
@@ -947,6 +1019,8 @@ def dispatch_review_request(
     if not isinstance(binding, ExactPRBinding):
         raise ReviewDispatchError("exact PR binding is required")
     _validate_request(request, binding, policy)
+    protocol = _handoff_protocol(request, binding, legacy_bootstrap_binding)
+    trace_binding = legacy_bootstrap_binding if protocol == "legacy-bootstrap" else None
     identity = dispatch_identity(request)
     root = Path(outbox_root).absolute()
     _assert_no_symlink(root)
@@ -974,7 +1048,20 @@ def dispatch_review_request(
         _supersede_old_heads(pr_root, request["head_sha"])
         if path.exists():
             record = _read(path, identity)
-            if record.get("request") != request:
+            if (
+                record.get("request") == request
+                and record.get("handoff_protocol") == "legacy-historical"
+                and protocol == "legacy-bootstrap"
+            ):
+                # Fresh explicit consent was validated before any outbox read.
+                # Preserve submission metadata to avoid submitting the same work twice.
+                record["handoff_protocol"] = protocol
+                record["legacy_bootstrap_binding"] = trace_binding
+            if (
+                record.get("request") != request
+                or record.get("handoff_protocol") != protocol
+                or record.get("legacy_bootstrap_binding") != trace_binding
+            ):
                 raise ReviewDispatchError(
                     "review dispatch record does not match request"
                 )
@@ -988,6 +1075,8 @@ def dispatch_review_request(
                 "review_kind": request["review_kind"],
                 "handoff_sha256": request["handoff_sha256"],
                 "request": dict(request),
+                "handoff_protocol": protocol,
+                "legacy_bootstrap_binding": trace_binding,
                 "state": "NOT_REQUESTED",
                 "reason": "",
                 "submission_id": "",

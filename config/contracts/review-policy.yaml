@@ -230,6 +230,25 @@ repository_delivery:
         local_transport: unavailable
         consumer: external-orchestrator
         verdict_authority: false
+      legacy_bootstrap_exception:
+        default: forbidden
+        activation: explicit-invocation-only
+        cli_argument: --legacy-bootstrap-binding
+        make_variable: LEGACY_BOOTSTRAP_BINDING
+        argument_format: exact-base-sha:exact-head-sha
+        repository: dst-red-Wire/ecommerce-1
+        pr: 172
+        base: main
+        base_sha: ced96d663c1dca1c885d450104f344c10431738d
+        head_branch: feat/controller-compat-bootstrap
+        head_sha: exact-live-GitHub-and-clean-checkout-binding
+        allowed_only_when: trusted-controller-omits-structured-handoff-and-compatibility-digest
+        scope: transport-format-only
+        qualification: exact-base-controller-PASS
+        outbox_binding: audit-data-never-invocation-authorization
+        changed_binding: reject
+        malformed_v1: reject-without-fallback
+        review_and_merge_rules: unchanged
       fail_if_payload_unavailable: true
       consumer: external-automatic
       invocation_binding: exact-pr-and-head-sha

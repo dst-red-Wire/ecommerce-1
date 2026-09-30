@@ -32,6 +32,7 @@ _BOOTSTRAP_TOOLCHAIN_POLICY = _RAW_TOOLCHAIN_LOCK.get("capability_policy", {})
 STATES = {"PASS", "FAIL", "BLOCKED", "SKIP", "UNSUPPORTED"}
 CLASSIFICATIONS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("classifications", []))
 REQUIREMENTS = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("requirements", []))
+SUPPORTED_REQUIREMENTS = frozenset({"required-static", "optional-runtime", "optional-tooling"})
 MANAGED_PROVISION_TYPES = set(_BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_provision_types", []))
 _MANAGED_INSTALL_ROOT = _BOOTSTRAP_TOOLCHAIN_POLICY.get("managed_install_root", {})
 _MANAGED_ROOT_ENVIRONMENT = _MANAGED_INSTALL_ROOT.get("environment", "ECOMMERCE_TOOL_HOME")
@@ -145,25 +146,26 @@ def _parse_ansible_collection_projection(path: Path | None = None) -> dict[str, 
     return result
 
 
-def validate_toolchain_projections(contract: dict | None = None) -> None:
-    lock = contract or load_toolchain_lock()
+def validate_toolchain_projections(contract: dict | None = None, *, root: Path = ROOT) -> None:
+    """Validate one repository tree with this controller's parser, never imported HEAD code."""
+    lock = contract if contract is not None else load_toolchain_lock(root / "config/contracts/toolchain-lock.json")
 
-    projected_versions = _parse_versions_env(VERSIONS)
+    projected_versions = _parse_versions_env(root / "config/toolchain/versions.env")
     if projected_versions != lock["versions"]:
         raise ValueError("config/toolchain/versions.env drifted from central toolchain lock")
 
-    projected_collections = _parse_ansible_collection_projection()
+    projected_collections = _parse_ansible_collection_projection(root / "platform/ansible/requirements.yml")
     expected_collections = lock.get("ansible_collections", {})
     if projected_collections != expected_collections:
         raise ValueError("platform/ansible/requirements.yml drifted from central toolchain lock")
 
-    projected_capabilities = load_contract()
+    projected_capabilities = load_contract(root / "config/toolchain/capabilities.json")
     expected_command_capabilities = lock.get("capability_policy", {}).get("command_capabilities", {})
     if projected_capabilities.get("command_capabilities", {}) != expected_command_capabilities:
         raise ValueError("config/toolchain/capabilities.json command_capabilities drifted from central toolchain lock")
 
     ansible_config = lock.get("native_tool_configs", {}).get("ansible", {})
-    ansible_projection = ROOT / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
+    ansible_projection = root / str(ansible_config.get("projection", "platform/ansible/ansible.cfg"))
     parser = configparser.ConfigParser()
     parser.read(ansible_projection, encoding="utf-8")
     expected_sections = ansible_config.get("sections", {})
@@ -181,19 +183,19 @@ def validate_toolchain_projections(contract: dict | None = None) -> None:
     bazel = lock.get("native_tool_configs", {}).get("bazel", {})
     version_ref = bazel.get("version_ref")
     expected_bazel = lock["versions"].get(version_ref) if isinstance(version_ref, str) else None
-    if not expected_bazel or (ROOT / ".bazelversion").read_text(encoding="utf-8").strip() != expected_bazel:
+    if not expected_bazel or (root / ".bazelversion").read_text(encoding="utf-8").strip() != expected_bazel:
         raise ValueError(".bazelversion drifted from central toolchain lock")
 
     expected_bazelrc = [str(line) for line in bazel.get("bazelrc_lines", [])]
     actual_bazelrc = [
         line.rstrip()
-        for line in (ROOT / ".bazelrc").read_text(encoding="utf-8").splitlines()
+        for line in (root / ".bazelrc").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     if actual_bazelrc != expected_bazelrc:
         raise ValueError(".bazelrc drifted from central toolchain lock")
 
-    seed = SEED_LOCK.read_text(encoding="utf-8").lower()
+    seed = (root / "config/python/requirements.lock").read_text(encoding="utf-8").lower()
     roots = lock.get("language_contracts", {}).get("python", {}).get("seed_roots", {})
     for package, version_key in roots.items():
         expected = lock["versions"].get(version_key)
@@ -219,17 +221,38 @@ def load_contract(path: Path = CONTRACT) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def validate_contract(contract: dict, versions: dict[str, str] | None = None) -> None:
+def validate_contract(
+    contract: dict,
+    versions: dict[str, str] | None = None,
+    *,
+    root: Path = ROOT,
+    allowed_requirements: list[str] | None = None,
+) -> None:
     """Fail closed when a gate command is outside the explicit toolchain closure.
 
     Gate requirements are intentionally declarative. Trying to infer arbitrary
     subprocesses or shell fragments would create a misleading, incomplete parser.
     Tests and review keep this small authority aligned with executable gate paths.
     """
-    versions = versions or dict(load_toolchain_lock()["versions"])
+    versions = (
+        versions
+        if versions is not None
+        else dict(load_toolchain_lock(root / "config/contracts/toolchain-lock.json")["versions"])
+    )
+    if allowed_requirements is not None and not isinstance(allowed_requirements, list):
+        raise ValueError("toolchain capability requirements must be a list")
+    declared_requirements = list(allowed_requirements) if allowed_requirements is not None else sorted(REQUIREMENTS)
+    if (
+        not declared_requirements
+        or any(not isinstance(value, str) for value in declared_requirements)
+        or len(declared_requirements) != len(set(declared_requirements))
+        or not set(declared_requirements) <= SUPPORTED_REQUIREMENTS
+    ):
+        raise ValueError("toolchain declares an unsupported capability requirement")
+    requirements = set(declared_requirements)
     graph = Graph(contract["capabilities"])
     for name, item in graph.items.items():
-        if item.get("requirement") not in REQUIREMENTS:
+        if item.get("requirement") not in requirements:
             raise ValueError(f"{name}: invalid or missing requirement")
     quality_names = ("ruff", "oxfmt", "oxlint")
     quality_items = [graph.items[name] for name in quality_names if name in graph.items]
@@ -340,6 +363,20 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
     known = set(commands) | set(command_aliases) | set(external)
     if not contract.get("gate_requirements"):
         raise ValueError("gate_requirements must not be empty")
+    # Optional agent tooling is declarative only. A real gate may neither
+    # name it directly nor acquire it through a runtime dependency/provider.
+    def uses_optional_tool(name: str, seen: set[str]) -> bool:
+        if name in seen or name not in graph.items:
+            return False
+        seen.add(name)
+        item = graph.items[name]
+        if item.get("requirement") == "optional-tooling":
+            return True
+        dependencies = list(item.get("requires", []))
+        if item.get("provider"):
+            dependencies.append(item["provider"])
+        return any(uses_optional_tool(dependency, seen) for dependency in dependencies)
+
     for gate, required in contract["gate_requirements"].items():
         if not required:
             raise ValueError(f"gate {gate}: requirements must not be empty")
@@ -347,9 +384,21 @@ def validate_contract(contract: dict, versions: dict[str, str] | None = None) ->
         if unknown:
             raise ValueError(f"gate {gate}: undeclared commands: {', '.join(unknown)}")
 
+        for command in required:
+            capability = commands.get(command) or command_aliases.get(command)
+            if capability is None:
+                if gate == "optional-agent-tooling":
+                    raise ValueError(f"{gate}: {command} is not optional tooling")
+                continue
+            optional = uses_optional_tool(capability, set())
+            if gate == "optional-agent-tooling" and not optional:
+                raise ValueError(f"{gate}: {command} is not optional tooling")
+            if gate != "optional-agent-tooling" and optional:
+                raise ValueError(f"gate {gate}: optional tooling cannot enter a real gate: {command}")
+
     declared = {command for required in contract["gate_requirements"].values() for command in required}
     for relative in contract.get("gate_sources", []):
-        source = ROOT / relative
+        source = root / relative
         tree = ast.parse(source.read_text(encoding="utf-8"), filename=relative)
         discovered: set[str] = set()
         for node in ast.walk(tree):

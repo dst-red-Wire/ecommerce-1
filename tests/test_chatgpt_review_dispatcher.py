@@ -45,7 +45,7 @@ class FakeTransport:
             "identity": identity,
             "provider": "ChatGPT",
             "kind": self.submissions[0][0]["review_kind"].lower(),
-            "pr": PR,
+            "pr": self.submissions[0][0]["pr"],
             "head_sha": self.submissions[0][0]["head_sha"],
             "status": "PASS",
             "blocking_findings": 0,
@@ -65,10 +65,10 @@ class ReviewDispatcherTests(unittest.TestCase):
             REPOSITORY, PR, "main", BASE_SHA, "feature/reviews", HEAD_SHA
         )
 
-    def request(self, kind="CODE", *, binding=None):
+    def legacy_request(self, kind="CODE", *, binding=None):
         binding = binding or self.binding
         previous = {
-            "head_sha": BASE_SHA if kind == "CODE" else binding.head_sha,
+            "head_sha": binding.base_sha if kind == "CODE" else binding.head_sha,
             "validated_verdict": "" if kind == "CODE" else "CODE_PASS",
         }
         current = {"head_sha": binding.head_sha, "exact_head_verified": True}
@@ -115,20 +115,24 @@ class ReviewDispatcherTests(unittest.TestCase):
             },
         }
 
-    def structured_request(self, kind="CODE"):
-        request = self.request(kind)
+    def request(self, kind="CODE", *, binding=None):
+        return self.structured_request(kind, binding=binding)
+
+    def structured_request(self, kind="CODE", *, binding=None):
+        binding = binding or self.binding
+        request = self.legacy_request(kind, binding=binding)
         payload = pr_monitor.build_handoff(
-            repository=REPOSITORY,
-            pr=PR,
+            repository=binding.repository,
+            pr=binding.pr_number,
             review_kind=kind,
-            base_sha=BASE_SHA,
-            head_sha=HEAD_SHA,
+            base_sha=binding.base_sha,
+            head_sha=binding.head_sha,
             tree_sha=TREE_SHA,
             changed_files=["scripts/repoctl.py"],
             qualification_status="PASS",
             qualification_evidence_digest=EVIDENCE_DIGEST,
             previous_validated_verdict="CODE_PASS" if kind == "SECURITY" else None,
-            previous_head=HEAD_SHA if kind == "SECURITY" else None,
+            previous_head=binding.head_sha if kind == "SECURITY" else None,
         )
         self.set_structured_text(request, payload)
         return request
@@ -177,6 +181,299 @@ class ReviewDispatcherTests(unittest.TestCase):
         }
         arguments.update(overrides)
         return dispatcher.dispatch_review_request(request, **arguments)
+
+    @staticmethod
+    def bootstrap_binding():
+        return ExactPRBinding(
+            REPOSITORY,
+            172,
+            "main",
+            "ced96d663c1dca1c885d450104f344c10431738d",
+            "feat/controller-compat-bootstrap",
+            HEAD_SHA,
+        )
+
+    def test_legacy_handoff_is_rejected_without_explicit_bootstrap_binding(self):
+        transport = FakeTransport()
+        for binding in (self.binding, self.bootstrap_binding()):
+            with (
+                self.subTest(binding=binding),
+                self.assertRaisesRegex(
+                    dispatcher.ReviewDispatchError, "explicit exact bootstrap"
+                ),
+            ):
+                self.dispatch(
+                    self.legacy_request(binding=binding),
+                    binding=binding,
+                    transport=transport,
+                )
+        self.assertFalse(self.outbox.exists())
+        self.assertEqual([], transport.submissions)
+
+    def test_explicit_bootstrap_is_idempotent_but_outbox_never_grants_opt_in(self):
+        binding = self.bootstrap_binding()
+        consent = f"{binding.base_sha}:{binding.head_sha}"
+        request = self.legacy_request(binding=binding)
+        transport = FakeTransport()
+        first = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+        )
+        second = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+        )
+        self.assertEqual("legacy-bootstrap", first["handoff_protocol"])
+        self.assertEqual(consent, first["legacy_bootstrap_binding"])
+        self.assertIs(first["verdict_authority"], False)
+        self.assertEqual(first["identity"], second["identity"])
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one"], transport.polls)
+        artifact = Path(first["outbox_path"])
+        saved = artifact.read_bytes()
+        with self.assertRaisesRegex(
+            dispatcher.ReviewDispatchError, "explicit exact bootstrap"
+        ):
+            self.dispatch(request, binding=binding, transport=transport)
+        self.assertEqual(saved, artifact.read_bytes())
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one"], transport.polls)
+        status = dispatcher.dispatch_status(
+            binding,
+            "CODE",
+            outbox_root=self.outbox,
+            binding_revalidator=lambda value: value,
+        )
+        self.assertIs(status["verdict_authority"], False)
+        self.assertEqual(consent, status["records"][0]["legacy_bootstrap_binding"])
+
+    def test_bootstrap_exception_rejects_wrong_scope_or_stale_exact_pair(self):
+        binding = self.bootstrap_binding()
+        consent = f"{binding.base_sha}:{binding.head_sha}"
+        wrong_fields = (
+            {"repository": "other/ecommerce-1"},
+            {"pr_number": 171},
+            {"base": "release"},
+            {"base_sha": BASE_SHA},
+            {"head_branch": "feature/other"},
+            {"head_sha": NEXT_HEAD_SHA},
+        )
+        for change in wrong_fields:
+            changed = ExactPRBinding(**{**binding.as_dict(), **change})
+            with (
+                self.subTest(change=change),
+                self.assertRaises(dispatcher.ReviewDispatchError),
+            ):
+                self.dispatch(
+                    self.legacy_request(binding=changed),
+                    binding=changed,
+                    legacy_bootstrap_binding=consent,
+                )
+        for value in (None, "", HEAD_SHA, consent.upper(), True, consent + " "):
+            with (
+                self.subTest(value=value),
+                self.assertRaises(dispatcher.ReviewDispatchError),
+            ):
+                dispatcher.validate_legacy_bootstrap_binding(value, binding)
+        new_base = ExactPRBinding(
+            REPOSITORY, 172, "main", BASE_SHA, binding.head_branch, HEAD_SHA
+        )
+        with self.assertRaises(dispatcher.ReviewDispatchError):
+            dispatcher.validate_legacy_bootstrap_binding(
+                f"{BASE_SHA}:{HEAD_SHA}", new_base
+            )
+        self.assertFalse(self.outbox.exists())
+
+    def test_bootstrap_exception_cannot_hide_malformed_structured_handoff(self):
+        binding = self.bootstrap_binding()
+        request = self.structured_request(binding=binding)
+        payload = json.loads(request["handoff"])
+        payload["qualification"]["status"] = "FAIL"
+        self.set_structured_text(request, payload, update_internal=True)
+        with self.assertRaises(dispatcher.ReviewDispatchError):
+            self.dispatch(
+                request,
+                binding=binding,
+                legacy_bootstrap_binding=f"{binding.base_sha}:{binding.head_sha}",
+            )
+        self.assertFalse(self.outbox.exists())
+
+    def test_bootstrap_exception_requires_live_unchanged_binding(self):
+        binding = self.bootstrap_binding()
+        transport = FakeTransport()
+        for reason in ("HEAD_CHANGED", "BASE_CHANGED"):
+            with self.subTest(reason=reason):
+                revalidate = mock.Mock(
+                    side_effect=ExactPRBindingChanged(
+                        reason, current_head_sha=NEXT_HEAD_SHA
+                    )
+                )
+                arguments = {
+                    "binding": binding,
+                    "legacy_bootstrap_binding": f"{binding.base_sha}:{binding.head_sha}",
+                    "binding_revalidator": revalidate,
+                    "transport": transport,
+                }
+                if reason == "HEAD_CHANGED":
+                    result = self.dispatch(
+                        self.legacy_request(binding=binding), **arguments
+                    )
+                    self.assertEqual("SUPERSEDED", result["state"])
+                else:
+                    with self.assertRaises(dispatcher.ReviewDispatchError):
+                        self.dispatch(self.legacy_request(binding=binding), **arguments)
+                self.assertFalse(self.outbox.exists())
+        self.assertEqual([], transport.submissions)
+
+    def test_bootstrap_security_requires_exact_owner_code_pass(self):
+        binding = self.bootstrap_binding()
+        request = self.legacy_request("SECURITY", binding=binding)
+        consent = f"{binding.base_sha}:{binding.head_sha}"
+        transport = FakeTransport()
+        result = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+        )
+        self.assertEqual("WAITING_CODE_REVIEW", result["reason"])
+        self.assertEqual([], transport.submissions)
+        result = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+            owner_marker_lookup=lambda _, kind: (
+                self.proof("CODE", binding=binding) if kind == "code" else None
+            ),
+        )
+        self.assertEqual("REQUESTED", result["state"])
+        self.assertEqual(1, len(transport.submissions))
+
+    def test_bootstrap_protocol_trace_tampering_fails_closed(self):
+        binding = self.bootstrap_binding()
+        consent = f"{binding.base_sha}:{binding.head_sha}"
+        request = self.legacy_request(binding=binding)
+        result = self.dispatch(
+            request, binding=binding, legacy_bootstrap_binding=consent
+        )
+        path = Path(result["outbox_path"])
+        original = json.loads(path.read_text())
+        for update in (
+            {"handoff_protocol": "structured-v1"},
+            {"legacy_bootstrap_binding": None},
+            {"legacy_bootstrap_binding": f"{binding.base_sha}:{NEXT_HEAD_SHA}"},
+        ):
+            with self.subTest(update=update):
+                path.write_text(json.dumps({**original, **update}))
+                with self.assertRaises(dispatcher.ReviewDispatchError):
+                    self.dispatch(
+                        request, binding=binding, legacy_bootstrap_binding=consent
+                    )
+        for missing in ("handoff_protocol", "legacy_bootstrap_binding"):
+            with self.subTest(missing=missing):
+                partial = {
+                    key: value for key, value in original.items() if key != missing
+                }
+                path.write_text(json.dumps(partial))
+                with self.assertRaises(dispatcher.ReviewDispatchError):
+                    self.dispatch(
+                        request, binding=binding, legacy_bootstrap_binding=consent
+                    )
+
+    def test_structured_head_supersedes_historical_legacy_outbox(self):
+        binding = self.bootstrap_binding()
+        old = self.dispatch(
+            self.legacy_request(binding=binding),
+            binding=binding,
+            legacy_bootstrap_binding=f"{binding.base_sha}:{binding.head_sha}",
+        )
+        path = Path(old["outbox_path"])
+        historical = json.loads(path.read_text())
+        historical.pop("handoff_protocol")
+        historical.pop("legacy_bootstrap_binding")
+        path.write_text(json.dumps(historical))
+        new_binding = ExactPRBinding(**{**binding.as_dict(), "head_sha": NEXT_HEAD_SHA})
+        request = self.structured_request(binding=new_binding)
+        current = self.dispatch(request, binding=new_binding)
+        self.assertEqual("structured-v1", current["handoff_protocol"])
+        saved_old = json.loads(path.read_text())
+        self.assertEqual("SUPERSEDED", saved_old["state"])
+        self.assertEqual(NEXT_HEAD_SHA, saved_old["superseded_by_head_sha"])
+        self.assertEqual("legacy-historical", saved_old["handoff_protocol"])
+        self.assertIsNone(saved_old["legacy_bootstrap_binding"])
+        self.assertIs(saved_old["verdict_authority"], False)
+        repeated = self.dispatch(request, binding=new_binding)
+        self.assertEqual(current["identity"], repeated["identity"])
+        self.assertEqual(saved_old, json.loads(path.read_text()))
+
+    def test_historical_legacy_adoption_requires_fresh_opt_in_without_resubmit(self):
+        binding = self.bootstrap_binding()
+        consent = f"{binding.base_sha}:{binding.head_sha}"
+        request = self.legacy_request(binding=binding)
+        transport = FakeTransport()
+        first = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+        )
+        path = Path(first["outbox_path"])
+        historical = json.loads(path.read_text())
+        historical.pop("handoff_protocol")
+        historical.pop("legacy_bootstrap_binding")
+        path.write_text(json.dumps(historical))
+        saved = path.read_bytes()
+        with self.assertRaisesRegex(
+            dispatcher.ReviewDispatchError, "explicit exact bootstrap"
+        ):
+            self.dispatch(request, binding=binding, transport=transport)
+        self.assertEqual(saved, path.read_bytes())
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual([], transport.polls)
+        status = dispatcher.dispatch_status(
+            binding,
+            "CODE",
+            outbox_root=self.outbox,
+            binding_revalidator=lambda value: value,
+        )
+        self.assertEqual("legacy-historical", status["records"][0]["handoff_protocol"])
+        self.assertIsNone(status["records"][0]["legacy_bootstrap_binding"])
+        self.assertIs(status["verdict_authority"], False)
+        self.assertEqual(saved, path.read_bytes())
+        adopted = self.dispatch(
+            request,
+            binding=binding,
+            legacy_bootstrap_binding=consent,
+            transport=transport,
+        )
+        self.assertEqual(first["identity"], adopted["identity"])
+        self.assertEqual(first["submission_id"], adopted["submission_id"])
+        self.assertEqual("RUNNING", adopted["state"])
+        self.assertEqual("legacy-bootstrap", adopted["handoff_protocol"])
+        self.assertEqual(consent, adopted["legacy_bootstrap_binding"])
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one"], transport.polls)
+        stored = json.loads(path.read_text())
+        self.assertEqual(consent, stored["legacy_bootstrap_binding"])
+        self.assertIs(stored["verdict_authority"], False)
+
+    def test_historical_structured_outbox_needs_no_bootstrap_exception(self):
+        request = self.request()
+        result = self.dispatch(request)
+        path = Path(result["outbox_path"])
+        original = json.loads(path.read_text())
+        original.pop("handoff_protocol")
+        original.pop("legacy_bootstrap_binding")
+        path.write_text(json.dumps(original))
+        result = self.dispatch(request)
+        self.assertEqual("structured-v1", result["handoff_protocol"])
+        self.assertIsNone(result["legacy_bootstrap_binding"])
+        self.assertIs(result["verdict_authority"], False)
 
     def test_no_transport_creates_non_authoritative_blocked_outbox(self):
         request = self.request()
@@ -396,14 +693,14 @@ class ReviewDispatcherTests(unittest.TestCase):
             ),
             lambda r: r.update(
                 handoff=r["handoff"].replace(
-                    '"current_head":"' + HEAD_SHA + '"',
-                    '"current_head":"' + NEXT_HEAD_SHA + '"',
+                    '"head_sha":"' + HEAD_SHA + '"',
+                    '"head_sha":"' + NEXT_HEAD_SHA + '"',
                 ),
                 handoff_sha256=hashlib.sha256(
                     r["handoff"]
                     .replace(
-                        '"current_head":"' + HEAD_SHA + '"',
-                        '"current_head":"' + NEXT_HEAD_SHA + '"',
+                        '"head_sha":"' + HEAD_SHA + '"',
+                        '"head_sha":"' + NEXT_HEAD_SHA + '"',
                     )
                     .encode()
                 ).hexdigest(),

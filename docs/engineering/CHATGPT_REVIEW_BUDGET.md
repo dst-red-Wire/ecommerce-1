@@ -8,7 +8,7 @@ Reduce repeated ChatGPT CODE/SECURITY analysis without weakening exact-SHA revie
 
 ## Central delivery loop
 
-After a PR is published, external automation must provision a distinct clean checkout at the PR's exact GitHub `baseRefOid`, then invoke its wrapper against the clean exact-head checkout:
+After a PR is published, external automation must provision a distinct clean checkout at the PR's exact GitHub REST `.base.sha`, then invoke its wrapper against the clean exact-head checkout:
 
 ```text
 python3 <exact-base-checkout>/scripts/repository_delivery.py trusted-pr-transition \
@@ -20,6 +20,19 @@ The trusted wrapper verifies both SHA bindings, repository identity, ancestry, a
 Valid qualification and review proofs for the current SHA are reused. A head change makes every qualification, CODE, SECURITY, and owner-authorization proof for the earlier SHA historical, abandons the in-flight transition, and restarts at qualification. Missing CODE or SECURITY emits `state=CHATGPT_REVIEW_REQUIRED` with `review_kind=CODE|SECURITY`, the PR number, exact head SHA, expected marker, and the actual bounded `chatgpt_review_handoff()` payload. That payload contains the exact-head delta, sorted changed files, prior validated verdict, byte count, and SHA-256 digest and never exceeds the 8 KiB central handoff budget; inability to build it blocks the event. The result carries an exact-base `rerun.argv`; the external automatic consumer invokes ChatGPT for exactly that PR/SHA and reruns that same trusted wrapper after a valid marker. The controller itself never invokes a model or creates a verdict. SECURITY is impossible before an exact-SHA CODE PASS with zero blocking findings.
 
 `scripts/pr_review_dispatch_transition.py` is the local adapter for that machine result. It independently resolves exactly one open, non-draft, same-repository PR for the checked-out branch, base, and full head SHA, and checks that binding again before dispatch. `scripts/chatgpt_review_dispatcher.py` validates the unmodified handoff bytes, their digest, the event schema, and the binding. It records only a reconstructible, content-addressed request under `.context/review-dispatch/`; the request is never review authority. A repeated request is idempotent, and a changed head supersedes the old request. When no real ChatGPT transport is configured, the result is `BLOCKED_EXTERNAL_REVIEW_TRANSPORT` with the exact handoff ready for an external consumer. The adapter never turns a local request or transport response into a CODE or SECURITY PASS. Only the GitHub owner-authored, unedited, latest exact-SHA marker accepted by the trusted controller does that.
+
+The normal dispatch path requires the controller's structured v1 handoff, including its tree and qualification digest. It uses the same controller response that completed qualification: the fresh qualification witness is process-local, so a second process cannot stabilize it by claiming reuse. The next controller invocation occurs after a verified review marker.
+
+PR #172 has an explicit, temporary transport exception because its pre-v1 base cannot emit that schema. Invoke it only with the independently verified full base and published head SHAs:
+
+```text
+make pr-loop PR=172 TRUSTED_ROOT=<exact-base-checkout> JSON=1 \
+  LEGACY_BOOTSTRAP_BINDING=ced96d663c1dca1c885d450104f344c10431738d:<published-head-sha>
+```
+
+The equivalent adapter argument is `--legacy-bootstrap-binding <base-sha>:<head-sha>`. The exception is fixed to repository `dst-red-Wire/ecommerce-1`, PR #172, branch `feat/controller-compat-bootstrap`, and the base shown above. Both SHAs must match the current GitHub binding and clean local checkout; changed bindings are rejected. It applies only when the base response contains neither a structured handoff nor a compatibility digest. A present but invalid v1 payload always blocks.
+
+This invocation dispatches the base controller's canonical legacy payload, with `handoff_protocol=legacy-bootstrap` and the exact exception binding recorded in the result and outbox. It does not manufacture a v1 proof. Saved outbox data cannot opt in a later invocation. Qualification, CODE before SECURITY, owner authorization, and merge requirements still belong to the exact-base controller. Without the explicit exception, legacy output is rejected. Both a rejected protocol and unavailable external transport return exit code 1; a valid dry run returns 0, and absence of transport does not change a qualification PASS.
 
 Use `make review-dispatch-status PR=<number> KIND=CODE` or `KIND=SECURITY` to read the exact-head outbox without creating a request. Status is local observability only and has `verdict_authority=false`. Rerun `make pr-loop PR=<number> TRUSTED_ROOT=<exact-base-checkout>` after the external owner marker appears; it advances CODE, then SECURITY, then the owner and merge gates through the base-owned controller.
 

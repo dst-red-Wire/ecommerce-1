@@ -431,7 +431,10 @@ def toolchain_closure_violations(
     doctor_expected: set[str] | None = None,
 ) -> list[str]:
     """Pure closed-world validation for versions, installers, gates, consumers and proofs."""
-    lock = copy.deepcopy(lock if lock is not None else _raw_toolchain_lock())
+    lock = copy.deepcopy(
+        lock if lock is not None
+        else json.loads((root / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    )
     graph = copy.deepcopy(
         graph
         if graph is not None
@@ -891,7 +894,7 @@ def toolchain_closure_violations(
         try:
             from capability_bootstrap import validate_toolchain_projections
 
-            validate_toolchain_projections(lock)
+            validate_toolchain_projections(lock, root=root)
         except (OSError, RuntimeError, ValueError) as exc:
             violations.append(f"toolchain projection drift: {exc}")
 
@@ -2233,8 +2236,8 @@ def repository_authority_check() -> int:
 
     from capability_bootstrap import load_contract, load_toolchain_lock, validate_contract, validate_toolchain_projections
 
-    toolchain = load_toolchain_lock()
-    validate_toolchain_projections(toolchain)
+    toolchain = load_toolchain_lock(ROOT / "config/contracts/toolchain-lock.json")
+    validate_toolchain_projections(toolchain, root=ROOT)
 
     rules = toolchain.get("rules", {})
     expected_rules = {
@@ -2261,8 +2264,11 @@ def repository_authority_check() -> int:
         ):
             raise RuntimeError(f"{key}: floating tool version is forbidden: {value}")
 
-    capability_graph = load_contract()
-    validate_contract(capability_graph, toolchain["versions"])
+    capability_graph = load_contract(ROOT / "config/toolchain/capabilities.json")
+    validate_contract(
+        capability_graph, toolchain["versions"], root=ROOT,
+        allowed_requirements=toolchain["capability_policy"]["requirements"],
+    )
 
     capability_policy = toolchain.get("capability_policy", {})
     if capability_graph.get("supported") != capability_policy.get("supported"):
@@ -7889,10 +7895,32 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
         "consumer": "external-orchestrator",
         "verdict_authority": False,
     }
+    expected_bootstrap_exception = {
+        "default": "forbidden",
+        "activation": "explicit-invocation-only",
+        "cli_argument": "--legacy-bootstrap-binding",
+        "make_variable": "LEGACY_BOOTSTRAP_BINDING",
+        "argument_format": "exact-base-sha:exact-head-sha",
+        "repository": "dst-red-Wire/ecommerce-1",
+        "pr": 172,
+        "base": "main",
+        "base_sha": "ced96d663c1dca1c885d450104f344c10431738d",
+        "head_branch": "feat/controller-compat-bootstrap",
+        "head_sha": "exact-live-GitHub-and-clean-checkout-binding",
+        "allowed_only_when": "trusted-controller-omits-structured-handoff-and-compatibility-digest",
+        "scope": "transport-format-only",
+        "qualification": "exact-base-controller-PASS",
+        "outbox_binding": "audit-data-never-invocation-authorization",
+        "changed_binding": "reject",
+        "malformed_v1": "reject-without-fallback",
+        "review_and_merge_rules": "unchanged",
+    }
     if (
         not isinstance(handoff, dict)
         or handoff.pop("structured_compatibility_handoff", None)
         != expected_structured_handoff
+        or handoff.pop("legacy_bootstrap_exception", None)
+        != expected_bootstrap_exception
     ):
         return {}
     owner_boundary = normalized.get("owner_boundary")

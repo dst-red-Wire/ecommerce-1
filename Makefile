@@ -328,7 +328,7 @@ deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, 
 pr-loop: ## Run trusted-pr-transition from TRUSTED_ROOT at the PR BASE_SHA, then dispatch external review; PR required
 	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
 	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
-	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,) $(if $(LEGACY_BOOTSTRAP_BINDING),--legacy-bootstrap-binding "$(LEGACY_BOOTSTRAP_BINDING)",)
 
 .PHONY: review-dispatch-status
 review-dispatch-status: ## Read non-authoritative ChatGPT outbox status for exact PR and KIND=CODE|SECURITY
