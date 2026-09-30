@@ -23,12 +23,23 @@ class RepoctlImportBoundaryTest(unittest.TestCase):
             contracts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
             shutil.copy2(
+                ROOT / "scripts/capability_bootstrap.py", scripts / "capability_bootstrap.py"
+            )
+            shutil.copy2(
                 ROOT / "scripts/qualification_cache.py",
                 scripts / "qualification_cache.py",
             )
             shutil.copy2(
                 ROOT / "config/contracts/toolchain-lock.json",
                 contracts / "toolchain-lock.json",
+            )
+            # The parser owns its bootstrap constants in the controller tree;
+            # the operational root must still be the separate invocation checkout.
+            controller_contracts = controller / "config" / "contracts"
+            controller_contracts.mkdir(parents=True)
+            shutil.copy2(
+                ROOT / "config/contracts/toolchain-lock.json",
+                controller_contracts / "toolchain-lock.json",
             )
             subprocess.run(["git", "init", "-q"], cwd=checkout, check=True)
             code = r"""
@@ -68,6 +79,9 @@ if module.ROOT != checkout:
             scripts = temp / "scripts"
             scripts.mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", scripts / "repoctl.py")
+            shutil.copy2(
+                ROOT / "scripts/capability_bootstrap.py", scripts / "capability_bootstrap.py"
+            )
             shutil.copy2(
                 ROOT / "scripts/qualification_cache.py",
                 scripts / "qualification_cache.py",

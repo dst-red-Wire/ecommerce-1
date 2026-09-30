@@ -135,8 +135,8 @@ def _toolchain_policy_root() -> Path:
         ):
             raise RuntimeError("trusted qualification toolchain root is inconsistent")
         try:
-            trusted_root = Path(policy_root).resolve(strict=True)
-            trusted_controller = Path(controller).resolve(strict=True)
+            trusted_root = Path(policy_root).absolute()
+            trusted_controller = Path(controller).absolute()
             if (
                 trusted_controller != trusted_root / "scripts/repoctl.py"
                 or not trusted_controller.is_file()
@@ -163,7 +163,10 @@ def _toolchain_policy_root() -> Path:
 
 
 def _raw_toolchain_lock() -> dict:
-    return json.loads((_toolchain_policy_root() / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    from capability_bootstrap import read_repository_text
+
+    root = _toolchain_policy_root()
+    return json.loads(read_repository_text(root / "config/contracts/toolchain-lock.json", root=root))
 
 
 def managed_bin_dirs() -> tuple[Path, ...]:
@@ -300,11 +303,11 @@ def _toolchain_lifecycle_index(lock: dict) -> tuple[dict[str, str], list[str]]:
 def centrally_derived_doctor_set(lock: dict | None = None, graph: dict | None = None) -> set[str]:
     """Return the only valid doctor inventory, derived from the two central contracts."""
     lock = _raw_toolchain_lock() if lock is None else lock
-    graph = (
-        json.loads((ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
-        if graph is None
-        else graph
-    )
+    if graph is None:
+        from capability_bootstrap import read_repository_text
+
+        root = _toolchain_policy_root()
+        graph = json.loads(read_repository_text(root / "config/toolchain/capabilities.json", root=root))
     capabilities = {item["name"]: item for item in graph.get("capabilities", [])}
     expected: set[str] = set()
     for name, entry in lock.get("tool_lifecycle", {}).get("active", {}).items():
@@ -317,6 +320,56 @@ def centrally_derived_doctor_set(lock: dict | None = None, graph: dict | None = 
     return expected
 
 
+def _toolchain_static_texts(relative: str, root: Path) -> list[str]:
+    from capability_bootstrap import read_repository_text
+
+    root = Path(root).absolute()
+    path = root / relative
+    if Path(relative).is_absolute() or ".." in path.parts or not path.is_relative_to(root):
+        raise ValueError("toolchain static data path escapes repository")
+    if any(component.is_symlink() for component in (path, *path.parents)):
+        raise ValueError("toolchain static data path contains a symlink")
+    if path.is_dir():
+        paths = []
+        for count, candidate in enumerate(path.rglob("*"), start=1):
+            if count > 1024:
+                raise ValueError("toolchain static data directory exceeds entry budget")
+            if candidate.is_symlink() or not (candidate.is_dir() or candidate.is_file()):
+                raise ValueError("toolchain static data directory contains an unsafe entry")
+            if candidate.is_file():
+                paths.append(candidate)
+    else:
+        paths = [path]
+    # Read every candidate before accepting a marker: one matching file must
+    # never hide an unsafe sibling or data outside the exact repository tree.
+    texts = []
+    total_bytes = 0
+    for candidate in paths:
+        text = read_repository_text(candidate, root=root)
+        total_bytes += len(text.encode("utf-8"))
+        if total_bytes > 16 * 1024 * 1024:
+            raise ValueError("toolchain static data exceeds byte budget")
+        texts.append(text)
+    return texts
+
+
+def _toolchain_proof_exists(relative: str, root: Path) -> bool:
+    from capability_bootstrap import read_repository_text
+
+    root = Path(root).absolute()
+    path = root / relative
+    if Path(relative).is_absolute() or ".." in path.parts or not path.is_relative_to(root):
+        return False
+    if any(component.is_symlink() for component in (path, *path.parents)):
+        return False
+    if path.is_dir():
+        # A directory is an existence proof only; do not parse caches or runtime
+        # artifacts that happen to be created below a scenario source directory.
+        return True
+    read_repository_text(path, root=root)
+    return True
+
+
 def _toolchain_consumer_exists(consumer: object, root: Path) -> bool:
     if not isinstance(consumer, dict) or consumer.get("type") != "path":
         return False
@@ -324,24 +377,17 @@ def _toolchain_consumer_exists(consumer: object, root: Path) -> bool:
     marker = consumer.get("marker")
     if not isinstance(relative, str) or not relative or not isinstance(marker, str) or not marker:
         return False
-    resolved_root = root.resolve()
-    path = (resolved_root / relative).resolve()
-    if not path.is_relative_to(resolved_root):
+    try:
+        return any(marker in text for text in _toolchain_static_texts(relative, root))
+    except (OSError, RuntimeError, ValueError):
         return False
-    if not path.exists():
-        return False
-    if path.is_dir():
-        return any(
-            marker in candidate.read_text(encoding="utf-8", errors="ignore")
-            for candidate in path.rglob("*")
-            if candidate.is_file()
-        )
-    return marker in path.read_text(encoding="utf-8", errors="ignore")
 
 
 def _security_policy_tool_statuses(root: Path) -> dict[str, str]:
     """Read only implementation/status pairs without adding a second YAML authority."""
-    text = (root / "config/contracts/security-scan-policy.yaml").read_text(encoding="utf-8")
+    from capability_bootstrap import read_repository_text
+
+    text = read_repository_text(root / "config/contracts/security-scan-policy.yaml", root=root)
     statuses: dict[str, str] = {}
     pending: str | None = None
     for line in text.splitlines():
@@ -356,10 +402,11 @@ def _security_policy_tool_statuses(root: Path) -> dict[str, str]:
     return statuses
 
 
-@functools.lru_cache(maxsize=None)
 def _ansible_installer_tags(root: Path) -> frozenset[str]:
     """Return tags attached to an actual installer task, including static imports."""
-    tasks_root = (root / "platform/ansible/roles/developer_toolchain/tasks").resolve()
+    from capability_bootstrap import read_repository_text
+
+    tasks_root = root / "platform/ansible/roles/developer_toolchain/tasks"
     pending = [tasks_root / "main.yml"]
     visited: set[Path] = set()
     installer_tags: set[str] = set()
@@ -372,22 +419,23 @@ def _ansible_installer_tags(root: Path) -> frozenset[str]:
     ruby = require("ruby")
     loader = (
         "require 'psych'; require 'json'; "
-        "value = Psych.safe_load_file(ARGV.fetch(0), permitted_classes: [], aliases: true); "
+        "value = Psych.safe_load(STDIN.read, permitted_classes: [], aliases: true); "
         "STDOUT.write(JSON.generate(value))"
     )
 
     while pending:
-        path = pending.pop().resolve()
+        path = pending.pop()
         if path in visited:
             continue
-        if not path.is_relative_to(tasks_root) or not path.is_file():
+        if not path.is_relative_to(tasks_root):
             raise ValueError(f"invalid developer toolchain task import: {path}")
+        task_text = read_repository_text(path, root=root)
         visited.add(path)
         raw = subprocess.run(
-            [ruby, "-e", loader, str(path)],
+            [ruby, "-e", loader],
+            input=task_text,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
         )
         if raw.returncode:
@@ -431,15 +479,21 @@ def toolchain_closure_violations(
     doctor_expected: set[str] | None = None,
 ) -> list[str]:
     """Pure closed-world validation for versions, installers, gates, consumers and proofs."""
-    lock = copy.deepcopy(
-        lock if lock is not None
-        else json.loads((root / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
-    )
-    graph = copy.deepcopy(
-        graph
-        if graph is not None
-        else json.loads((root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
-    )
+    from capability_bootstrap import read_repository_text
+
+    try:
+        lock = copy.deepcopy(
+            lock if lock is not None
+            else json.loads(read_repository_text(root / "config/contracts/toolchain-lock.json", root=root))
+        )
+        graph = copy.deepcopy(
+            graph if graph is not None
+            else json.loads(read_repository_text(root / "config/toolchain/capabilities.json", root=root))
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return [f"toolchain contracts cannot be audited: {exc}"]
+    if not isinstance(lock, dict) or not isinstance(graph, dict):
+        return ["toolchain lock and capability graph must be mappings"]
     violations: list[str] = []
     versions = lock.get("versions", {})
     owners = lock.get("version_owners", {})
@@ -680,8 +734,8 @@ def toolchain_closure_violations(
                 and command not in security_commands
             ):
                 violations.append(f"active security tool {name} is absent from a declared gate")
-    except OSError:
-        violations.append("security scan policy is missing")
+    except (OSError, RuntimeError, ValueError):
+        violations.append("security scan policy is missing or unsafe")
 
     gates_by_capability: dict[str, set[str]] = {name: set() for name in capabilities}
     for gate, commands in gate_requirements.items():
@@ -783,7 +837,14 @@ def toolchain_closure_violations(
             violations.append(f"active tool {name} has no valid scenario policy")
         proofs = entry.get("proofs", [])
         if scenario_policy in {"required", "runtime-only", "external-system"}:
-            if not proofs or any(not isinstance(path, str) or not (root / path).exists() for path in proofs):
+            try:
+                if not proofs or any(
+                    not isinstance(path, str) or not path
+                    or not _toolchain_proof_exists(path, root)
+                    for path in proofs
+                ):
+                    violations.append(f"active tool {name} has no scenario or proof")
+            except (OSError, RuntimeError, ValueError):
                 violations.append(f"active tool {name} has no scenario or proof")
 
     for status_name, entries in (("deferred", deferred), ("rejected", rejected)):
@@ -840,31 +901,31 @@ def toolchain_closure_violations(
         for name in sorted(derived_doctor - doctor_expected):
             violations.append(f"doctor omits centrally required tool: {name}")
     try:
-        tree = ast.parse((root / "scripts/repoctl.py").read_text(encoding="utf-8"))
+        tree = ast.parse(read_repository_text(root / "scripts/repoctl.py", root=root))
         doctor_node = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "doctor")
         for node in ast.walk(doctor_node):
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 if any(isinstance(target, ast.Name) and target.id in {"expected", "expected_tools"} for target in targets):
                     violations.append("doctor contains a parallel hardcoded expected tool list")
-    except (OSError, SyntaxError, StopIteration):
+    except (OSError, RuntimeError, ValueError, SyntaxError, StopIteration):
         violations.append("doctor implementation cannot be audited")
 
     installer = root / "platform/ansible/roles/developer_toolchain/tasks/main.yml"
     try:
-        installer_text = installer.read_text(encoding="utf-8")
+        installer_text = read_repository_text(installer, root=root)
         if "developer_pipx_packages:" in installer_text:
             violations.append("installer contains an independent pipx tool list")
         if "toolchain_lock.tool_lifecycle.active | dict2items" not in installer_text:
             violations.append("pipx installer is not registry driven")
         if installer_text.count("item.key in active_tool_names") < 6:
             violations.append("registry artifact installer is not restricted to active tools")
-    except OSError:
-        violations.append("developer toolchain installer is missing")
+    except (OSError, RuntimeError, ValueError):
+        violations.append("developer toolchain installer is missing or unsafe")
 
     architecture = root / "architecture.lock.yaml"
     try:
-        architecture_text = architecture.read_text(encoding="utf-8")
+        architecture_text = read_repository_text(architecture, root=root)
         for marker in (
             "closure: mandatory-fail-closed",
             "undeclared_tool: forbidden",
@@ -882,8 +943,8 @@ def toolchain_closure_violations(
         ):
             if marker not in architecture_text:
                 violations.append(f"architecture missing sole OpenTofu authority marker: {marker}")
-    except OSError:
-        violations.append("architecture authority is missing")
+    except (OSError, RuntimeError, ValueError):
+        violations.append("architecture authority is missing or unsafe")
 
     if lifecycle_index.get("hyperfine") != "rejected":
         violations.append("hyperfine must remain rejected without a distinct consumer")
@@ -2236,7 +2297,7 @@ def repository_authority_check() -> int:
 
     from capability_bootstrap import load_contract, load_toolchain_lock, validate_contract, validate_toolchain_projections
 
-    toolchain = load_toolchain_lock(ROOT / "config/contracts/toolchain-lock.json")
+    toolchain = load_toolchain_lock(ROOT / "config/contracts/toolchain-lock.json", root=ROOT)
     validate_toolchain_projections(toolchain, root=ROOT)
 
     rules = toolchain.get("rules", {})
@@ -2264,7 +2325,7 @@ def repository_authority_check() -> int:
         ):
             raise RuntimeError(f"{key}: floating tool version is forbidden: {value}")
 
-    capability_graph = load_contract(ROOT / "config/toolchain/capabilities.json")
+    capability_graph = load_contract(ROOT / "config/toolchain/capabilities.json", root=ROOT)
     validate_contract(
         capability_graph, toolchain["versions"], root=ROOT,
         allowed_requirements=toolchain["capability_policy"]["requirements"],
@@ -2446,11 +2507,17 @@ def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
     if evidence_contract.get("digest_canonicalization") != "json-sort-keys-compact-excluding-evidence-digest":
         violations.append("execution evidence digest canonicalization is invalid")
 
+    from capability_bootstrap import read_repository_text
+
+    try:
+        toolchain_lock = json.loads(
+            read_repository_text(ROOT / "config/contracts/toolchain-lock.json", root=ROOT)
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        return violations + [f"execution toolchain authority cannot be audited: {exc}"]
     authority_documents = {
         "architecture.lock.yaml": ruby_yaml("architecture.lock.yaml"),
-        "config/contracts/toolchain-lock.json": json.loads(
-            (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
-        ),
+        "config/contracts/toolchain-lock.json": toolchain_lock,
     }
 
     if registry.get("version") != 1 or registry.get("kind") != "ExecutionPropertiesImplementations":
@@ -2580,11 +2647,15 @@ def execution_evidence_violations(
         if dirty.returncode or dirty.stdout.strip():
             violations.append("runtime evidence checkout contains uncommitted inputs")
 
+        from capability_bootstrap import read_repository_text
+
         toolchain = root / "config/contracts/toolchain-lock.json"
-        if not toolchain.is_file() or toolchain.is_symlink():
+        try:
+            toolchain_bytes = read_repository_text(toolchain, root=root).encode("utf-8")
+        except (OSError, RuntimeError, ValueError):
             violations.append("runtime evidence canonical toolchain lock is missing or unsafe")
         else:
-            actual_toolchain_digest = "sha256:" + hashlib.sha256(toolchain.read_bytes()).hexdigest()
+            actual_toolchain_digest = "sha256:" + hashlib.sha256(toolchain_bytes).hexdigest()
             if evidence.get("toolchain_digest") != actual_toolchain_digest:
                 violations.append("runtime evidence toolchain_digest does not match the canonical lock")
 
@@ -4839,9 +4910,11 @@ def _fresh_evidence(evidence: dict) -> bool:
 
 def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
     """Conservatively bind declared gates and their transitive tool providers."""
+    from capability_bootstrap import read_repository_text
+
     native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
-    policy_root = Path(native_controller).resolve().parents[1] if native_controller else _toolchain_policy_root()
-    contract = json.loads((policy_root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+    policy_root = Path(native_controller).absolute().parents[1] if native_controller else _toolchain_policy_root()
+    contract = json.loads(read_repository_text(policy_root / "config/toolchain/capabilities.json", root=policy_root))
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
     required = {name for names in contract["gate_requirements"].values() for name in names}
@@ -4881,6 +4954,8 @@ def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[t
 
 def qualification_identity() -> str:
     """Bind reusable evidence to validator/configuration and actual gate runners."""
+    from capability_bootstrap import read_repository_text
+
     digest = hashlib.sha256()
     for relative in (
         "scripts/repoctl.py",
@@ -4894,7 +4969,10 @@ def qualification_identity() -> str:
     ):
         source = ROOT / relative
         digest.update(relative.encode())
-        digest.update(source.read_bytes())
+        digest.update(
+            read_repository_text(source, root=ROOT).encode("utf-8")
+            if relative.startswith("config/toolchain/") else source.read_bytes()
+        )
     controller = Path(_controller_command()[1])
     if not controller.is_absolute():
         controller = ROOT / controller
@@ -9768,8 +9846,10 @@ def _approved_rke2_manifest_sha256() -> str:
 
 
 def _canonical_rke2_vagrant_version() -> str:
+    from capability_bootstrap import read_repository_text
+
     version = json.loads(
-        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+        read_repository_text(ROOT / "config/contracts/toolchain-lock.json", root=ROOT)
     )["versions"]["VAGRANT_VERSION"]
     if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         raise RuntimeError("canonical RKE2 Vagrant version is invalid")
@@ -12175,6 +12255,8 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
 
 
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
+    from capability_bootstrap import read_repository_text
+
     workflow = qualification_workflow("rke2_local_virtualbox")
     if workflow.get("resumable") is not False:
         return fail("RKE2 local qualification must declare that persisted checkpoints are diagnostic only")
@@ -12382,7 +12464,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
                     vm_name, expected_cpus=int(input_values["vm_cpus"]),
                     expected_memory=int(input_values["vm_memory"]),
                     expected_version=json.loads(
-                        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+                        read_repository_text(ROOT / "config/contracts/toolchain-lock.json", root=ROOT)
                     )["versions"]["VIRTUALBOX_VERSION"],
                     minimum_log_mtime=started_at.timestamp(),
                     snapshot_path=vm_state / "backend-VBox.log",
