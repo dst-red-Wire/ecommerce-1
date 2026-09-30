@@ -79,7 +79,7 @@
 
 - name: Mark the transfer start after the prior target probe
   ansible.builtin.set_fact:
-    mgmt_offline_transfer_started_at: "{{ now(utc=true).isoformat() }}"
+    mgmt_offline_transfer_started_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%S.%fZ') }}"
 
 - name: Transfer approved bundle only when target content is absent or invalid
   ansible.builtin.copy:
@@ -120,7 +120,7 @@
       target_valid_before: "{{ mgmt_offline_existing.rc == 0 }}"
       copy_changed: "{{ mgmt_offline_copy.changed | default(false) | bool }}"
       started_at: "{{ mgmt_offline_transfer_started_at }}"
-      finished_at: "{{ now(utc=true).isoformat() }}"
+      finished_at: "{{ now(utc=true).strftime('%Y-%m-%dT%H:%M:%S.%fZ') }}"
 
 - name: Verify every local RPM signature against isolated approved keys
   ansible.builtin.command:
