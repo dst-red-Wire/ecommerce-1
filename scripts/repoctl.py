@@ -10144,6 +10144,121 @@ def lab_network_native_prepare(campaign_id: str,
     return 0
 
 
+_NATIVE_UAC_REPOSITORY = "dst-red-Wire/ecommerce-1"
+_NATIVE_UAC_PR = 169
+
+
+def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
+    response = run(
+        [gh, "api", "--paginate", endpoint],
+        check=False, capture=True,
+    )
+    if response.returncode:
+        raise RuntimeError("native UAC GitHub comments are unavailable")
+    content = response.stdout or ""
+    decoder = json.JSONDecoder()
+    offset = 0
+    comments: list[dict] = []
+    try:
+        while offset < len(content):
+            while offset < len(content) and content[offset].isspace():
+                offset += 1
+            if offset == len(content):
+                break
+            page, offset = decoder.raw_decode(content, offset)
+            if not isinstance(page, list) or any(not isinstance(comment, dict) for comment in page):
+                raise RuntimeError("native UAC GitHub comment page is malformed")
+            comments.extend(page)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("native UAC GitHub comment pages are malformed") from exc
+    if not content.strip():
+        raise RuntimeError("native UAC GitHub returned no comment pages")
+    comments.sort(key=_immutable_comment_order_key)
+    return comments
+
+
+def _native_uac_review_gate(gh: str, campaign_id: str, source_sha: str,
+                            expected_vm_id: str) -> tuple[bool, str]:
+    """Require exact-SHA ChatGPT owner reviews before an elevated command."""
+    if (re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id) is None
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                        expected_vm_id) is None):
+        return False, "native UAC exact campaign, SHA or VM identity is invalid"
+    try:
+        evidence_policy = pull_request_review_policy()["ai_reviewer"]["evidence"]
+        pr = _github_pr_snapshot(gh, _NATIVE_UAC_REPOSITORY, _NATIVE_UAC_PR)
+        if (pr["number"] != _NATIVE_UAC_PR or pr["state"] != "OPEN" or pr["draft"]
+            or pr["base"] != "main" or pr["head_sha"] != source_sha
+            or pr["head_repository"].casefold() != _NATIVE_UAC_REPOSITORY.casefold()):
+            return False, "native UAC PR #169 is not open on main at the exact source SHA"
+        comments = _native_uac_paginated_comments(
+            gh, f"repos/{_NATIVE_UAC_REPOSITORY}/issues/{_NATIVE_UAC_PR}/comments?per_page=100")
+        owner_login = _NATIVE_UAC_REPOSITORY.split("/", 1)[0]
+        latest: dict[str, tuple[dict, dict]] = {}
+        for comment in comments:
+            if _comment_author_login(comment).casefold() != owner_login.casefold():
+                continue
+            body = str(comment.get("body") or "")
+            if "chatgpt-exact-sha-review:v1" not in body:
+                continue
+            if comment.get("author_association") != "OWNER":
+                return False, "native UAC ChatGPT marker author lacks OWNER authority"
+            markers = _CHATGPT_REVIEW_MARKER_RE.findall(body)
+            if len(markers) != 1 or body.count("chatgpt-exact-sha-review:v1") != 1:
+                return False, "native UAC ChatGPT review marker is ambiguous"
+            proof = json.loads(markers[0])
+            if (not isinstance(proof, dict) or set(proof) != _CHATGPT_REVIEW_KEYS
+                or proof.get("provider") != "ChatGPT"
+                or proof.get("kind") not in {"code", "security"}
+                or not isinstance(proof.get("head_sha"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", proof["head_sha"]) is None
+                or not isinstance(proof.get("status"), str)
+                or type(proof.get("blocking_findings")) is not int
+                or proof["blocking_findings"] < 0):
+                return False, "native UAC ChatGPT review marker is malformed"
+            if proof["head_sha"] != source_sha:
+                continue
+            if comment.get("updated_at") != comment.get("created_at"):
+                return False, "native UAC ChatGPT review comment was edited"
+            latest[proof["kind"]] = (comment, proof)
+        for kind in evidence_policy["required_kinds"]:
+            if kind not in latest:
+                return False, f"native UAC ChatGPT {kind} review is absent for exact SHA"
+            proof = latest[kind][1]
+            if proof["status"] != "PASS" or proof["blocking_findings"] != 0:
+                return False, f"native UAC latest ChatGPT {kind} review is not clean"
+        code = latest["code"][0]
+        security = latest["security"][0]
+        expected = (
+            f"NATIVE-UAC-V1 PR={_NATIVE_UAC_PR} SHA={source_sha} "
+            f"CAMPAIGN={campaign_id} VM={expected_vm_id.lower()} "
+            f"CODE={code['id']} SECURITY={security['id']} APPROVED"
+        )
+        owner_comments = [comment for comment in comments
+                          if _comment_author_login(comment).casefold()
+                             == owner_login.casefold()
+                          and str(comment.get("body") or "").startswith(
+                              f"NATIVE-UAC-V1 PR={_NATIVE_UAC_PR} ")]
+        if (not owner_comments
+            or owner_comments[-1].get("author_association") != "OWNER"
+            or owner_comments[-1].get("updated_at") != owner_comments[-1].get("created_at")
+            or str(owner_comments[-1].get("body") or "") != expected):
+            return False, "native UAC exact owner authorization is absent or superseded"
+        owner_order = _immutable_comment_order_key(owner_comments[-1])
+        if (owner_order <= _immutable_comment_order_key(code)
+            or owner_order <= _immutable_comment_order_key(security)):
+            return False, "native UAC owner authorization predates a required ChatGPT review"
+        current_pr = _github_pr_snapshot(gh, _NATIVE_UAC_REPOSITORY, _NATIVE_UAC_PR)
+        if (current_pr["number"] != _NATIVE_UAC_PR or current_pr["state"] != "OPEN"
+            or current_pr["draft"] or current_pr["base"] != "main"
+            or current_pr["head_sha"] != source_sha):
+            return False, "native UAC PR head or base moved during review verification"
+    except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        return False, f"native UAC GitHub authority is unavailable or malformed: {exc}"
+    return True, "native UAC ChatGPT CODE, SECURITY and owner authorization are clean"
+
+
 def _native_boot_powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
@@ -10455,15 +10570,33 @@ def lab_network_native_boot(action: str, campaign_id: str,
         return fail("unsupported native network-smoke boot action")
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
         return fail("native network-smoke boot requires an exact CAMPAIGN_ID")
-    if action == "Prepare" and re.fullmatch(
+    if action in {"Prepare", "SelfTest"} and re.fullmatch(
         r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id or ""
     ) is None:
-        return fail("native network-smoke Prepare requires --expected-vm-id UUID")
-    if action == "Prepare":
+        return fail("native network-smoke elevated Prepare/SelfTest requires --expected-vm-id UUID")
+    source_sha = ""
+    if action in {"Prepare", "SelfTest"}:
         if git("status", "--porcelain", "--untracked-files=all").strip():
             return fail("native network-smoke boot requires a clean exact-SHA worktree")
+        source_sha = git("rev-parse", "HEAD").strip()
+        gh = "/usr/bin/gh"
+        if not os.path.isfile(gh) or not os.access(gh, os.X_OK):
+            return fail("native UAC requires the pinned GitHub CLI to verify independent reviews")
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, campaign_id, source_sha, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
+        print(f"PASS native UAC exact-SHA review authority: {review_reason}")
+    if action == "Prepare":
         if lab_network_native_prepare(campaign_id):
             return 2
+        if (git("rev-parse", "HEAD").strip() != source_sha
+            or git("status", "--porcelain", "--untracked-files=all").strip()):
+            return fail("native UAC exact-SHA worktree changed during staging")
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, campaign_id, source_sha, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     script = ROOT / "scripts/windows/LabNativeBoot.ps1"
     if not powershell.is_file() or (action in {"Prepare", "SelfTest"} and not script.is_file()):
@@ -10476,9 +10609,8 @@ def lab_network_native_boot(action: str, campaign_id: str,
     except RuntimeError as exc:
         return fail(f"native network-smoke boot repository path is unavailable: {exc}")
     try:
-        source_sha = (git("rev-parse", "HEAD").strip()
-                      if action in {"Prepare", "SelfTest"}
-                      else _native_boot_shadow_source_sha(campaign_id, action))
+        if action not in {"Prepare", "SelfTest"}:
+            source_sha = _native_boot_shadow_source_sha(campaign_id, action)
         bootstrap = _native_bootstrap_script(
             action, campaign_id, source_sha,
             distribution, repo_windows, expected_vm_id)
@@ -10512,17 +10644,103 @@ def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
     )
 
 
-def lab_network_status(campaign_id: str) -> int:
+def _native_network_status_snapshot(campaign_id: str, shadow_root: Path) -> tuple[dict, dict, Path, bool] | None:
+    """Read one protected native campaign without using its historical result as proof."""
+    if shadow_root.is_symlink() or (shadow_root.exists() and not shadow_root.is_dir()):
+        raise ValueError("native network-smoke shadow root is unsafe")
+    shadows = list(shadow_root.glob(f"{campaign_id}-*")) if shadow_root.is_dir() else []
+    if not shadows:
+        return None
+    if len(shadows) != 1:
+        raise ValueError("native network-smoke requires one protected shadow for the campaign")
+    shadow = shadows[0]
+    source_sha = shadow.name[len(campaign_id) + 1:]
+    if (re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or not _native_shadow_path_safe(shadow_root, shadow)
+        or not shadow.is_dir()):
+        raise ValueError("native network-smoke shadow identity is invalid")
+    state_path = shadow / "native-boot.json"
+    evidence = shadow / "evidence/network-smoke" / campaign_id / "result.json"
+    for path in (state_path, evidence):
+        if (not _native_shadow_path_safe(shadow_root, path) or not path.is_file()
+            or path.stat().st_size > 1024 * 1024):
+            raise ValueError(f"native network-smoke protected status path is unsafe: {path}")
+    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    result_bytes = evidence.read_bytes()
+    result = json.loads(result_bytes.decode("utf-8-sig"))
+    if not isinstance(state, dict) or not isinstance(result, dict):
+        raise ValueError("native network-smoke protected state or result is malformed")
+    phase = state.get("phase")
+    run_status = state.get("run_status")
+    cleanup = result.get("cleanup")
+    vm_id = state.get("vm_id")
+    vm_name = state.get("vm_name")
+    if (state.get("mode") != "NETWORK_SMOKE_NATIVE"
+        or state.get("campaign_id") != campaign_id
+        or state.get("source_sha") != source_sha
+        or str(state.get("shadow_root", "")).rstrip("\\").casefold()
+           != _native_shadow_windows_path(shadow).rstrip("\\").casefold()
+        or phase not in {"PREPARED", "BOOT_PENDING", "RUNNING", "RETURN_PENDING", "FAILED", "RECOVERED"}
+        or run_status not in {None, "PASS", "FAIL"}
+        or not isinstance(vm_id, str)
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", vm_id) is None
+        or not isinstance(state.get("expected_vm_id"), str)
+        or state["expected_vm_id"].casefold() != vm_id.casefold()
+        or not isinstance(vm_name, str)
+        or re.fullmatch(r"ecommerce-rocky-10-2-smoke-[0-9a-f]{12}", vm_name) is None
+        or result.get("campaign_id") != campaign_id
+        or result.get("vm_name") != vm_name
+        or not isinstance(cleanup, dict)
+        or not isinstance(cleanup.get("vm_id"), str)
+        or cleanup["vm_id"].casefold() != vm_id.casefold()):
+        raise ValueError("native network-smoke protected status binding differs")
+    completed_run = run_status == "PASS"
+    digest = state.get("result_sha256")
+    if completed_run:
+        if (phase not in {"RETURN_PENDING", "RECOVERED"}
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or digest != hashlib.sha256(result_bytes).hexdigest()
+            or result.get("status") != "PASS"
+            or result.get("resume_runner_source_sha") != source_sha):
+            raise ValueError("native network-smoke protected result differs from the successful run")
+    elif digest not in {None, ""}:
+        raise ValueError("native network-smoke has an unbound result digest")
+    return state, result, evidence, completed_run
+
+
+def lab_network_status(campaign_id: str, *,
+                       laboratory_root: Path = Path("/mnt/c/ecommerce-lab"),
+                       shadow_root: Path = NATIVE_SHADOW_BASE) -> int:
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
         return fail("lab-network-status requires an exact CAMPAIGN_ID")
-    evidence = Path("/mnt/c/ecommerce-lab/evidence/network-smoke") / campaign_id / "result.json"
-    if not evidence.is_file():
-        return fail(f"network-smoke result is absent: {campaign_id}")
-    result = json.loads(evidence.read_text(encoding="utf-8"))
-    if result.get("campaign_id") != campaign_id:
-        return fail("network-smoke result campaign binding differs")
-    network = result.get("network_smoke") or {}
-    vm_name = result.get("vm_name") or ""
+    try:
+        native = _native_network_status_snapshot(campaign_id, shadow_root)
+        if native is None:
+            evidence = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+            if evidence.is_symlink() or not evidence.is_file():
+                return fail(f"network-smoke result is absent or redirected: {campaign_id}")
+            result = json.loads(evidence.read_text(encoding="utf-8-sig"))
+            if not isinstance(result, dict) or result.get("campaign_id") != campaign_id:
+                return fail("network-smoke result campaign binding differs")
+            state = None
+            completed_run = True
+        else:
+            state, result, evidence, completed_run = native
+    except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        return fail(f"network-smoke status rejected: {exc}")
+    reported = result if completed_run else {"vm_name": state["vm_name"]}
+    network = reported.get("network_smoke")
+    if network is None:
+        network = {}
+    if not isinstance(network, dict):
+        return fail("network-smoke status network evidence is malformed")
+    cleanup = reported.get("cleanup")
+    if cleanup is None:
+        cleanup = {}
+    if not isinstance(cleanup, dict):
+        return fail("network-smoke status cleanup evidence is malformed")
+    vm_name = reported.get("vm_name") or ""
     vm_state = "UNKNOWN"
     vbox = Path("/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe")
     if vm_name and vbox.is_file():
@@ -10533,12 +10751,27 @@ def lab_network_status(campaign_id: str) -> int:
             vm_state = match.group(1).upper() if probe.returncode == 0 and match else "ABSENT"
         except (OSError, subprocess.TimeoutExpired):
             vm_state = "UNKNOWN"
+    native_status = None
+    if state:
+        if state["phase"] == "RECOVERED" and completed_run:
+            native_status = "PASS"
+        elif state.get("run_status") == "FAIL" or state["phase"] == "FAILED":
+            native_status = "FAIL"
+        elif state["phase"] == "RECOVERED":
+            native_status = "NOT_RUN"
+        else:
+            native_status = "PENDING"
     print(json.dumps({
         "campaign_id": campaign_id,
-        "source_sha": result.get("source_git_sha"),
+        "source_sha": state["source_sha"] if state else result.get("source_git_sha"),
+        "evidence_source": "protected-shadow" if state else "legacy-laboratory",
+        "native_phase": state["phase"] if state else None,
+        "native_run_status": state.get("run_status") if state else None,
+        "native_error": state.get("run_error") if state else None,
+        "native_status": native_status,
         "vm_name": vm_name,
         "vm_state": vm_state,
-        "virtualbox_backend": result.get("virtualbox_backend"),
+        "virtualbox_backend": reported.get("virtualbox_backend"),
         "ssh_host": network.get("address"),
         "ssh_port": network.get("port"),
         "ssh_user": network.get("user"),
@@ -10547,17 +10780,17 @@ def lab_network_status(campaign_id: str) -> int:
         "ssh_handshake": network.get("ssh_auth_ready"),
         "remote_command": network.get("remote_command_ready"),
         "rocky_runtime": network.get("rocky_runtime"),
-        "guest_security": result.get("guest_security"),
+        "guest_security": reported.get("guest_security"),
         "rocky_version": network.get("rocky_version"),
         "vagrant_ssh_wrapper": network.get("vagrant_ssh_command"),
         "direct_openssh": network.get("remote_command_ready"),
-        "packer_rebuild": "NOT_REQUIRED" if result.get("box_digest_verified") == "PASS" else "UNVERIFIED",
-        "vm_recreate": result.get("vm_recreate"),
-        "artifacts_retained": (result.get("cleanup") or {}).get("vm_preserved"),
-        "checkpoints": result.get("checkpoints"),
-        "resume_from": result.get("resume_from"),
-        "resume_runner_source_sha": result.get("resume_runner_source_sha"),
-        "resume_seed_server": result.get("resume_seed_server"),
+        "packer_rebuild": "NOT_REQUIRED" if reported.get("box_digest_verified") == "PASS" else "UNVERIFIED",
+        "vm_recreate": reported.get("vm_recreate"),
+        "artifacts_retained": cleanup.get("vm_preserved"),
+        "checkpoints": reported.get("checkpoints"),
+        "resume_from": reported.get("resume_from"),
+        "resume_runner_source_sha": reported.get("resume_runner_source_sha"),
+        "resume_seed_server": reported.get("resume_seed_server"),
         "failure_code": network.get("failure_code"),
         "evidence": str(evidence),
     }, sort_keys=True))
@@ -13495,7 +13728,7 @@ def main() -> int:
                  "lab-network-native-boot-recover", "lab-network-native-boot-self-test"):
         native_boot = sub.add_parser(name)
         native_boot.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
-        if name == "lab-network-native-boot-prepare":
+        if name in {"lab-network-native-boot-prepare", "lab-network-native-boot-self-test"}:
             native_boot.add_argument("--expected-vm-id", required=True)
     lab_status = sub.add_parser("lab-network-status")
     lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))

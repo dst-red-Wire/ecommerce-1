@@ -221,7 +221,7 @@ lab-network-native-boot-recover: ## Restore normal boot and remove the owned net
 	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-recover --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-native-boot-self-test: ## Check network native-boot BCD parsing and state guards without mutation
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-self-test --campaign-id "$(CAMPAIGN_ID)"
+	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-self-test --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)"
 
 lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
 	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"

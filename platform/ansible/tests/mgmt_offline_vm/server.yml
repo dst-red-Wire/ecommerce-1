@@ -367,6 +367,13 @@
               mode: '0600'
             delegate_to: localhost
             become: false
+          - name: Mark the fresh functional replay proof even when its content is unchanged
+            ansible.builtin.file:
+              path: {{ (vm_state ~ '/rke2-result.json') | to_json }}
+              state: touch
+              mode: '0600'
+            delegate_to: localhost
+            become: false
 
 - name: Resolve canonical verified collection generation
   ansible.builtin.command:

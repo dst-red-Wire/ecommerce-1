@@ -976,6 +976,66 @@ function Copy-ShadowRelativeFile {
     Copy-PinnedSourceFile -Source (Join-Path $SourceRoot $windowsRelative) -Destination $resolved
 }
 
+function Get-OptionalShadowItem {
+    param([string]$Path)
+    try { return Get-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch [System.Management.Automation.ItemNotFoundException] { return $null }
+    catch [System.IO.FileNotFoundException] { return $null }
+}
+
+function Remove-VerifiedShadowPrivateKey {
+    param([string]$ShadowRoot, [scriptblock]$RuntimeClearProbe)
+    if ($null -eq $RuntimeClearProbe) { throw 'Shadow key removal requires an explicit idle runtime probe' }
+    $root = [IO.Path]::GetFullPath($ShadowRoot).TrimEnd('\')
+    $identity = Join-Path $root 'identity'
+    $key = Join-Path $identity 'id_ed25519'
+    if ($null -eq (Get-OptionalShadowItem -Path $root)) { return $false }
+    [void](Assert-RegularLabPath -Path $root -Directory $true)
+    Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $root) -Directory $true -Path $root
+    if ($null -eq (Get-OptionalShadowItem -Path $identity)) { return $false }
+    [void](Assert-RegularLabPath -Path $identity -Directory $true)
+    Assert-PrivateShadowAcl -Acl (Get-Acl -LiteralPath $identity) -Directory $true -Path $identity
+    if ($null -eq (Get-OptionalShadowItem -Path $key)) { return $false }
+    [void](Assert-RegularLabPath -Path $key -Directory $false)
+    Assert-PrivateShadowAcl -Acl (Get-Acl -LiteralPath $key) -Directory $false -Path $key
+    if (-not (& $RuntimeClearProbe)) {
+        throw 'Native shadow key removal requires normal boot and no owned task or BCD entry'
+    }
+    Remove-Item -LiteralPath $key -Force -ErrorAction Stop
+    if ($null -ne (Get-OptionalShadowItem -Path $key)) {
+        throw 'Native shadow private key remains after bounded removal'
+    }
+    return $true
+}
+
+function Remove-NativeShadowPrivateKey {
+    param([string]$Id, [string]$Sha)
+    $root = Get-NativeShadowRoot -Id $Id -Sha $Sha
+    $identity = Join-Path $root 'identity'
+    if ($script:SmokeRoot -ine $root -or $script:PrivateShadowRoot -ine $identity) {
+        throw 'Native shadow key cleanup differs from the exact campaign and source root'
+    }
+    Assert-ShadowProgramFiles
+    $parent = 'C:\Program Files\EcommerceNativeSmoke'
+    if ($null -eq (Get-OptionalShadowItem -Path $parent)) { return $false }
+    [void](Assert-RegularLabPath -Path $parent -Directory $true)
+    Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $parent) -Directory $true -Path $parent
+    if ($null -eq (Get-OptionalShadowItem -Path $root)) { return $false }
+    Assert-ShadowBoundary
+    $runtimeClear = {
+        $boot = Get-BootContext
+        if ($boot.current -ne $boot.default -or $boot.sequence -ne '' -or
+            @(Get-OwnedEntries).Count -ne 0) { return $false }
+        foreach ($name in @($ResumeTaskName,$WatchdogTaskName,$ProbeTaskName)) {
+            if ($null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $name -ErrorAction SilentlyContinue)) {
+                return $false
+            }
+        }
+        return $true
+    }
+    return Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe $runtimeClear
+}
+
 function Initialize-NativeShadow {
     param([string]$Id, [string]$Sha, $OriginalCampaign)
     Assert-ShadowProgramFiles
@@ -989,6 +1049,7 @@ function Initialize-NativeShadow {
     Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $parent) -Directory $true -Path $parent
     Set-NativeShadowContext -Id $Id -Sha $Sha
     New-ShadowDirectory -Path $script:SmokeRoot
+    $script:PrepareShadowCreated = $true
     $shadowLock = [IO.File]::Create($script:RuntimeLockPath,4096,[IO.FileOptions]::None,
         (New-ProtectedLabAcl -Directory $false))
     $shadowLock.Dispose()
@@ -1582,23 +1643,34 @@ function Invoke-Prepare {
         }
     }
     $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    # Create fresh inodes under a historically protected Windows parent. Old
-    # write handles on the diagnostic stage cannot mutate these task inputs.
-    $campaign = Initialize-NativeShadow -Id $Id -Sha $Sha -OriginalCampaign $campaign
-    Invoke-S4UProbeTask -Campaign $campaign -Id $Id -Sha $Sha -OwnerSid $ownerSid
-    Protect-NativeInputs -Id $Id
-    Assert-ProtectedNativeInputs -Id $Id
-    $sealedCampaign = Assert-ExistingCampaign -Id $Id -Sha $Sha
-    if ($sealedCampaign.vm_id -ine $campaign.vm_id -or
-        $sealedCampaign.runner_manifest_sha256 -ne $campaign.runner_manifest_sha256 -or
-        $sealedCampaign.box_sha256 -ne $campaign.box_sha256) {
-        throw 'Retained VM, runner or box changed after the S4U probe'
+    $script:PrepareShadowCreated = $false
+    try {
+        # Create fresh inodes under a historically protected Windows parent. Old
+        # write handles on the diagnostic stage cannot mutate these task inputs.
+        $campaign = Initialize-NativeShadow -Id $Id -Sha $Sha -OriginalCampaign $campaign
+        Invoke-S4UProbeTask -Campaign $campaign -Id $Id -Sha $Sha -OwnerSid $ownerSid
+        Protect-NativeInputs -Id $Id
+        Assert-ProtectedNativeInputs -Id $Id
+        $sealedCampaign = Assert-ExistingCampaign -Id $Id -Sha $Sha
+        if ($sealedCampaign.vm_id -ine $campaign.vm_id -or
+            $sealedCampaign.runner_manifest_sha256 -ne $campaign.runner_manifest_sha256 -or
+            $sealedCampaign.box_sha256 -ne $campaign.box_sha256) {
+            throw 'Retained VM, runner or box changed after the S4U probe'
+        }
+        $probeDigest = Get-FileSha256 -Path (Join-Path $script:SmokeRoot "s4u-probe-$Id-$Sha.json")
+        $backupDir = Join-Path $script:SmokeRoot 'bcd'
+        New-ShadowDirectory -Path $backupDir
+        $backup = Join-Path $backupDir "before-$Id-$Sha-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')).bak"
+        if (Test-Path -LiteralPath $backup) { throw 'Campaign BCD backup already exists' }
     }
-    $probeDigest = Get-FileSha256 -Path (Join-Path $script:SmokeRoot "s4u-probe-$Id-$Sha.json")
-    $backupDir = Join-Path $script:SmokeRoot 'bcd'
-    New-ShadowDirectory -Path $backupDir
-    $backup = Join-Path $backupDir "before-$Id-$Sha-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')).bak"
-    if (Test-Path -LiteralPath $backup) { throw 'Campaign BCD backup already exists' }
+    catch {
+        $failure = $_.Exception.Message
+        if ($script:PrepareShadowCreated) {
+            try { [void](Remove-NativeShadowPrivateKey -Id $Id -Sha $Sha) }
+            catch { $failure += "; shadow key cleanup: $($_.Exception.Message)" }
+        }
+        throw "Native smoke preparation failed before BCD mutation: $failure"
+    }
     $script:RegisteredNativeTasks = @()
     $state = $null
     $nativeId = ''
@@ -1686,6 +1758,10 @@ function Invoke-Prepare {
             }
         }
         catch { $failure += "; failure state: $($_.Exception.Message)" }
+        if ($script:PrepareShadowCreated) {
+            try { [void](Remove-NativeShadowPrivateKey -Id $Id -Sha $Sha) }
+            catch { $failure += "; shadow key cleanup: $($_.Exception.Message)" }
+        }
         throw "Native smoke preparation failed closed: $failure"
     }
 }
@@ -1756,6 +1832,7 @@ function Invoke-Recover {
             throw 'Previously recovered native smoke boot no longer has a clean normal BCD state'
         }
         Assert-NativeRecoveredProof -State $state
+        [void](Remove-NativeShadowPrivateKey -Id ([string]$state.campaign_id) -Sha ([string]$state.source_sha))
         [Console]::WriteLine("PASS lab-native-boot-recover campaign=$($state.campaign_id) already-recovered=true")
         return
     }
@@ -1810,6 +1887,7 @@ function Invoke-Recover {
         $state | Add-Member -NotePropertyName run_error -NotePropertyValue ("Protected native proof failed recovery validation: $($_.Exception.Message)") -Force
         $state | Add-Member -NotePropertyName result_sha256 -NotePropertyValue '' -Force
     }
+    [void](Remove-NativeShadowPrivateKey -Id ([string]$state.campaign_id) -Sha ([string]$state.source_sha))
     $state.phase = 'RECOVERED'
     $state | Add-Member -NotePropertyName recovered_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     Write-NativeBootState -State $state
@@ -1883,6 +1961,44 @@ function Invoke-NativeAclDiskSelfTest {
         }
         $privateCopy = Join-Path $private 'copied-secret.txt'
         Copy-PinnedSourceFile -Source $file -Destination $privateCopy -AllowedRoot $root -Private
+        $keyDirectory = Join-Path $root 'identity'
+        New-ShadowDirectory -Path $keyDirectory -Private
+        $key = Join-Path $keyDirectory 'id_ed25519'
+        $publicKey = Join-Path $keyDirectory 'id_ed25519.pub'
+        Copy-PinnedSourceFile -Source $file -Destination $key -AllowedRoot $root -Private
+        Copy-PinnedSourceFile -Source $file -Destination $publicKey -AllowedRoot $root -Private
+        $publicDigest = Get-FileSha256 -Path $publicKey
+        $siblingDigest = Get-FileSha256 -Path $privateCopy
+        $rejected = $false
+        try { [void](Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe { $false }) }
+        catch { $rejected = $true }
+        if (-not $rejected -or -not (Test-Path -LiteralPath $key -PathType Leaf)) {
+            throw 'Native shadow key removal ignored an active runtime probe'
+        }
+        Set-Acl -LiteralPath $key -AclObject (New-ProtectedLabAcl -Directory $false)
+        $rejected = $false
+        try { [void](Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe { $true }) }
+        catch { $rejected = $true }
+        if (-not $rejected -or -not (Test-Path -LiteralPath $key -PathType Leaf)) {
+            throw 'Native shadow key removal accepted a widened private key ACL'
+        }
+        Set-Acl -LiteralPath $key -AclObject (New-PrivateShadowAcl -Directory $false)
+        if (-not (Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe { $true }) -or
+            (Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe { $true })) {
+            throw 'Native shadow key removal was not exact and idempotent'
+        }
+        [void](New-Item -ItemType SymbolicLink -Path $key -Target $publicKey -ErrorAction Stop)
+        try {
+            $rejected = $false
+            try { [void](Remove-VerifiedShadowPrivateKey -ShadowRoot $root -RuntimeClearProbe { $true }) }
+            catch { $rejected = $true }
+            if (-not $rejected) { throw 'Native shadow key removal accepted a symbolic link' }
+        }
+        finally { [IO.File]::Delete($key) }
+        if ((Get-FileSha256 -Path $publicKey) -ne $publicDigest -or
+            (Get-FileSha256 -Path $privateCopy) -ne $siblingDigest) {
+            throw 'Native shadow key removal changed unrelated files'
+        }
         $lockPath = Join-Path $root '.runtime.lock'
         $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
         try { Protect-LabPath -Path $lockPath -Directory $false }
