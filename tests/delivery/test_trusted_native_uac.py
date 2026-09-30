@@ -252,6 +252,28 @@ class TrustedNativeUacTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "differs from Git"):
                 RD._native_verify_base_tree(root, sha, environment=environment)
 
+    def test_native_git_uses_only_the_system_binary(self):
+        with mock.patch.dict(os.environ, {"PATH": "/tmp/attacker"}):
+            environment = RD._native_child_environment()
+        self.assertEqual("/usr/bin:/bin:/usr/local/bin", environment["PATH"])
+        with mock.patch.object(RD.shutil, "which", return_value="/tmp/attacker/git"):
+            with mock.patch.object(RD.subprocess, "run") as run:
+                with self.assertRaisesRegex(RuntimeError, "trusted native Git executable"):
+                    RD._native_git_bytes(ROOT, "rev-parse", "HEAD", environment=environment)
+                run.assert_not_called()
+        with mock.patch.object(RD.shutil, "which", return_value="/usr/bin/git"):
+            with mock.patch.object(
+                RD.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 0, b"ok", b""),
+            ) as run:
+                self.assertEqual(
+                    b"ok", RD._native_git_bytes(
+                        ROOT, "rev-parse", "HEAD", environment=environment
+                    ),
+                )
+            self.assertEqual("git", run.call_args.args[0][0])
+            self.assertIs(environment, run.call_args.kwargs["env"])
+
     def test_caller_cannot_skip_runtime_lock_through_environment(self):
         with mock.patch.dict(os.environ, {
             "ECOMMERCE_RUNTIME_ORCHESTRATED": "1",

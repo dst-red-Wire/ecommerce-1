@@ -522,9 +522,11 @@ def _native_child_environment() -> dict[str, str]:
 
 
 def _native_git_bytes(root: Path, *args: str, environment: dict[str, str]) -> bytes:
+    if shutil.which("git", path=environment.get("PATH")) != "/usr/bin/git":
+        raise RuntimeError("trusted native Git executable is unavailable")
     try:
         result = subprocess.run(
-            ["/usr/bin/git", "-c", "core.fsmonitor=false",
+            ["git", "-c", "core.fsmonitor=false",
              "-c", "core.hooksPath=/dev/null", "-C", str(root), *args],
             cwd=root, env=environment, stdin=subprocess.DEVNULL,
             capture_output=True, check=False, timeout=30,
