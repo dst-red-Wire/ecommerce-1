@@ -1,5 +1,33 @@
 ---
 # The static Go and HTMX closure uses Ruff for Python lint and format checks.
+# Older revisions installed Oxc in these role-owned locations. Reconcile them
+# whenever the quality toolchain is selected, including an explicit Ruff run.
+- name: Inspect legacy Oxc command links
+  ansible.builtin.stat:
+    path: "{{ local_bin }}/{{ item }}"
+    follow: false
+  loop: [oxlint, oxfmt]
+  register: legacy_oxc_command_links
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
+- name: Remove legacy role-owned Oxc command links
+  ansible.builtin.file:
+    path: "{{ local_bin }}/{{ item.item }}"
+    state: absent
+  loop: "{{ legacy_oxc_command_links.results }}"
+  when:
+    - item.stat.islnk | default(false)
+    - (item.stat.lnk_source | default('') | basename) == item.item ~ '-x86_64-unknown-linux-gnu'
+    - (item.stat.lnk_source | default('') | dirname | dirname) == local_share ~ '/tools/' ~ item.item
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
+- name: Remove legacy role-owned Oxc tool directories
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/{{ item }}"
+    state: absent
+  loop: [oxlint, oxfmt]
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
 - name: Create Ruff version directory
   ansible.builtin.file:
     path: "{{ local_share }}/tools/ruff/{{ ruff_version }}"

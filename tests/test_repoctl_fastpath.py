@@ -443,19 +443,78 @@ class DeveloperStateFastPathTest(unittest.TestCase):
             self.assertEqual(["/bin/ruff", "--version"], command)
             return subprocess.CompletedProcess(command, 0, "ruff 0.16.6\n", "")
 
-        with (
-            mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
-            mock.patch.object(MOD.shutil, "which", side_effect=lambda name: "/bin/ruff" if name == "ruff" else None),
-            mock.patch.object(MOD, "run", side_effect=fake_run),
-        ):
-            self.assertTrue(MOD.developer_state_ready("quality_tools"))
+        with tempfile.TemporaryDirectory() as temp:
+            managed_bin = Path(temp) / "bin"
+            managed_bin.mkdir()
+            with (
+                mock.patch.object(MOD, "managed_bin_dirs", return_value=(managed_bin,)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
+                mock.patch.object(
+                    MOD.shutil,
+                    "which",
+                    side_effect=lambda name: "/bin/ruff" if name == "ruff" else None,
+                ),
+                mock.patch.object(MOD, "run", side_effect=fake_run),
+            ):
+                self.assertTrue(MOD.developer_state_ready("quality_tools"))
 
     def test_quality_tools_fast_path_rejects_missing_ruff(self):
-        with (
-            mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
-            mock.patch.object(MOD.shutil, "which", return_value=None),
-        ):
-            self.assertFalse(MOD.developer_state_ready("quality_tools"))
+        with tempfile.TemporaryDirectory() as temp:
+            managed_bin = Path(temp) / "bin"
+            managed_bin.mkdir()
+            with (
+                mock.patch.object(MOD, "managed_bin_dirs", return_value=(managed_bin,)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
+                mock.patch.object(MOD.shutil, "which", return_value=None),
+            ):
+                self.assertFalse(MOD.developer_state_ready("quality_tools"))
+
+    def test_retired_oxc_artifacts_force_ansible_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            managed_bin = root / "bin"
+            managed_bin.mkdir()
+            retired_dir = root / "share/ecommerce-1/tools/oxlint"
+            retired_dir.mkdir(parents=True)
+            with (
+                mock.patch.object(MOD, "managed_bin_dirs", return_value=(managed_bin,)),
+                mock.patch.object(MOD, "pinned_versions", return_value={"RUFF_VERSION": "0.16.6"}),
+                mock.patch.object(MOD, "run", side_effect=AssertionError("Ruff probe must wait")),
+            ):
+                self.assertFalse(MOD.developer_state_ready("quality_tools"))
+                self.assertFalse(MOD.developer_state_ready("toolchain"))
+                retired_dir.rmdir()
+                legacy_binary = (
+                    root
+                    / "share/ecommerce-1/tools/oxfmt/0.67.0/oxfmt-x86_64-unknown-linux-gnu"
+                )
+                (managed_bin / "oxfmt").symlink_to(legacy_binary)
+                self.assertFalse(MOD.developer_state_ready("quality_tools"))
+
+    def test_qualification_identity_ignores_optional_agent_executables(self):
+        commands, _probes = MOD._qualification_toolchain()
+        self.assertIn("ruff", commands)
+        for command in ("node", "corepack", "pnpm", "nx"):
+            self.assertNotIn(command, commands)
+
+    def test_qualification_rejects_optional_tool_in_real_gate(self):
+        contract = json.loads(
+            (ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8")
+        )
+        contract["gate_requirements"]["lint"].append("nx")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            config = root / "config/toolchain"
+            config.mkdir(parents=True)
+            (root / "services").mkdir()
+            (config / "capabilities.json").write_text(
+                json.dumps(contract), encoding="utf-8"
+            )
+            with (
+                mock.patch.object(MOD, "ROOT", root),
+                self.assertRaisesRegex(RuntimeError, "optional agent tools"),
+            ):
+                MOD._qualification_toolchain()
 
     def test_exact_managed_go_pair_is_detected_without_ansible(self):
         pins = {"NODE_VERSION": "24.20.0", "GO_VERSION": "1.26.6", "SQLC_VERSION": "1.31.1"}

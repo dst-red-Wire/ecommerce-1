@@ -1284,10 +1284,14 @@ class CapabilityClosureTest(unittest.TestCase):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
         main_tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
         self.assertEqual(5, tasks.count("tags: [toolchain, quality_tools, ruff]"))
+        self.assertEqual(3, tasks.count("tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]"))
+        self.assertIn("Remove legacy role-owned Oxc command links", tasks)
+        self.assertIn("Remove legacy role-owned Oxc tool directories", tasks)
         self.assertIn("Download pinned Ruff archive", tasks)
         self.assertIn("Validate pinned Ruff version", tasks)
-        self.assertNotIn("oxlint", tasks.lower())
-        self.assertNotIn("oxfmt", tasks.lower())
+        ruff_tasks = tasks.split("- name: Create Ruff version directory", 1)[1]
+        self.assertNotIn("oxlint", ruff_tasks.lower())
+        self.assertNotIn("oxfmt", ruff_tasks.lower())
 
         shared_setup = main_tasks.split("- name: Install native build prerequisites", 1)[0]
         self.assertIn(", quality_tools, ruff]", shared_setup)
@@ -1308,6 +1312,71 @@ class CapabilityClosureTest(unittest.TestCase):
         makefile = (ROOT / "Makefile").read_text()
         self.assertIn("quality-tools:", makefile)
         self.assertIn("@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools", makefile)
+
+    def test_quality_migration_removes_only_legacy_role_owned_oxc_state(self):
+        ansible = shutil.which("ansible-playbook")
+        self.assertIsNotNone(ansible)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            local_bin = root / "bin"
+            local_share = root / "share"
+            local_bin.mkdir()
+            tools = local_share / "tools"
+            tools.mkdir(parents=True)
+            keep = tools / "ruff" / "keep"
+            keep.parent.mkdir()
+            keep.write_text("preserve", encoding="utf-8")
+            for name in ("oxlint", "oxfmt"):
+                target = tools / name / "legacy-version" / f"{name}-x86_64-unknown-linux-gnu"
+                target.parent.mkdir(parents=True)
+                target.write_text("legacy", encoding="utf-8")
+                (local_bin / name).symlink_to(target)
+
+            quality_tasks = ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml"
+            playbook = root / "legacy-oxc-cleanup.yml"
+            playbook.write_text(
+                "- hosts: localhost\n"
+                "  gather_facts: false\n"
+                "  vars:\n"
+                f"    local_bin: {local_bin}\n"
+                f"    local_share: {local_share}\n"
+                "  tasks:\n"
+                f"    - ansible.builtin.import_tasks: {quality_tasks}\n",
+                encoding="utf-8",
+            )
+            command = [
+                ansible,
+                "-i",
+                "localhost,",
+                "-c",
+                "local",
+                "--tags",
+                "legacy_oxc_cleanup",
+                str(playbook),
+            ]
+            first = subprocess.run(
+                command, cwd=ROOT, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+            for name in ("oxlint", "oxfmt"):
+                self.assertFalse((local_bin / name).is_symlink())
+                self.assertFalse((local_bin / name).exists())
+                self.assertFalse((tools / name).exists())
+            self.assertEqual("preserve", keep.read_text(encoding="utf-8"))
+
+            # A later local command outside this role's Oxc tree must be preserved.
+            (local_bin / "oxlint").write_text("user tool", encoding="utf-8")
+            external = root / "external-oxfmt"
+            external.write_text("user tool", encoding="utf-8")
+            (local_bin / "oxfmt").symlink_to(external)
+            second = subprocess.run(
+                command, cwd=ROOT, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("changed=0", second.stdout)
+            self.assertEqual("user tool", (local_bin / "oxlint").read_text(encoding="utf-8"))
+            self.assertEqual(external, (local_bin / "oxfmt").resolve())
+            self.assertEqual("preserve", keep.read_text(encoding="utf-8"))
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()
