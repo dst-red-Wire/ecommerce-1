@@ -111,6 +111,8 @@ Canonical tracker: GitHub issue `#32`.
 
 Bootstrap the persistent management plane from the canonical V5 contracts. M2.5 must be PROVEN before M3 starts.
 
+The isolated Rocky/RKE2 lab establishes readiness for real provisioning. Its evidence declares `deployment_state=NOT_DEPLOYED`, paid resources remain zero, and real target and service inputs remain pending. Lab readiness alone cannot satisfy the M2.5 exit gate: `PROVEN` requires separately observed persistent MGMT deployment evidence under a future explicit target contract.
+
 ### M3 — PREPROD Infrastructure
 
 Canonical tracker: GitHub issue `#16`.

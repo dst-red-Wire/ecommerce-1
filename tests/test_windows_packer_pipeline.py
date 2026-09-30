@@ -102,7 +102,11 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         pwsh = Path("/mnt/c/Program Files/PowerShell/7/pwsh.exe")
         if not pwsh.is_file():
             self.skipTest("Windows PowerShell interop is unavailable")
-        for script in ("BoundedProcess.Tests.ps1", "NativeStorageGc.Tests.ps1"):
+        for script in (
+            "BoundedProcess.Tests.ps1",
+            "NativeStorageGc.Tests.ps1",
+            "NativeVagrantSshSmoke.Tests.ps1",
+        ):
             result = subprocess.run(
                 [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
                  "Bypass", "-File", f"tests/windows/{script}"],
@@ -116,6 +120,31 @@ class WindowsPackerPipelineTest(unittest.TestCase):
             cwd=ROOT, capture_output=True, text=True, timeout=90,
         )
         self.assertEqual(0, cycle.returncode, cycle.stdout + cycle.stderr)
+        network_boot = subprocess.run(
+            [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "scripts/windows/LabNativeBoot.ps1",
+             "-Action", "SelfTest"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, network_boot.returncode, network_boot.stdout + network_boot.stderr)
+        network_lease = subprocess.run(
+            [str(pwsh), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "scripts/windows/LabNetworkSmoke.ps1",
+             "-Action", "SelfTest", "-StageRoot", "C:\\nonexistent"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, network_lease.returncode, network_lease.stdout + network_lease.stderr)
+
+    def test_windows_seed_server_survives_empty_optional_response(self):
+        powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+        if not powershell.is_file():
+            self.skipTest("Windows PowerShell 5.1 interop is unavailable")
+        result = subprocess.run(
+            [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+             "Bypass", "-File", "tests/windows/SeedServer.Tests.ps1"],
+            cwd=ROOT, capture_output=True, text=True, timeout=90,
+        )
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_native_storage_gc_contract(self):
         policy = yaml.safe_load((ROOT / "config/contracts/vm-lifecycle-policy.yaml").read_text())
@@ -141,7 +170,7 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertIn("NEM", self.native)
 
     def test_native_boot_mutation_fails_early_without_administrator_token(self):
-        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator))", self.native)
+        self.assertIn("if ($Action -in @('Preflight', 'Prepare', 'Reboot', 'Recover', 'ResetFailed', 'Cycle', 'Resume', 'Import', 'ProbeS4U', 'ProbeSystem') -and -not (Test-Administrator))", self.native)
         self.assertIn("BLOCKED_PRIVILEGE", self.native)
         self.assertNotIn("Invoke-ElevatedSelf", self.native)
 
@@ -190,7 +219,9 @@ class WindowsPackerPipelineTest(unittest.TestCase):
 
         launcher = self.native_launcher
         self.assertIn("BLOCKED_PRIVILEGE", launcher)
-        self.assertIn("GitHub PR #148 HEAD differs", launcher)
+        self.assertIn("Current branch PR HEAD differs", launcher)
+        self.assertIn("gh pr view $branch --repo dst-red-Wire/ecommerce-1", launcher)
+        self.assertNotIn("gh pr view 148", launcher)
         self.assertLess(launcher.index("-Action PrepareDryRun"), launcher.index("image-rocky-windows-native-prepare"))
         self.assertIn("python3 scripts/repoctl.py image-rocky-windows-native-reboot", launcher)
         self.assertLess(launcher.index("image-rocky-windows-native-prepare"), launcher.index("image-rocky-windows-native-reboot"))
@@ -368,20 +399,65 @@ class WindowsPackerPipelineTest(unittest.TestCase):
         self.assertNotIn("Native Vagrant SSH readiness failed", self.native)
         self.assertNotIn("for ($attempt = 1; $attempt -le 12; $attempt++)", self.native)
 
+    def test_network_checkpoint_resumes_without_recreating_the_vm(self):
+        policy = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text(encoding="utf-8"))["step_qualification"]
+        self.assertEqual("forbidden", policy["monolithic_network_timeout"])
+        self.assertEqual("required", policy["bounded_backoff"])
+        self.assertTrue(policy["checkpointed"] and policy["resumable"])
+        network = (WINDOWS / "LabNetworkSmoke.ps1").read_text(encoding="utf-8")
+        resume = network.split("if ($Action -eq 'Resume') {\n    $globalResumeLock", 1)[1].split("if (Test-Path -LiteralPath $resultPath", 1)[0]
+        self.assertIn("$result.cleanup.vm_preserved -ne $true", resume)
+        self.assertIn("Get-FileSha256 -Path $box", resume)
+        self.assertIn("Get-VBoxMachines", resume)
+        self.assertIn("Complete-NativeSshSmokeEvidence", resume)
+        self.assertIn("-VagrantUpResult $null -ProtectedRoot $shadow", resume)
+        self.assertIn("Assert-NativeProtectedEvidenceAcl -Path $Path", network)
+        self.assertIn("@('up','--provider','virtualbox','--no-provision')", resume)
+        self.assertIn("Network SSH resume changed the retained VirtualBox VM identity", resume)
+        self.assertNotIn("@('box','add'", resume)
+        self.assertNotIn("@('destroy'", resume)
+        self.assertIn("$result.checkpoints.'04-network-ssh'", resume)
+        self.assertIn("'BLOCKED_RUNTIME'", resume)
+        self.assertIn("Get-LabBackend -LogPath (Join-Path $network.diagnostics_directory 'VBox.log')", resume)
+        self.assertIn("[IO.FileShare]::None", resume)
+        self.assertIn("$resumeLock.Dispose()", resume)
+        self.assertIn("$globalResumeLock.Dispose()", resume)
+        self.assertIn("[IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None", resume)
+        self.assertIn("Write-NativeProtectedResult -InputObject $result", resume)
+        self.assertIn("$result.guest_security = 'NOT_EXECUTED'", resume)
+        self.assertIn("Assert-LabGuestSecurity -SshExecutable $ssh -Network $network", resume)
+        self.assertIn("$result.guest_security = 'PASS'", resume)
+        self.assertIn("$result.guest_security -ne 'PASS'", resume)
+        self.assertIn("$result.checkpoints.'04-network-ssh' = 'FAIL'", resume)
+        probe = (WINDOWS / "NativeVagrantSshSmoke.ps1").read_text(encoding="utf-8")
+        self.assertIn("$Evidence.vagrant_ssh_command = 'FAIL_NON_BLOCKING'", probe)
+        self.assertNotIn("-TimeoutSeconds 120 -WorkingDirectory $WorkingDirectory -Environment $Environment", probe)
+        self.assertIn("$result.status = if ($result.virtualbox_backend -eq 'NATIVE_VTX') { 'PASS' } else { 'BLOCKED_RUNTIME' }", network)
+
     def test_standard_vagrant_ssh_retry_remains_bounded(self):
         self.assertIn("$attempt -le 12", self.qualify)
         self.assertIn("@('ssh', '-c', 'true') -TimeoutSeconds 60", self.qualify)
 
     def test_vagrant_guest_probe_timeout_is_named_and_retried_only_once(self):
-        for source in (self.native, self.qualify):
-            self.assertIn('$attempt -le 2', source)
-            self.assertIn('timed out after 2 bounded attempts', source)
-            self.assertIn('Start-Sleep -Seconds 5', source)
-        self.assertIn('if ($_.Exception.Message -ne "Timed out after 120s: $Vagrant") { throw }', self.native)
-        self.assertIn('if ($_.Exception.Message -ne "Timed out after ${TimeoutSeconds}s: $script:vagrant") { throw }', self.qualify)
+        self.assertIn('Invoke-NativeDirectSshProbe -SshExecutable $ssh', self.native)
+        self.assertIn('-Command $Command -TimeoutSeconds 60', self.native)
+        self.assertNotIn("@('ssh', '-c', $Command)", self.native)
+        self.assertIn('$attempt -le 2', self.qualify)
+        self.assertIn('timed out after 2 bounded attempts', self.qualify)
+        self.assertIn('Start-Sleep -Seconds 5', self.qualify)
+        self.assertIn('Timed out after ${TimeoutSeconds}s: $script:vagrant; output=', self.qualify)
+        self.assertIn('Timed out after 60s: $vagrant; output=', self.qualify)
+
+    def test_large_native_inventories_use_verified_direct_ssh(self):
+        self.assertIn("$SshEvidence.remote_command_ready -ne 'PASS'", self.native)
+        self.assertIn("$SshEvidence.rocky_runtime -ne 'PASS'", self.native)
+        self.assertIn("'StrictHostKeyChecking=yes'", self.native)
+        self.assertIn("'packer@127.0.0.1', $Command", self.native)
+        self.assertIn("-SshEvidence $sshSmoke -Name 'rpm-profile'", self.native)
+        self.assertIn("-SshEvidence $sshSmoke -Name 'package-manifest'", self.native)
 
     def test_disk_smoke_cannot_report_success_after_failed_size_check(self):
-        self.assertIn('test "$size" -ge {0} && printf', self.native)
+        self.assertIn("test \"$size\" -ge {0} && printf ''%s\\n''", self.native)
         self.assertIn('test "$available" -ge 1024 && printf', self.qualify)
 
     def test_guest_smoke_commands_are_literal_and_shell_syntax_valid(self):
@@ -397,6 +473,32 @@ class WindowsPackerPipelineTest(unittest.TestCase):
                 candidate.write_text("Invoke-VagrantSmokeCommand -Command 'if true; then'\n", encoding="utf-8")
                 with self.assertRaisesRegex(VALIDATOR.GuestSmokePreflightError, "invalid guest shell syntax"):
                     VALIDATOR.validate_guest_smoke_commands()
+
+    def test_native_image_guest_probe_literals_are_checked_by_bash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            network = root / "scripts/windows/LabNetworkSmoke.ps1"
+            network.parent.mkdir(parents=True)
+            original = (WINDOWS / "LabNetworkSmoke.ps1").read_text(encoding="utf-8")
+            broken = re.sub(
+                r"(@\{ Name='kernel'; Command=)'(?:''|[^'])*'",
+                r"\1'if true; then'",
+                original,
+                count=1,
+            )
+            self.assertNotEqual(original, broken)
+            network.write_text(broken, encoding="utf-8")
+            fixture = root / "native-vtx-cycle.ps1"
+            fixture.write_text("Invoke-VagrantSmokeCommand -Command 'true'\n", encoding="utf-8")
+            with (mock.patch.object(VALIDATOR, "ROOT", root),
+                  mock.patch.object(VALIDATOR, "WINDOWS_SOURCES",
+                                    ((fixture, "Invoke-VagrantSmokeCommand", 1),))):
+                commands = dict(VALIDATOR._windows_commands())
+                with self.assertRaisesRegex(VALIDATOR.GuestSmokePreflightError,
+                                            "invalid guest shell syntax"):
+                    VALIDATOR._check_bash(
+                        commands["LabNetworkSmoke.ps1:image:kernel"], "native-image-kernel",
+                    )
 
     def test_native_prepare_runs_guest_command_preflight_before_staging(self):
         self.assertIn('scripts/validate_guest_smoke_commands.py', self.native)
@@ -442,6 +544,8 @@ class WindowsPackerPipelineTest(unittest.TestCase):
 
     def test_vagrant_only_owns_lifecycle_and_smoke_transport(self):
         self.assertIn("config.vm.box", self.vagrant)
+        self.assertIn("ds=nocloud;s=http://10.0.2.2:", self.vagrant)
+        self.assertNotIn("nocloud-net", self.vagrant)
         self.assertIn('config.ssh.username = "packer"', self.vagrant)
         self.assertIn('vm.customize ["modifyvm"', self.vagrant)
         self.assertIn('runtime.fetch("nic_type")', self.vagrant)

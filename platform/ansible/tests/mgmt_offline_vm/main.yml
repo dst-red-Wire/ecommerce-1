@@ -10,10 +10,6 @@
     vm_memory: "{{ mgmt_local_vm_contract.resources.artifact_default.memory_mib }}"
     vm_cpus: "{{ mgmt_local_vm_contract.resources.artifact_default.cpus }}"
     vm_resume_owned_creation: false
-    vm_box_name: "{{ mgmt_local_vm_contract.rocky_box.name }}"
-    vm_box_url: "{{ mgmt_local_vm_contract.rocky_box.url }}"
-    vm_box_sha256: "{{ mgmt_local_vm_contract.rocky_box.sha256 }}"
-    vm_vagrant_version: "{{ mgmt_local_vm_contract.vagrant.version }}"
     vm_vbox: /mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe
     vm_vagrant_windows: C:\Program Files\Vagrant\bin\vagrant.exe
     vm_repo: "{{ (playbook_dir ~ '/../../../..') | realpath }}"
@@ -26,10 +22,13 @@
     - name: Validate explicit disposable resource inputs
       ansible.builtin.assert:
         that:
-          - vm_action in ['validate', 'create', 'resize', 'test', 'restage', 'tamper', 'server', 'qualify', 'destroy']
+          - vm_action in ['validate', 'create', 'resize', 'diagnostics', 'test', 'restage', 'tamper', 'server', 'qualify', 'destroy']
           - vm_resume_owned_creation | bool in [true, false]
           - vm_name is match('^ecommerce-mgmt-test-[a-z0-9-]+$')
           - vm_vagrant_version is match('^[0-9]+\.[0-9]+\.[0-9]+$')
+          - vm_box_name is match('^rocky-10[.]2-rke2-virtualbox$')
+          - vm_box_url is match('^file:///[^ ]+/rocky-10[.]2-rke2-virtualbox[.]box$')
+          - vm_box_sha256 is match('^[0-9a-f]{64}$')
           - vm_cpus | string is match('^[0-9]+$')
           - vm_memory | string is match('^[0-9]+$')
           - vm_cpus | int >= mgmt_local_vm_contract.resources.cpu_minimum
@@ -96,13 +95,18 @@
         mode: '0600'
         content: >-
           {{ {'name': vm_name, 'memory': vm_memory | int, 'cpus': vm_cpus | int, 'mac': vm_mac,
+              'hostonly_adapter': vm_hostonly_adapter,
               'address': vm_address, 'box_name': vm_box_name, 'box_url': vm_box_url,
               'box_sha256': vm_box_sha256,
               'vagrant_version': vm_vagrant_version,
               'vagrant_windows': vm_vagrant_windows} | to_nice_json }}
     - name: Run native Vagrant validation
       ansible.builtin.command:
-        argv: ["{{ vm_python }}", "{{ vm_bridge }}", vagrant, --state, "{{ vm_windows_state }}", --, validate]
+        argv: >-
+          {{ [vm_python, vm_bridge, 'vagrant', '--state', vm_windows_state]
+             + (['--fresh-box'] if vm_action in ['validate', 'create', 'qualify']
+                and not vm_resume_owned_creation | bool else [])
+             + ['--', 'validate'] }}
       changed_when: false
     - name: Execute requested lifecycle and always clean a complete qualification attempt
       block:
@@ -115,6 +119,9 @@
         - name: Resize and restart the exact owned VM
           ansible.builtin.include_tasks: resize.yml
           when: vm_action == 'resize'
+        - name: Install offline diagnostic tools in the owned VM
+          ansible.builtin.include_tasks: diagnostics.yml
+          when: vm_action == 'diagnostics'
         - name: Execute actual repository artifact role
           ansible.builtin.include_tasks: test.yml
           when: vm_action in ['test', 'restage', 'qualify']

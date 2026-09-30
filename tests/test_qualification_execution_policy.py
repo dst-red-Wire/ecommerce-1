@@ -28,7 +28,33 @@ PERF_MOD = importlib.util.module_from_spec(PERF_SPEC)
 PERF_SPEC.loader.exec_module(PERF_MOD)
 
 
+def _transfer_fixture(manifest: str) -> dict:
+    return {
+        "mode": "delta", "source_digest": manifest, "prior_target_digest": None,
+        "manifest_digest": manifest, "final_digest": manifest,
+        "target_valid_before": False, "copy_changed": True,
+        "started_at": "2026-09-29T20:00:00+00:00",
+        "finished_at": "2026-09-29T20:00:01+00:00",
+    }
+
+
 class QualificationExecutionPolicyTests(unittest.TestCase):
+    def setUp(self):
+        box = {
+            "vm_box_name": "rocky-10.2-rke2-virtualbox",
+            "vm_box_url": "file:///C:/ecommerce-lab/artifacts/verified/rocky-10.2-rke2-virtualbox.box",
+            "vm_box_sha256": "a" * 64,
+            "vm_vagrant_version": "2.4.9",
+        }
+        manifest = {
+            "box_sha256": box["vm_box_sha256"],
+            "inputs_digest": "b" * 64,
+            "source_sha": "f" * 40,
+        }
+        patcher = mock.patch.object(MOD, "_rke2_verified_box", return_value=(box, manifest))
+        self.addCleanup(patcher.stop)
+        patcher.start()
+
     def test_unit_subprocess_does_not_inherit_trusted_delivery_identity(self):
         env = dict(os.environ, REPOCTL_TRUSTED_CONTROLLER="/invalid/controller.py")
         completed = subprocess.run(
@@ -640,7 +666,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertIs(True, resolved_campaign["clean_worktree_required"])
 
         self.assertNotIn("completion", rke2)
-        superseded = rke2["superseded_completion"]
+        self.assertNotIn("superseded_completion", rke2)
+        superseded = rke2["historical_completion"]
         self.assertEqual("rocky-10.2-packer-image-migration", superseded["superseded_by"])
         self.assertEqual("84cf01601aa336f0cdd2d1899d764437294fbfe6", superseded["qualified_source_sha"])
         self.assertEqual("complete", superseded["status"])
@@ -696,6 +723,41 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(1, command.count("--output"))
         self.assertEqual(str(audit_path), command[command.index("--output") + 1])
 
+    def test_performance_audit_validator_rejects_malformed_json_shapes(self):
+        head = "a" * 40
+        base = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "audit.json"
+            payload = {
+                "schema_version": 1,
+                "head_sha": head,
+                "base_sha": base,
+                "evidence_status": "PASS",
+                "inventory": {"failed_gates": 0},
+                "safety": {
+                    "content_cache_authorizes_pass_reuse": False,
+                    "verdict_reuse_policy": "exact-direct-parent-only",
+                },
+            }
+
+            def fake_git(*args, check=True):
+                if args == ("rev-parse", "origin/main"):
+                    return base + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+            ):
+                audit_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(audit_path, MOD._valid_performance_audit("origin/main", head))
+                for malformed in ([], dict(payload, safety=None), dict(payload, safety=[])):
+                    with self.subTest(malformed=malformed):
+                        audit_path.write_text(json.dumps(malformed), encoding="utf-8")
+                        self.assertIsNone(MOD._valid_performance_audit("origin/main", head))
+                audit_path.write_text("{", encoding="utf-8")
+                self.assertIsNone(MOD._valid_performance_audit("origin/main", head))
+
     def test_chatgpt_review_readiness_uses_latest_exact_sha_verdict_per_kind(self):
         head = "a" * 40
         policy = {
@@ -725,19 +787,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         cases = (
             (
-                "blocked-then-pass",
+                "fail-then-pass",
                 [
-                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "FAIL", 1)},
                     {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
                     {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
                 ],
                 True,
             ),
             (
-                "pass-then-blocked",
+                "pass-then-fail",
                 [
                     {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
-                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "FAIL", 1)},
                     {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
                 ],
                 False,
@@ -751,6 +813,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         **comment,
                         "id": index,
                         "created_at": f"2026-09-27T10:{index:02d}:00Z",
+                        "updated_at": f"2026-09-27T10:{index:02d}:00Z",
+                        "author_association": "OWNER",
                     }
                     for index, comment in enumerate(comments, start=1)
                 ]
@@ -999,15 +1063,38 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 script.write_text("def helper():\n    return 2\n", encoding="utf-8")
                 self.assertFalse(MOD._semantic_function_snapshot_unchanged(snapshot))
 
+    def test_rke2_entrypoint_rejects_non_object_inputs_before_capability_planning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / "mgmt-vm-inputs.json"
+            inputs.write_text("[]\n", encoding="utf-8")
+            with (mock.patch.object(MOD, "ROOT", root),
+                  mock.patch.object(sys, "argv", [
+                      "repoctl.py", "rke2-local-virtualbox-qualification",
+                      "--inputs", str(inputs),
+                  ]),
+                  mock.patch.dict(os.environ, {"ECOMMERCE_RUNTIME_ORCHESTRATED": "0"}),
+                  mock.patch("canonical_workspace.check", return_value={
+                      "status": "PASS", "execution_scope": "local",
+                  }),
+                  mock.patch("native_workspace.workspace_error", return_value=None)):
+                self.assertEqual(2, MOD.main())
+
     def test_rke2_registered_entrypoint_executes_complete_existing_fixture_sequence(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        execution_policy = MOD.qualification_execution_policy()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             inputs = root / ".context" / "mgmt-vm-inputs.json"
+            toolchain = root / "config/contracts/toolchain-lock.json"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(json.dumps({"versions": {"VIRTUALBOX_VERSION": "7.2.18"}}))
             inputs.parent.mkdir(parents=True)
             vm_name = "ecommerce-mgmt-test-policy"
             input_values = {
                 "vm_name": vm_name,
+                "vm_cpus": 4,
+                "vm_memory": 4096,
                 "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
             }
             inputs.write_text(
@@ -1015,11 +1102,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             frozen_inputs = __import__("json").dumps(
-                input_values,
+                {**input_values, **MOD._rke2_verified_box("c" * 40)[0]},
                 sort_keys=True,
                 separators=(",", ":"),
             )
             state = root / ".context" / "mgmt-offline-vm" / vm_name
+            reuse_path = root / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
+            self.assertFalse(reuse_path.exists())
             head = "c" * 40
             workflow = {
                 "entrypoint": (
@@ -1028,6 +1117,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 ),
                 "exact_sha_required": True,
                 "clean_worktree_required": True,
+                "resumable": False,
             }
 
             def fake_git(*args, check=True):
@@ -1035,10 +1125,29 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     return ""
                 if args == ("rev-parse", "HEAD"):
                     return head + "\n"
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "b" * 40 + "\n"
                 raise AssertionError(args)
 
+            server_attempts = []
             def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=validate":
+                    self.assertTrue(reuse_path.is_file())
                 if command[-1] == "vm_action=create":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "preflight.json").write_text(json.dumps({
+                        "rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
+                        "selinux": "Enforcing", "kernel": "6.12.0-test", "systemd": "running",
+                        "boot_id": "12345678-1234-1234-1234-123456789abc",
+                        "online_cpus": 4, "memory_kib": 4 * 1024 * 1024,
+                        "ssh_access": {
+                            "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                            "permitrootlogin": "no", "authenticationmethods": "publickey",
+                        },
+                        "public_connect_errno": 101,
+                        "nft_policies": {"output": "drop", "forward": "drop"},
+                        "ipv4_routes": [], "ipv6_routes": [],
+                    }) + "\n", encoding="utf-8")
                     inputs.write_text(
                         __import__("json").dumps(
                             {
@@ -1049,27 +1158,68 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         + "\n",
                         encoding="utf-8",
                     )
+                if command[-1] == "vm_action=test":
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "trial": {"cold_trial": True,
+                                                  "previous_attempt": False},
+                        "transfer": _transfer_fixture(input_values["mgmt_offline_manifest_sha256"]),
+                    }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
+                    server_attempts.append(True)
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "server-source.json").write_text(
                         __import__("json").dumps({"git_sha": head}) + "\n",
                         encoding="utf-8",
                     )
+                    (state / "server-invocation.json").write_text(json.dumps({
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "install_required": len(server_attempts) != 2,
+                    }))
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "transfer": _transfer_fixture(input_values["mgmt_offline_manifest_sha256"]),
+                    }))
+                    (state / "rke2-result.json").write_text(json.dumps({
+                        "node_ready": True, "cilium_ready": 1,
+                    }))
+                    (state / "tamper-result.json").write_text(json.dumps({
+                        "blocked_task": "Revalidate every staged byte immediately before privileged installation",
+                    }))
                 return completed
 
             with (
                 mock.patch.object(MOD, "ROOT", root),
+                mock.patch.object(MOD, "qualification_execution_policy", return_value=execution_policy),
                 mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
                 mock.patch.object(MOD, "_approved_rke2_manifest_sha256", return_value="738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"),
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=fake_git),
                 mock.patch.object(MOD, "require"),
+                mock.patch.dict(sys.modules, {"rke2_virtualbox_backend": types.SimpleNamespace(
+                    probe=lambda *args, **kwargs: {
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "virtualbox_backend": "NEM",
+                    }
+                )}),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
                     0,
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
+                reuse = json.loads(reuse_path.read_text(encoding="utf-8"))
+                MOD.qualification_steps.validate_checkpoint(
+                    reuse, source_sha=head, input_digest="b" * 64,
+                )
+                self.assertEqual("m2.5", reuse["qualification"])
+                self.assertEqual("image", reuse["step"])
+                self.assertEqual("SKIPPED_REUSED_VERIFIED", reuse["status"])
+                self.assertEqual("a" * 64, reuse["artifact_digest"])
+                for index, step in ((11, "evidence"), (12, "final")):
+                    checkpoint_path = state / "step-checkpoints" / f"{index:02d}-{step}.json"
+                    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+                    self.assertEqual("PASS", checkpoint["status"])
+                    self.assertEqual(step, checkpoint["step"])
 
         actions = [
             call.args[0][-1]
@@ -1081,6 +1231,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 "vm_action=validate",
                 "vm_action=create",
                 "vm_action=test",
+                "vm_action=diagnostics",
                 "vm_action=server",
                 "vm_action=server",
                 "vm_action=restage",
@@ -1096,7 +1247,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             for call in run.call_args_list
             if call.args and call.args[0] and call.args[0][0] == "ansible-playbook"
         ]
-        self.assertEqual(10, len(ansible_calls))
+        self.assertEqual(11, len(ansible_calls))
         for call in ansible_calls:
             command = call.args[0]
             self.assertIn(f"vm_repo={root}", command)
@@ -1113,6 +1264,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         with tempfile.TemporaryDirectory() as directory:
@@ -1213,6 +1365,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         approved = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
@@ -1233,6 +1386,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     __import__("json").dumps(
                         {
                             "vm_name": vm_name,
+                            "vm_cpus": 4, "vm_memory": 4096,
                             "mgmt_offline_manifest_sha256": approved,
                         }
                     )
@@ -1298,6 +1452,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "d" * 40
         forbidden = [
@@ -1347,6 +1502,29 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         )
                         run.assert_not_called()
 
+    def test_rke2_launcher_requires_supported_sizing_before_vm_creation(self):
+        workflow = {
+            "entrypoint": "scripts/repoctl.py rke2-local-virtualbox-qualification --inputs .context/mgmt-vm-inputs.json",
+            "exact_sha_required": True, "clean_worktree_required": True, "resumable": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inputs = root / ".context/mgmt-vm-inputs.json"
+            inputs.parent.mkdir(parents=True)
+            for sizing in ({}, {"vm_cpus": 2, "vm_memory": 4096},
+                           {"vm_cpus": 4, "vm_memory": 2048},
+                           {"vm_cpus": 4, "vm_memory": 32768}):
+                with self.subTest(sizing=sizing):
+                    inputs.write_text(json.dumps({"vm_name": "ecommerce-mgmt-test-policy", **sizing}),
+                                      encoding="utf-8")
+                    with (mock.patch.object(MOD, "ROOT", root),
+                          mock.patch.object(MOD, "qualification_workflow", return_value=workflow),
+                          mock.patch.object(MOD, "git", side_effect=lambda *args, **kwargs: "" if args[0] == "status" else "e" * 40),
+                          mock.patch.object(MOD, "run") as run):
+                        self.assertEqual(2, MOD.rke2_local_virtualbox_qualification(
+                            ".context/mgmt-vm-inputs.json"))
+                        run.assert_not_called()
+
     def test_rke2_launcher_rejects_noncanonical_manifest_digest(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
         workflow = {
@@ -1356,6 +1534,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "e" * 40
         with tempfile.TemporaryDirectory() as directory:
@@ -1366,6 +1545,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 __import__("json").dumps(
                     {
                         "vm_name": "ecommerce-mgmt-test-policy",
+                        "vm_cpus": 4, "vm_memory": 4096,
                         "mgmt_offline_manifest_sha256": "f" * 64,
                     }
                 )
@@ -1396,6 +1576,7 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
     def test_rke2_launcher_rejects_source_evidence_from_another_sha(self):
         completed = MOD.subprocess.CompletedProcess([], 0, "", "")
+        approved_manifest = "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
         workflow = {
             "entrypoint": (
                 "scripts/repoctl.py rke2-local-virtualbox-qualification "
@@ -1403,17 +1584,23 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             ),
             "exact_sha_required": True,
             "clean_worktree_required": True,
+            "resumable": False,
         }
         head = "e" * 40
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             vm_name = "ecommerce-mgmt-test-policy"
+            toolchain = root / "config/contracts/toolchain-lock.json"
+            toolchain.parent.mkdir(parents=True)
+            toolchain.write_text(json.dumps({"versions": {"VIRTUALBOX_VERSION": "7.2.18"}}))
             inputs = root / ".context" / "mgmt-vm-inputs.json"
             inputs.parent.mkdir(parents=True)
             inputs.write_text(
                 __import__("json").dumps(
                     {
                         "vm_name": vm_name,
+                        "vm_cpus": 4,
+                        "vm_memory": 4096,
                         "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad",
                     }
                 )
@@ -1427,9 +1614,32 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     return ""
                 if args == ("rev-parse", "HEAD"):
                     return head + "\n"
+                if args == ("rev-parse", "HEAD^{tree}"):
+                    return "b" * 40 + "\n"
                 raise AssertionError(args)
 
             def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=create":
+                    state.mkdir(parents=True, exist_ok=True)
+                    (state / "preflight.json").write_text(json.dumps({
+                        "rocky_release": "Rocky Linux release 10.2 (Red Quartz)",
+                        "selinux": "Enforcing", "kernel": "6.12.0-test", "systemd": "running",
+                        "boot_id": "12345678-1234-1234-1234-123456789abc",
+                        "online_cpus": 4, "memory_kib": 4 * 1024 * 1024,
+                        "ssh_access": {
+                            "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                            "permitrootlogin": "no", "authenticationmethods": "publickey",
+                        },
+                        "public_connect_errno": 101,
+                        "nft_policies": {"output": "drop", "forward": "drop"},
+                        "ipv4_routes": [], "ipv6_routes": [],
+                    }) + "\n", encoding="utf-8")
+                if command[-1] == "vm_action=test":
+                    (state / "role-result.json").write_text(json.dumps({
+                        "exit_code": 0, "trial": {"cold_trial": True,
+                                                  "previous_attempt": False},
+                        "transfer": _transfer_fixture(approved_manifest),
+                    }) + "\n", encoding="utf-8")
                 if command[-1] == "vm_action=server":
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "server-source.json").write_text(
@@ -1445,6 +1655,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "_canonical_rke2_vagrant_ready", return_value=True),
                 mock.patch.object(MOD, "git", side_effect=clean_git),
                 mock.patch.object(MOD, "require"),
+                mock.patch.dict(sys.modules, {"rke2_virtualbox_backend": types.SimpleNamespace(
+                    probe=lambda *args, **kwargs: {
+                        "vm_uuid": "12345678-1234-1234-1234-123456789abc",
+                        "virtualbox_backend": "NEM",
+                    }
+                )}),
                 mock.patch.object(MOD, "run", side_effect=fake_run) as run,
             ):
                 self.assertEqual(
@@ -1847,6 +2063,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_identity", return_value="identity"),
             ):
                 self.assertEqual(proof, MOD._valid_performance_campaign(head))
+                for malformed in (
+                    [], dict(payload, budgets={"warm": None}),
+                    dict(payload, safety=None), dict(payload, safety=[]),
+                ):
+                    with self.subTest(malformed=malformed):
+                        proof.write_text(json.dumps(malformed), encoding="utf-8")
+                        self.assertIsNone(MOD._valid_performance_campaign(head))
                 payload["budgets"]["warm"]["status"] = "FAIL"
                 proof.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(MOD._valid_performance_campaign(head))
@@ -2028,6 +2251,256 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 )
             )
         self.assertEqual(["a", "b", "serial", "c"], [record["gate"] for record in records])
+
+
+class QualificationStepGuardTests(unittest.TestCase):
+    def setUp(self):
+        from datetime import datetime, timezone
+
+        self.steps = MOD.qualification_steps
+        self.started = datetime.now(timezone.utc)
+        self.sha = "a" * 40
+        self.digest = "b" * 64
+        self.artifact_digest = "c" * 64
+        self.workflow = MOD.qualification_execution_policy()["workflows"]["rke2_local_virtualbox"]
+        self.graph = self.steps.validate_graph(self.workflow)
+        self.preflight = self.steps.checkpoint(
+            qualification="m2.5", step="preflight", source_sha=self.sha,
+            input_digest=self.digest, status="PASS", started_at=self.started,
+            preflight=True,
+        )
+
+    def test_policy_schema_rejects_missing_version_unknown_rule_and_status(self):
+        policy = MOD.qualification_execution_policy()
+        self.assertTrue(policy["step_qualification"]["resumable"])
+        self.assertFalse(policy["workflows"]["rke2_local_virtualbox"]["resumable"])
+        for mutation in (
+            lambda value: value.pop("version"),
+            lambda value: value.update(kind="WrongKind"),
+            lambda value: value.update(status="draft"),
+            lambda value: value["step_qualification"].pop("checkpointed"),
+            lambda value: value["step_qualification"].update(unknown_rule=True),
+        ):
+            altered = json.loads(json.dumps(policy))
+            mutation(altered)
+            with self.subTest(altered=altered.get("kind")), self.assertRaises(ValueError):
+                self.steps.validate_policy(altered, ROOT)
+
+    def test_failed_preflight_checkpoint_matches_the_schema(self):
+        schema = json.loads((ROOT / "config/contracts/qualification-step-evidence.schema.json").read_text())
+        failed = self.steps.checkpoint(
+            qualification="m2.5", step="preflight", source_sha=self.sha,
+            input_digest=self.digest, status="FAIL", started_at=self.started,
+        )
+        self.assertNotIn("preflight", schema["required"])
+        self.assertNotIn("preflight", failed)
+        matching_rules = [rule for rule in schema["allOf"] if rule.get("if", {}).get(
+            "properties", {}).get("step", {}).get("const") == "preflight"]
+        self.assertEqual(1, len(matching_rules))
+        self.assertEqual("PASS", matching_rules[0]["if"]["properties"]["status"]["const"])
+        self.assertEqual(["preflight"], matching_rules[0]["then"]["required"])
+        self.steps.validate_checkpoint(failed)
+        passed_without_proof = dict(failed, status="PASS")
+        with self.assertRaisesRegex(ValueError, "preflight lacks"):
+            self.steps.validate_checkpoint(passed_without_proof)
+
+    def test_preflight_blocks_expensive_work_and_full_requires_smoke(self):
+        with self.assertRaisesRegex(ValueError, "preflight"):
+            self.steps.guard_start(qualification="m2.5", step="vm-smoke", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints={})
+        with self.assertRaisesRegex(ValueError, "predecessor checkpoint"):
+            self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints={"preflight": self.preflight})
+
+    def test_compatible_smoke_allows_full_and_other_sha_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proof = Path(temporary) / "runtime.json"
+            proof.write_text('{"observed":true}\n', encoding="utf-8")
+            records = {"preflight": self.preflight}
+            for name in ("input-lock", "image"):
+                records[name] = self.steps.checkpoint(
+                    qualification="m2.5", step=name, source_sha=self.sha,
+                    input_digest=self.digest, status="PASS", started_at=self.started,
+                    artifact_digest=self.artifact_digest,
+                )
+            for name in ("vm-smoke", "network-ssh", "rocky-runtime", "offline-bundle"):
+                records[name] = self.steps.checkpoint(
+                    qualification="m2.5", step=name, source_sha=self.sha,
+                    input_digest=self.digest, status="PASS", started_at=self.started,
+                    artifact_digest=self.artifact_digest, runtime_path=proof,
+                )
+            self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                   input_digest=self.digest, checkpoints=records)
+            for missing in ("input-lock", "image", "vm-smoke", "network-ssh", "rocky-runtime", "offline-bundle"):
+                incomplete = {name: record for name, record in records.items() if name != missing}
+                with self.subTest(missing=missing), self.assertRaisesRegex(ValueError, "predecessor checkpoint"):
+                    self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                           source_sha=self.sha, input_digest=self.digest, checkpoints=incomplete)
+            with self.assertRaisesRegex(ValueError, "image predecessor checkpoint"):
+                self.steps.guard_start(qualification="m2.5", step="vm-smoke", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints={"preflight": self.preflight,
+                                                    "input-lock": records["input-lock"]})
+            wrong_step = dict(records["network-ssh"], step="vm-smoke")
+            with self.assertRaisesRegex(ValueError, "identity differs"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints=dict(records, **{"network-ssh": wrong_step}))
+            failed = dict(records["rocky-runtime"], status="FAIL")
+            with self.assertRaisesRegex(ValueError, "predecessor PASS"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph,
+                                       source_sha=self.sha, input_digest=self.digest,
+                                       checkpoints=dict(records, **{"rocky-runtime": failed}))
+            with self.assertRaisesRegex(ValueError, "another source SHA"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha="d" * 40,
+                                       input_digest=self.digest, checkpoints=records)
+            proof.write_text('{"observed":false}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                self.steps.guard_start(qualification="m2.5", step="rke2-single", graph=self.graph, source_sha=self.sha,
+                                       input_digest=self.digest, checkpoints=records)
+
+    def test_checkpoint_requires_source_runtime_proof_and_reuse_provenance(self):
+        for duration in (True, float("inf"), float("nan")):
+            with self.subTest(duration=duration), self.assertRaisesRegex(ValueError, "duration"):
+                self.steps.validate_checkpoint(dict(self.preflight, duration_seconds=duration))
+        record = dict(self.preflight)
+        del record["source_sha"]
+        with self.assertRaisesRegex(ValueError, "fields"):
+            self.steps.validate_checkpoint(record)
+        record = dict(self.preflight, step="vm-smoke")
+        with self.assertRaisesRegex(ValueError, "runtime evidence"):
+            self.steps.validate_checkpoint(record, runtime_required=True)
+        record = dict(self.preflight, status="SKIPPED_REUSED_VERIFIED", executed=False,
+                      reused=True, cache_hit=True, artifact_digest=self.artifact_digest)
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            self.steps.validate_checkpoint(record)
+        record["reused_from"] = {"source_sha": self.sha, "input_digest": "d" * 64,
+                                 "artifact_digest": self.artifact_digest}
+        with self.assertRaisesRegex(ValueError, "provenance"):
+            self.steps.validate_checkpoint(record)
+        record["reused_from"]["input_digest"] = self.digest
+        self.steps.validate_checkpoint(record)
+
+    def test_reused_runtime_smoke_cannot_omit_or_change_immutable_proof(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            proof = Path(temporary) / "smoke.json"
+            proof.write_text('{"observed":true}\n', encoding="utf-8")
+            reused = self.steps.checkpoint(
+                qualification="m2.5", step="vm-smoke", source_sha=self.sha,
+                input_digest=self.digest, artifact_digest=self.artifact_digest,
+                status="SKIPPED_REUSED_VERIFIED", started_at=self.started,
+                reused_from={"source_sha": "e" * 40, "input_digest": self.digest,
+                             "artifact_digest": self.artifact_digest},
+            )
+            with self.assertRaisesRegex(ValueError, "runtime evidence"):
+                self.steps.validate_checkpoint(reused, runtime_required=True)
+            import hashlib
+
+            reused["runtime_evidence"] = {
+                "path": str(proof), "sha256": hashlib.sha256(proof.read_bytes()).hexdigest(),
+            }
+            self.steps.validate_checkpoint(reused, runtime_required=True)
+            proof.write_text('{"observed":false}\n', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "changed"):
+                self.steps.validate_checkpoint(reused, runtime_required=True)
+
+    def test_verified_artifact_reuse_forbids_rebuild(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as temporary:
+            artifact = Path(temporary) / "box"
+            artifact.write_bytes(b"verified box")
+            digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+            self.assertEqual("SKIPPED_REUSED_VERIFIED", self.steps.verified_reuse(
+                path=artifact, source_sha=self.sha, recorded_source_sha="e" * 40,
+                expected_digest=digest, input_digest=self.digest,
+                recorded_input_digest=self.digest, operation="reuse"))
+            with self.assertRaisesRegex(ValueError, "must be reused"):
+                self.steps.verified_reuse(path=artifact, source_sha=self.sha,
+                                          recorded_source_sha="e" * 40, expected_digest=digest,
+                                          input_digest=self.digest, recorded_input_digest=self.digest,
+                                          operation="build")
+            self.assertEqual("REBUILD_REQUIRED", self.steps.verified_reuse(
+                path=artifact, source_sha=self.sha, recorded_source_sha="e" * 40,
+                expected_digest=digest, input_digest=self.digest,
+                recorded_input_digest="e" * 64, operation="reuse"))
+
+    def test_transfer_cleanup_network_and_review_guards(self):
+        with self.assertRaisesRegex(ValueError, "retransferred"):
+            self.steps.guard_transfer(source_digest=self.digest, target_digest=self.digest,
+                                      mode="full", manifest_digest=self.artifact_digest,
+                                      final_digest=self.digest)
+        self.steps.guard_transfer(source_digest=self.digest, target_digest=self.digest,
+                                  mode="skip", manifest_digest=self.artifact_digest)
+        transfer = {
+            "mode": "skip", "source_digest": self.digest,
+            "prior_target_digest": self.digest, "manifest_digest": self.digest,
+            "final_digest": self.digest, "target_valid_before": True,
+            "copy_changed": False, "started_at": "2026-09-29T20:00:00+00:00",
+            "finished_at": "2026-09-29T20:00:01+00:00",
+        }
+        self.steps.validate_transfer_record(transfer, approved_manifest=self.digest)
+        with self.assertRaisesRegex(ValueError, "copy decision"):
+            self.steps.validate_transfer_record(dict(transfer, copy_changed=True),
+                                                approved_manifest=self.digest)
+        with self.assertRaisesRegex(ValueError, "approved manifest"):
+            self.steps.validate_transfer_record(dict(transfer, source_digest=self.artifact_digest),
+                                                approved_manifest=self.digest)
+        with self.assertRaisesRegex(ValueError, "retained"):
+            self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=False)
+        self.steps.guard_cleanup(final_evidence_captured=False, explicitly_authorized=True)
+        with self.assertRaisesRegex(ValueError, "exact SHA"):
+            self.steps.guard_review(source_sha=self.sha, code_sha=self.sha,
+                                    security_sha="e" * 40)
+        self.steps.guard_review(source_sha=self.sha, code_sha=self.sha, security_sha=self.sha)
+        with self.assertRaisesRegex(ValueError, "staged probes"):
+            self.steps.guard_network(probes=["tcp_port"], elapsed_seconds=120,
+                                     budget_seconds=120, bounded_backoff=False)
+
+    def test_selective_invalidation_and_unknown_impact(self):
+        impacts = self.workflow["impact_inputs"]
+        docs = self.steps.invalidate(self.graph, impacts, ["docs_only"])
+        self.assertEqual([], docs["invalidated_steps"])
+        ansible = self.steps.invalidate(self.graph, impacts, ["ansible"])
+        self.assertIn("image", ansible["reusable_steps"])
+        self.assertIn("rke2-single", ansible["invalidated_steps"])
+        self.assertIn("final", ansible["invalidated_steps"])
+        unknown = self.steps.invalidate(self.graph, impacts, ["unclassified"])
+        self.assertEqual(set(self.graph), set(unknown["invalidated_steps"]))
+
+    def test_qualification_impact_reuses_canonical_affected_classifier(self):
+        rules = self.workflow["impact_path_rules"]
+        self.assertEqual(["docs_only"], self.steps.classify_impact(
+            ["docs/engineering/example.md"], ["global"], rules))
+        self.assertEqual(["ansible"], self.steps.classify_impact(
+            ["platform/ansible/roles/rke2_server/tasks/main.yml"],
+            ["global", "platform:ansible"], rules))
+        self.assertEqual(["unknown"], self.steps.classify_impact(
+            ["platform/ansible/roles/rke2_server/tasks/main.yml"],
+            ["global", "platform:ansible", "system"], rules))
+        with (
+            mock.patch.object(MOD, "changed_paths", return_value=["docs/engineering/example.md"]),
+            mock.patch.object(MOD, "affected", return_value=["global"]) as canonical,
+        ):
+            result = MOD.qualification_impact("base", "head", "rke2_local_virtualbox")
+        canonical.assert_called_once_with("base", "head", strict_unknown=True)
+        self.assertEqual([], result["invalidated_steps"])
+
+    def test_rke2_bundle_transfer_is_skipped_only_after_target_digest_probe(self):
+        import yaml
+
+        tasks = yaml.safe_load((ROOT / "platform/ansible/roles/mgmt_offline_artifacts/tasks/main.yml").read_text(encoding="utf-8"))
+        names = [task["name"] for task in tasks]
+        probe_name = "Check whether the content-addressed target already matches the approved bundle"
+        transfer_name = "Transfer approved bundle only when target content is absent or invalid"
+        verify_name = "Verify transferred bytes before package installation"
+        self.assertLess(names.index(probe_name), names.index(transfer_name))
+        self.assertLess(names.index(transfer_name), names.index(verify_name))
+        probe = tasks[names.index(probe_name)]
+        transfer = tasks[names.index(transfer_name)]
+        self.assertIn("--manifest-sha256", probe["ansible.builtin.command"]["argv"])
+        self.assertEqual("mgmt_offline_existing.rc != 0", transfer["when"])
+        self.assertEqual("mgmt_offline_existing", probe["register"])
 
 
 if __name__ == "__main__":

@@ -7,12 +7,11 @@ by `architecture.lock.yaml`, `config/infrastructure/mgmt-bootstrap.yaml` and
 `config/infrastructure/network-plan.yaml`.
 
 The supported controller is WSL2 with Windows VirtualBox and native Windows Vagrant.
-This is superseded Rocky 9.8 evidence retained for audit history only. The active
-Rocky 10.2 Packer image contract lives in
-`config/contracts/machine-image-lock.yaml`. The historical fixture contract in
-`contract.yml` pins Vagrant 2.4.9 and the former official Rocky 9.8
-box and its SHA256, and the accepted local resource bounds. The validated host used
-VirtualBox 7.2.18. The authoritative launcher requires the canonical Windows Vagrant
+`config/contracts/machine-image-lock.yaml` owns the Rocky 10.2 Packer image contract.
+`scripts/rocky_box_catalog.py` resolves the exact local box from semantic build
+inputs and verifies its bytes and native VT-x provenance. The fixture contract
+retains only local resource bounds; `config/contracts/toolchain-lock.json` owns
+the Vagrant and VirtualBox versions. The authoritative launcher requires the canonical Windows Vagrant
 installation at `C:\\Program Files\\Vagrant\\bin\\vagrant.exe` and verifies that
 it reports exactly Vagrant 2.4.9 before the lifecycle starts. Caller-controlled
 Vagrant executable overrides are rejected. The repository's qualified Python/Ansible
@@ -47,8 +46,8 @@ PYTHONDONTWRITEBYTECODE=1 .venv/qualification/bin/ansible-playbook -i localhost,
 ```
 
 The command writes only a bounded result to
-`.context/mgmt-airgap-bundle-result.json`. The manifest digest must be
-`738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad`.
+`.context/mgmt-airgap-bundle-result.json`. Read the approved manifest digest from
+the current RKE2 artifact lock before using the bundle.
 
 ## Create and test the VM
 
@@ -64,7 +63,7 @@ Create an ignored `.context/mgmt-vm-inputs.json`:
   "vm_cpus": 4,
   "vm_memory": 4096,
   "mgmt_offline_bundle_dir": "/absolute/path/to/rke2-offline-bundle",
-  "mgmt_offline_manifest_sha256": "738a5cd2aa1be1eb93b08247193c1585574ad1668650993226eafe3f3cfa0bad"
+  "mgmt_offline_manifest_sha256": "<approved_manifest_sha256 from current lock>"
 }
 ```
 
@@ -86,14 +85,26 @@ Direct `ansible-playbook` invocations are diagnostic-only. They do not create
 merge-authoritative RKE2 qualification evidence and must not replace the registered
 `repoctl` lifecycle.
 
-`create` boots with every network adapter disconnected. Through the private serial
-pipe, it installs a fresh SSH key and a persistent output/forward default-deny nftables
-boundary before attaching the existing host-only adapter. There is no NAT, forwarded
-port or shared folder. Host keys are pinned from the serial console, password access
-is disabled, and the guest must report its own Rocky kernel, systemd and SELinux
+`create` generates a local NoCloud `CIDATA` ISO for the disposable VM. It carries
+only the campaign's public SSH key, a static host-only address without a default
+route, and the guest bootstrap script; the private key stays on the controller.
+The host-only adapter starts with its cable disconnected. The guest applies a
+persistent output/forward default-deny nftables boundary and key-only SSH, then
+writes a campaign-specific readiness marker and its SSH host key to an owned serial
+log. The controller verifies the ISO digest, VM identity and fresh marker before
+connecting that cable and pinning the host key. There is no NAT, forwarded port or
+shared folder. The guest must report its own Rocky kernel, systemd and SELinux
 `Enforcing` before artifact work begins.
 
 Only a fresh `create` followed by the first `test` is a cold artifact qualification.
+Fresh creation requires an empty per-VM Vagrant box cache so Vagrant imports the
+digest-checked local archive. After destroying a diagnostic VM, use a new VM name
+and state directory for a new canonical cold campaign; the old cache and evidence
+remain available for diagnosis.
+The registered lifecycle runs `diagnostics` afterward. It verifies the exact
+`numactl-libs` package already present on the guest and installs only pinned
+diagnostic RPMs absent from the RKE2 bundle. The `numactl-libs` package may be
+present in the base image; its presence alone does not prove the cold role installed it.
 The artifact role validates the independently approved manifest, image contents,
 RPM metadata and signatures before installing with every repository disabled.
 `server` activates the canonical nftables and firewalld templates, invokes the real
@@ -107,13 +118,13 @@ adapters without requiring deleted transfer bytes. The second Cilium operator re
 may remain Pending because required
 anti-affinity cannot place two replicas on one node; this is recorded in the result.
 
-The official box has a 10 GiB disk. After the verified RPM transaction and first
+The Packer box uses the disk size from the machine-image lock. After the verified RPM transaction and first
 successful image import, the fixture removes only its disposable transfer copy and
 the already-imported tar archives so kubelet does not enter `DiskPressure`. The
 installed RPMs, RKE2 binary and containerd content remain. To reconstruct transfer
 bytes after cleanup, run `vm_action=restage`; it stops the local server, executes the
 same complete offline validation and staging role, and leaves restart to the next
-`server` action. To remain inside the official box's 10 GiB disk, it removes only the
+`server` action. To keep disk use bounded, it removes only the
 stopped fixture's reconstructible image-import directory before rebuilding it, and
 hardlinks the validated staging archives into that directory instead of storing a
 second copy. The containerd store is preserved because an existing etcd member needs
@@ -131,7 +142,8 @@ modifies the source bundle.
 
 Evidence is written under `.context/mgmt-offline-vm/<name>`: VM identity and adapter
 state, cold preflight, source hashes, role result, resource measurement, logs,
-`server-source.json` and `rke2-result.json`. Secrets and raw logs remain ignored.
+`server-source.json`, `rke2-result.json`, `tamper-result.json` and
+`campaign-result.json`. Secrets and raw logs remain ignored.
 `destroy` checks the exact Vagrant UUID and machine name before removing only the owned
 VM, then removes the generated SSH key, RKE2 token and rendered token-bearing inputs.
 

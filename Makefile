@@ -135,7 +135,7 @@ opentofu: ## Validate OpenTofu-compatible sources with the sole authorized IaC e
 ansible: ## Validate Ansible sources and local developer playbook syntax
 	@$(PYTHON) scripts/repoctl.py ansible
 
-.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-clean
+.PHONY: mgmt-runtime-inventory image-rocky-preflight image-rocky-build image-rocky-qualify image-rocky-release image-rocky-windows-preflight image-rocky-windows-build image-rocky-windows-qualify image-rocky-windows-release image-rocky-windows-native-prepare image-rocky-windows-native-reboot image-rocky-windows-native-import image-rocky-windows-native-recover image-rocky-windows-native-reset-failed image-rocky-windows-native-self-test image-rocky-linux-static-validate image-rocky-linux-preflight image-rocky-linux-build image-rocky-linux-qualify image-rocky-linux-release image-rocky-oras-push image-rocky-oras-pull local-services-assets local-services-capabilities local-services-qualify local-services-recover lab-ssh-key packer-box lab-network-smoke lab-network-resume lab-network-import lab-network-native-prepare lab-network-native-boot-prepare lab-network-native-boot-reboot lab-network-native-boot-recover lab-network-native-boot-self-test lab-network-status lab-clean
 .PHONY: local-services-up local-services-provision local-services-proof local-gpg-register
 
 local-services-up: workspace-check ## Start pinned local Gitea/Harbor on native WSL storage
@@ -187,6 +187,9 @@ image-rocky-windows-native-import: ## Import exact-SHA native VT-x build and smo
 image-rocky-windows-native-recover: ## Arm the normal Windows boot and remove the temporary task while preserving the native entry
 	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-recover
 
+image-rocky-windows-native-reset-failed: ## Archive a failed native cycle's stale stage after normal-boot recovery
+	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-reset-failed
+
 image-rocky-windows-native-self-test: ## Test BCD parsing, backend classification, integrity and stale-evidence rejection without reboot
 	@$(PYTHON) scripts/repoctl.py image-rocky-windows-native-self-test
 
@@ -197,7 +200,31 @@ packer-box: ## Verify and reuse the local immutable Rocky box matching current P
 	@$(PYTHON) scripts/repoctl.py packer-box $(if $(BOX_PATH),--box "$(BOX_PATH)",)
 
 lab-network-smoke: ## Stage exact-SHA native network smoke from a verified box without running Packer
-	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+	@$(PYTHON) scripts/repoctl.py lab-network-smoke $(if $(BOX_PATH),--box "$(BOX_PATH)",) $(if $(BOX_SHA256),--box-sha256 "$(BOX_SHA256)",) $(if $(filter 1,$(KEEP_FAILED_VM)),--keep-failed-vm,) $(if $(filter 1,$(RETAIN_VM)),--retain-vm,) $(if $(filter 1,$(DIAGNOSTIC_NEM)),--diagnostic-nem,) $(if $(GLOBAL_DEADLINE),--global-deadline $(GLOBAL_DEADLINE),)
+
+lab-network-resume: ## Resume SSH and Rocky probes on the retained VM for CAMPAIGN_ID
+	@$(PYTHON) scripts/repoctl.py lab-network-resume --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-import: ## Import a PASS native-boot network result after WSL is restored
+	@$(PYTHON) scripts/repoctl.py lab-network-import --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-native-prepare: ## Stage exact-head Windows runner for a native-boot Resume
+	@$(PYTHON) scripts/repoctl.py lab-network-native-prepare --campaign-id "$(CAMPAIGN_ID)"
+
+lab-network-native-boot-prepare: ## Prepare the retained campaign's guarded one-shot native Windows entry; no reboot
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
+
+lab-network-native-boot-reboot: ## Explicitly start the one-shot native boot for the retained campaign
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
+
+lab-network-native-boot-recover: ## Restore normal boot and remove the owned network-smoke entry
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
+
+lab-network-native-boot-self-test: ## Check network native-boot BCD parsing and state guards without mutation
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
+
+lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
+	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"
 
 lab-clean: ## Destroy the explicitly preserved network-smoke VM for CAMPAIGN_ID
 	@$(PYTHON) scripts/repoctl.py lab-clean --campaign-id "$(CAMPAIGN_ID)"
@@ -298,9 +325,16 @@ roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from Gi
 deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, push and create/update exact-SHA GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-pr-loop: ## Run from TRUSTED_ROOT checked out cleanly at the PR BASE_SHA; PR required
+pr-loop: ## Run trusted-pr-transition from TRUSTED_ROOT at the PR BASE_SHA, then dispatch external review; PR required
 	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
-	@$(PYTHON) "$(TRUSTED_ROOT)/scripts/repository_delivery.py" trusted-pr-transition --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+
+.PHONY: review-dispatch-status
+review-dispatch-status: ## Read non-authoritative ChatGPT outbox status for exact PR and KIND=CODE|SECURITY
+	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
+	@test -n "$(KIND)" || { echo "BLOCKED KIND=CODE|SECURITY is required" >&2; exit 1; }
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --target-root "$(CURDIR)" --pr "$(PR)" --status --kind "$(KIND)" --json
 
 finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
 	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2

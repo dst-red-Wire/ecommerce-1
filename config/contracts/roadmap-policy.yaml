@@ -46,6 +46,7 @@ status_derivation:
       - outcome
     accepted_status: PASS
     accepted_outcome: PASS
+    m25_deployment_state: DEPLOYED
     runtime_identity_required_fields: [kind, id]
 
 qce_traceability:
@@ -243,7 +244,9 @@ milestones:
       implementation_paths: [config/infrastructure/mgmt-bootstrap.yaml, platform/terraform/environments/mgmt, platform/ansible]
       qualification_gates: [governance, contracts, system]
       qce_capabilities: []
-      runtime_evidence: []
+      runtime_evidence:
+        - path: .context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json
+          environments: [lab]
 
   - id: M3
     name: PREPROD Infrastructure

@@ -398,6 +398,7 @@ class BuiltinCapabilityDriver:
                 command,
                 check=False,
                 text=True,
+                errors="replace",
                 capture_output=True,
                 env=dict(env) if env is not None else None,
                 timeout=timeout,
@@ -672,7 +673,7 @@ class BuiltinCapabilityDriver:
             required = self._int_parameter(capability, "minimum_count")
             if int(initial_state.get("available_count", 0)) < required:
                 raise RuntimeBlocked(
-                    f"cpu-capacity: required={required} available={initial_state.get('available_count', 0)}"
+                    f"{capability.spec.name}: required={required} available={initial_state.get('available_count', 0)}"
                 )
         elif handler == "disk":
             required = self._int_parameter(capability, "minimum_mib")

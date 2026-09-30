@@ -129,7 +129,7 @@ function Invoke-NativeLocalServices {
     $campaign = [Guid]::NewGuid().ToString('N')
     $Result.local_services.campaign_id = $campaign
     $boxName = "ecommerce/native-local-$($sha.Substring(0,12))"
-    $environment = @{ VAGRANT_HOME = (Join-Path $runtimeRoot 'vagrant-home'); VAGRANT_CHECKPOINT_DISABLE='1'; VAGRANT_DEFAULT_PROVIDER='virtualbox'; VAGRANT_NO_PLUGINS='1' }
+    $environment = @{ VAGRANT_HOME = (Join-Path $runtimeRoot 'vagrant-home'); VAGRANT_CHECKPOINT_DISABLE='1'; VAGRANT_DEFAULT_PROVIDER='virtualbox'; VAGRANT_EXPERIMENTAL='none_communicator'; VAGRANT_NO_PLUGINS='1' }
     $seedServer = Join-Path $Stage 'runner\local-services\local-services-seed-server.ps1'
     $fixture = Join-Path $Stage 'runner\local-services\Vagrantfile'
     $roles = @('controller','gitea','harbor')

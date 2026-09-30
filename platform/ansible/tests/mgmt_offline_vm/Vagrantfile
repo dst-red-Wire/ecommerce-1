@@ -4,6 +4,14 @@ require "json"
 runtime = JSON.parse(File.read(File.join(__dir__, "runtime.json")))
 name = runtime.fetch("name")
 raise "invalid owned VM name" unless name.match?(/\Aecommerce-mgmt-test-[a-z0-9-]+\z/)
+box_name = runtime.fetch("box_name")
+raise "invalid verified local box name" unless box_name == "rocky-10.2-rke2-virtualbox"
+box_sha256 = runtime.fetch("box_sha256")
+raise "invalid verified local box digest" unless box_sha256.match?(/\A[0-9a-f]{64}\z/)
+adapter = runtime.fetch("hostonly_adapter")
+raise "host-only adapter is required" if adapter.empty?
+seed_iso = File.join(__dir__, "seed.iso")
+serial_log = File.join(__dir__, "bootstrap-serial.log")
 memory = Integer(runtime.fetch("memory", 2048).to_s)
 raise "VM memory must be positive" unless memory.positive?
 
@@ -12,10 +20,10 @@ raise "VM CPUs must be positive" unless cpus.positive?
 
 Vagrant.require_version "= #{runtime.fetch("vagrant_version")}"
 Vagrant.configure("2") do |config|
-  config.vm.box = runtime.fetch("box_name")
+  config.vm.box = box_name
   config.vm.box_url = runtime.fetch("box_url")
   config.vm.box_download_checksum_type = "sha256"
-  config.vm.box_download_checksum = runtime.fetch("box_sha256")
+  config.vm.box_download_checksum = box_sha256
   config.vm.box_check_update = false
   config.vm.communicator = "none"
   config.vm.synced_folder ".", "/vagrant", disabled: true
@@ -28,10 +36,14 @@ Vagrant.configure("2") do |config|
     vm.check_guest_additions = false
     # The image imports with IOAPIC off; enable it so Linux can use multiple CPUs.
     vm.customize ["modifyvm", :id, "--ioapic", "on"]
-    # A disconnected adapter exists for later host-only attachment. No NAT boot.
-    vm.customize ["modifyvm", :id, "--nic1", "null", "--macaddress1", runtime.fetch("mac")]
+    # The adapter has no link until the guest proves its default-deny boundary.
+    vm.customize ["modifyvm", :id, "--nic1", "hostonly", "--hostonlyadapter1", adapter,
+                  "--nictype1", "virtio", "--macaddress1", runtime.fetch("mac"),
+                  "--cableconnected1", "off"]
     (2..8).each { |number| vm.customize ["modifyvm", :id, "--nic#{number}", "none"] }
-    vm.customize ["modifyvm", :id, "--uart1", "0x3F8", "4", "--uartmode1", "server", "\\\\.\\pipe\\#{name}"]
+    vm.customize ["modifyvm", :id, "--uart1", "0x3F8", "4", "--uartmode1", "file", serial_log]
+    vm.customize ["storageattach", :id, "--storagectl", "IDE", "--port", "1", "--device", "0",
+                  "--type", "dvddrive", "--medium", seed_iso]
     vm.customize ["modifyvm", :id, "--clipboard-mode", "disabled", "--draganddrop", "disabled", "--vrde", "off"]
   end
 end

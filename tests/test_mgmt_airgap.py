@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location('mgmt_airgap', ROOT / 'scripts/mgmt_airgap.py')
 AIRGAP = importlib.util.module_from_spec(SPEC)
@@ -406,6 +408,30 @@ class OfflineBundleTests(unittest.TestCase):
 
 
 class OfflineAnsibleContractTests(unittest.TestCase):
+    def test_approved_rpm_keys_import_without_gpg2_and_report_inventory_change(self):
+        tasks = yaml.safe_load((ROOT / 'platform/ansible/roles/mgmt_offline_artifacts/tasks/main.yml')
+                               .read_text(encoding='utf-8'))
+        names = [task['name'] for task in tasks]
+        signature_index = names.index('Verify every local RPM signature against isolated approved keys')
+        before_index = names.index('Inventory system RPM public keys before approved import')
+        import_index = names.index('Import only manifest-approved offline RPM signing keys without gpg2')
+        after_index = names.index('Inventory system RPM public keys after approved import')
+        install_index = names.index('Install complete local RPM set with all repositories disabled')
+        self.assertLess(signature_index, before_index)
+        self.assertLess(before_index, import_index)
+        self.assertLess(import_index, after_index)
+        self.assertLess(after_index, install_index)
+        self.assertFalse(any('ansible.builtin.rpm_key' in task for task in tasks))
+
+        key_import = tasks[import_index]
+        self.assertEqual(['/usr/bin/rpm', '--import', '{{ mgmt_offline_target_dir }}/{{ item }}'],
+                         key_import['ansible.builtin.command']['argv'])
+        self.assertEqual('{{ (mgmt_offline_validated.stdout | from_json).signing_keys }}',
+                         key_import['loop'])
+        self.assertIs(key_import['changed_when'], False)
+        self.assertIn('mgmt_offline_keys_before.stdout_lines | sort', tasks[after_index]['changed_when'])
+        self.assertIn('mgmt_offline_keys_after.stdout_lines | sort', tasks[after_index]['changed_when'])
+
     def test_bootstrap_installs_offline_dependencies_before_other_roles(self):
         play = (ROOT / 'platform/ansible/mgmt.yml').read_text()
         self.assertLess(play.index('name: mgmt_offline_artifacts'), play.index('name: rocky_baseline'))

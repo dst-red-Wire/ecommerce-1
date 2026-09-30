@@ -214,8 +214,8 @@ class RoadmapSyncTests(unittest.TestCase):
                 )
                 self.assertEqual(expected, projection["milestones"][0]["status"])
 
-    def test_contracts_or_manifests_without_runtime_never_prove_m4_m5_or_m9(self):
-        for milestone_id in ("M4", "M5", "M9"):
+    def test_contracts_or_manifests_without_runtime_never_prove_m25_m4_m5_or_m9(self):
+        for milestone_id in ("M2.5", "M4", "M5", "M9"):
             with self.subTest(milestone=milestone_id), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "impl").mkdir()

@@ -1472,6 +1472,24 @@ def validate(root):
         ):
             errors.append("Kratix machine contract must preserve exact pins and Fleet/Gitea authority boundaries")
         review_policy = load_yaml(root / lock["machine_contracts"]["review_policy"])
+        dispatch_relative = lock["machine_contracts"].get("chatgpt_review_dispatch_policy")
+        if dispatch_relative != "config/contracts/chatgpt-review-dispatch-policy.yaml":
+            errors.append("ChatGPT review dispatcher must have one canonical machine contract")
+        elif not (root / dispatch_relative).is_file():
+            errors.append("ChatGPT review dispatcher machine contract is missing")
+        else:
+            dispatch_policy = load_yaml(root / dispatch_relative)
+            if dispatch_policy != {
+                "version": 1,
+                "provider": "ChatGPT",
+                "event": "CHATGPT_REVIEW_REQUIRED",
+                "handoff_max_bytes": 8192,
+                "review_order": ["CODE", "SECURITY"],
+                "verdict_authority": False,
+                "transport_missing_state": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+                "require_owner_unedited_marker": True,
+            }:
+                errors.append("ChatGPT review dispatcher must preserve external verdict authority")
         inherited_owner_authorization = (
             review_policy.get("pull_request_review", {}).get("owner_authorization", {})
         )

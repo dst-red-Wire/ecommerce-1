@@ -68,8 +68,8 @@ function Invoke-SmokeCommand {
             break
         }
         catch {
-            if ($_.Exception.Message -ne "Timed out after ${TimeoutSeconds}s: $script:vagrant") { throw }
-            if ($attempt -eq 2) { throw "Vagrant smoke check $Name timed out after 2 bounded attempts" }
+            if (-not $_.Exception.Message.StartsWith("Timed out after ${TimeoutSeconds}s: $script:vagrant; output=", [StringComparison]::Ordinal)) { throw }
+            if ($attempt -eq 2) { throw "Vagrant smoke check $Name timed out after 2 bounded attempts; last_error=$($_.Exception.Message)" }
             Start-Sleep -Seconds 5
         }
     }
@@ -174,7 +174,7 @@ try {
             }
         }
         catch {
-            if ($_.Exception.Message -ne "Timed out after 60s: $vagrant") { throw }
+            if (-not $_.Exception.Message.StartsWith("Timed out after 60s: $vagrant; output=", [StringComparison]::Ordinal)) { throw }
         }
         if ($attempt -lt 12) {
             Start-Sleep -Seconds 5
@@ -191,17 +191,17 @@ try {
     $evidence.observations.kernel = $kernel
     $architecture = Invoke-SmokeCommand -Name 'architecture_cpu' -Command 'test "$(uname -m)" = x86_64 && test "$(getconf _NPROCESSORS_ONLN)" -ge 2 && uname -m && getconf _NPROCESSORS_ONLN'
     $evidence.observations.architecture_cpu = $architecture
-    $systemd = Invoke-SmokeCommand -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s'' "$state"'
+    $systemd = Invoke-SmokeCommand -Name 'systemd' -Command 'state=$(systemctl is-system-running --wait || true); test "$state" = running; test -z "$(systemctl --failed --no-legend --plain)"; printf ''%s\n'' "$state"'
     $evidence.observations.systemd = $systemd
-    $disk = Invoke-SmokeCommand -Name 'disk' -Command 'available=$(df --output=avail -BM / | tail -1 | tr -dc ''0-9'') && test "$available" -ge 1024 && printf ''%s MiB'' "$available"'
+    $disk = Invoke-SmokeCommand -Name 'disk' -Command 'available=$(df --output=avail -BM / | tail -1 | tr -dc ''0-9'') && test "$available" -ge 1024 && printf ''%s MiB\n'' "$available"'
     $evidence.observations.disk_available = $disk
     $network = Invoke-SmokeCommand -Name 'network' -Command 'ip -4 -o addr show scope global | grep -q .; ip -4 route show default | grep -q ''^default ''; ip -4 -o addr show scope global; ip -4 route show default'
     $evidence.observations.network = $network
-    $tools = Invoke-SmokeCommand -Name 'fundamental_tools' -Command 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf ''required-tools-present'''
+    $tools = Invoke-SmokeCommand -Name 'fundamental_tools' -Command 'for tool in python3 curl tar gzip xz zstd rsync unzip openssl nft ip ss systemctl; do command -v "$tool" >/dev/null; done; printf ''required-tools-present\n'''
     $evidence.observations.fundamental_tools = $tools
-    $rke2 = Invoke-SmokeCommand -Name 'rke2_prerequisites' -Command 'test -z "$(swapon --noheadings --show)"; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf ''rke2-prerequisites-present'''
+    $rke2 = Invoke-SmokeCommand -Name 'rke2_prerequisites' -Command 'test -z "$(swapon --noheadings --show)"; test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs; for module in overlay br_netfilter nf_conntrack vxlan; do sudo -n modprobe "$module"; done; test "$(sysctl -n net.ipv4.ip_forward)" = 1; test "$(sysctl -n net.bridge.bridge-nf-call-iptables)" = 1; test -d /sys/fs/bpf; printf ''rke2-prerequisites-present\n'''
     $evidence.observations.rke2_prerequisites = $rke2
-    $security = Invoke-SmokeCommand -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf ''security-baseline-present'''
+    $security = Invoke-SmokeCommand -Name 'security' -Command 'test "$(getenforce)" = Enforcing; sudo -n sshd -T | grep -qx ''permitrootlogin no''; sudo -n sshd -T | grep -qx ''passwordauthentication no''; command -v oscap >/dev/null; test -r /usr/share/xml/scap/ssg/content/ssg-rl10-ds.xml; sudo -n test ! -e /root/.config/gh/hosts.yml; sudo -n test ! -e /etc/rancher/rke2/config.yaml; printf ''security-baseline-present\n'''
     $evidence.observations.security = $security
     $packageLock = Read-JsonFile (Join-Path $root 'config\artifacts\rocky-10.2-base-packages.lock.json')
     $requiredPackages = @($packageLock.profiles.base.roots) + @($packageLock.profiles.rke2.roots)

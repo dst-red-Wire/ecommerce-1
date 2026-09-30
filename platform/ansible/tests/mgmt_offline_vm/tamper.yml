@@ -1,4 +1,20 @@
 ---
+- name: Require the pristine manifest to match the independently approved digest
+  ansible.builtin.command:
+    argv: [sha256sum, "{{ mgmt_offline_bundle_dir }}/manifest.json"]
+  register: vm_tamper_manifest_hash
+  changed_when: false
+  failed_when: vm_tamper_manifest_hash.stdout.split()[0] != mgmt_offline_manifest_sha256
+- name: Identify the one approved RKE2 binary in the pinned manifest
+  ansible.builtin.set_fact:
+    vm_tamper_approved_binary: >-
+      {{ (lookup('file', mgmt_offline_bundle_dir ~ '/manifest.json') | from_json).artifacts
+         | selectattr('file', 'equalto', 'rke2.linux-amd64') | list }}
+- name: Require a single approved RKE2 binary digest
+  ansible.builtin.assert:
+    that:
+      - vm_tamper_approved_binary | length == 1
+      - vm_tamper_approved_binary[0].sha256 is match('^[0-9a-f]{64}$')
 - name: Mutate one staged RKE2 binary byte for the fail-closed trial
   ansible.builtin.command:
     argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n,
@@ -6,6 +22,11 @@
     stdin: "{{ lookup('file', playbook_dir ~ '/tamper_artifact.py') }}"
   register: vm_tamper_result
   changed_when: true
+- name: Prove the mutation started from the approved binary bytes
+  ansible.builtin.assert:
+    that:
+      - (vm_tamper_result.stdout | from_json).before_sha256 == vm_tamper_approved_binary[0].sha256
+      - (vm_tamper_result.stdout | from_json).after_sha256 != vm_tamper_approved_binary[0].sha256
 
 - name: Require the server action to stop on immediate bundle revalidation
   block:
@@ -20,6 +41,7 @@
         that:
           - ansible_failed_task.name == 'Revalidate every staged byte immediately before privileged installation'
           - ansible_failed_result.rc | default(0) | int != 0
+          - "'FAIL: artifact integrity failure; no download attempted' in ansible_failed_result.stderr | default('')"
     - name: Prove RKE2 remained stopped after rejected staged bytes
       ansible.builtin.command:
         argv: [ssh, -F, "{{ vm_state }}/ssh_config", "{{ vm_name }}", sudo, -n,

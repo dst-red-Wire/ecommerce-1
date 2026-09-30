@@ -292,7 +292,7 @@ packer_image:
     build_user: password-locked-key-only
     secrets: forbidden
     first_boot_access:
-      authority: cloud-init-nocloud-net
+      authority: cloud-init-nocloud
       transport: virtualbox-nat-host-loopback-http
       ssh_public_key: runtime-generated-ephemeral
       ssh_private_key: host-runtime-only

@@ -1,18 +1,25 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-from pathlib import Path
+import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
+from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 EVIDENCE_ARTIFACT_TYPE = "application/vnd.ecommerce1.ci-evidence.v1"
 EVIDENCE_MEDIA_TYPE = "application/vnd.ecommerce1.ci-evidence.v1+json"
@@ -462,6 +469,378 @@ def trusted_pr_transition(
     ).returncode
 
 
+_NATIVE_REPOSITORY = "dst-red-Wire/ecommerce-1"
+_NATIVE_RUNNER_PATHS = (
+    "scripts/windows/LabNativeBoot.ps1",
+    "scripts/windows/LabNetworkSmoke.ps1",
+    "scripts/windows/RockyImagePipeline.psm1",
+    "scripts/windows/NativeVagrantSshSmoke.ps1",
+    "scripts/windows/LabNetworkSeed.ps1",
+    "scripts/windows/LabSshIdentity.ps1",
+    "scripts/windows/local-services-seed-server.ps1",
+)
+_NATIVE_CONTROLLER_PATHS = (
+    "scripts/repository_delivery.py",
+    "scripts/repoctl.py",
+    "scripts/exact_pr_binding.py",
+    "scripts/managed_gh.py",
+    "config/contracts/toolchain-lock.json",
+)
+_NATIVE_ACTIONS = {
+    "Prepare": "lab-network-native-boot-prepare",
+    "SelfTest": "lab-network-native-boot-self-test",
+    "Reboot": "lab-network-native-boot-reboot",
+    "Recover": "lab-network-native-boot-recover",
+    "Verify": "lab-network-native-boot-authority-check",
+}
+
+
+def _native_child_environment() -> dict[str, str]:
+    """Use only host identity, WSL interop and GitHub credentials at this gate."""
+    account = pwd.getpwuid(os.getuid())
+    environment = {
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+        "HOME": account.pw_dir,
+        "USER": account.pw_name,
+        "LOGNAME": account.pw_name,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GH_HOST": "github.com",
+        "GH_PROMPT_DISABLED": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+    for name in (
+        "XDG_RUNTIME_DIR", "WSL_DISTRO_NAME", "WSL_INTEROP",
+        "GH_TOKEN", "GITHUB_TOKEN", "ECOMMERCE_TOOL_HOME",
+    ):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _native_git_bytes(root: Path, *args: str, environment: dict[str, str]) -> bytes:
+    if shutil.which("git", path=environment.get("PATH")) != "/usr/bin/git":
+        raise RuntimeError("trusted native Git executable is unavailable")
+    try:
+        result = subprocess.run(
+            ["git", "-c", "core.fsmonitor=false",
+             "-c", "core.hooksPath=/dev/null", "-C", str(root), *args],
+            cwd=root, env=environment, stdin=subprocess.DEVNULL,
+            capture_output=True, check=False, timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("trusted native Git verification is unavailable") from exc
+    if result.returncode:
+        raise RuntimeError("trusted native Git verification failed")
+    return result.stdout
+
+
+def _native_git_text(root: Path, *args: str, environment: dict[str, str]) -> str:
+    return _native_git_bytes(root, *args, environment=environment).decode("utf-8").strip()
+
+
+def _native_checkout_root(root: Path, *, environment: dict[str, str]) -> Path:
+    if not root.is_absolute() or not root.is_dir() or root.is_symlink():
+        raise RuntimeError("trusted native checkout path is absent or redirected")
+    if root.resolve(strict=True) != root:
+        raise RuntimeError("trusted native checkout path is not canonical")
+    top = _native_git_text(root, "rev-parse", "--show-toplevel", environment=environment)
+    if top != str(root):
+        raise RuntimeError("trusted native path is not a checkout root")
+    return root
+
+
+def _native_clean_checkout(
+    root: Path, *, environment: dict[str, str], require_branch: bool = False
+) -> tuple[str, str]:
+    sha = _native_git_text(root, "rev-parse", "HEAD", environment=environment)
+    branch = _native_git_text(
+        root, "branch", "--show-current", environment=environment
+    )
+    if re.fullmatch(r"[0-9a-f]{40}", sha) is None:
+        raise RuntimeError("trusted native checkout SHA is invalid")
+    if (require_branch and not branch) or branch != branch.strip():
+        raise RuntimeError("trusted native checkout branch is invalid")
+    if _native_git_text(
+        root, "status", "--porcelain=v1", "--untracked-files=all", environment=environment
+    ):
+        raise RuntimeError("trusted native checkout must be clean at the exact SHA")
+    return sha, branch
+
+
+def _native_ps1_crlf_policy(
+    root: Path, sha: str, *, environment: dict[str, str]
+) -> bool:
+    attributes = _native_git_bytes(
+        root, "show", f"{sha}:.gitattributes", environment=environment
+    )
+    return b"*.ps1 text eol=crlf" in attributes.splitlines()
+
+
+def _native_git_file_bytes(
+    root: Path, sha: str, relative: str, *, environment: dict[str, str]
+) -> bytes:
+    source = root / relative
+    if (
+        source.is_symlink() or not source.is_file()
+        or source.resolve(strict=True) != source
+        or not stat.S_ISREG(source.lstat().st_mode)
+    ):
+        raise RuntimeError(f"trusted native source is unsafe: {relative}")
+    index = _native_git_text(
+        root, "ls-files", "--stage", "--", relative, environment=environment
+    )
+    if not re.fullmatch(r"100(?:644|755) [0-9a-f]{40} 0\t" + re.escape(relative), index):
+        raise RuntimeError(f"trusted native source is not a regular tracked file: {relative}")
+    expected = _native_git_bytes(
+        root, "show", f"{sha}:{relative}", environment=environment
+    )
+    raw = source.read_bytes()
+    canonical = raw
+    if source.suffix == ".ps1" and _native_ps1_crlf_policy(
+        root, sha, environment=environment
+    ):
+        canonical = raw.replace(b"\r\n", b"\n")
+        if b"\r" in canonical:
+            raise RuntimeError(f"trusted native source has unsafe EOL: {relative}")
+    if canonical != expected:
+        raise RuntimeError(f"trusted native source differs from Git: {relative}")
+    return raw
+
+
+def _native_verify_base_tree(
+    root: Path, sha: str, *, environment: dict[str, str]
+) -> None:
+    """Reject hidden substitutions in any exact-SHA checkout, including skip-worktree files."""
+    tree = _native_git_bytes(
+        root, "ls-tree", "-r", "-z", "--full-tree", sha, environment=environment
+    )
+    if not tree or not tree.endswith(b"\0"):
+        raise RuntimeError("trusted native base Git tree is invalid")
+    ps1_crlf = _native_ps1_crlf_policy(root, sha, environment=environment)
+    for entry in tree.split(b"\0")[:-1]:
+        try:
+            metadata, raw_path = entry.split(b"\t", 1)
+            mode, kind, object_sha = metadata.split(b" ")
+        except ValueError as exc:
+            raise RuntimeError("trusted native base Git tree entry is invalid") from exc
+        if (
+            mode not in {b"100644", b"100755"} or kind != b"blob"
+            or re.fullmatch(rb"[0-9a-f]{40}", object_sha) is None
+        ):
+            raise RuntimeError("trusted native base Git tree contains an unsafe entry")
+        relative = Path(os.fsdecode(raw_path))
+        if (
+            relative.is_absolute()
+            or any(part in {"", ".", ".."} for part in relative.parts)
+        ):
+            raise RuntimeError("trusted native base Git tree contains an unsafe path")
+        source = root / relative
+        if (
+            source.is_symlink() or not source.is_file()
+            or source.resolve(strict=True) != source
+            or not stat.S_ISREG(source.lstat().st_mode)
+        ):
+            raise RuntimeError(f"trusted native base source is unsafe: {relative}")
+        before = source.stat()
+        raw = source.read_bytes()
+        after = source.stat()
+        if len(raw) != before.st_size:
+            raise RuntimeError(f"trusted native base source changed during read: {relative}")
+        # The committed .gitattributes checks PowerShell files out as CRLF.
+        # Compare their canonical LF projection; all executable Python and
+        # policy files must match their Git objects byte for byte.
+        canonical = raw.replace(b"\r\n", b"\n") if ps1_crlf and relative.suffix == ".ps1" else raw
+        if ps1_crlf and relative.suffix == ".ps1" and b"\r" in canonical:
+            raise RuntimeError(f"trusted native base source has unsafe EOL: {relative}")
+        digest = hashlib.sha1(
+            b"blob " + str(len(canonical)).encode("ascii") + b"\0" + canonical
+        ).hexdigest()
+        if (
+            digest.encode("ascii") != object_sha
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+               != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            raise RuntimeError(f"trusted native base source differs from Git: {relative}")
+
+
+def _native_verify_controller(
+    trusted_root: Path, *, environment: dict[str, str]
+) -> tuple[str, Path, Path]:
+    _native_checkout_root(trusted_root, environment=environment)
+    wrapper = trusted_root / "scripts/repository_delivery.py"
+    controller = trusted_root / "scripts/repoctl.py"
+    if Path(__file__).resolve() != wrapper:
+        raise RuntimeError("native UAC wrapper is not executing from its trusted checkout")
+    if trusted_root / "scripts" != (trusted_root / "scripts").resolve(strict=True):
+        raise RuntimeError("native UAC scripts directory is redirected")
+    base_sha, _ = _native_clean_checkout(
+        trusted_root, environment=environment
+    )
+    for relative in _NATIVE_CONTROLLER_PATHS:
+        _native_git_file_bytes(
+            trusted_root, base_sha, relative, environment=environment
+        )
+    _native_verify_base_tree(trusted_root, base_sha, environment=environment)
+    if _native_clean_checkout(trusted_root, environment=environment)[0] != base_sha:
+        raise RuntimeError("trusted native base changed during verification")
+    return base_sha, wrapper, controller
+
+
+def _native_runner_manifest(
+    target_root: Path, head_sha: str, *, environment: dict[str, str]
+) -> str:
+    manifest = bytearray()
+    for relative in sorted(_NATIVE_RUNNER_PATHS):
+        source = _native_git_file_bytes(
+            target_root, head_sha, relative, environment=environment
+        )
+        manifest.extend(relative.encode("utf-8"))
+        manifest.extend(b"\0")
+        manifest.extend(hashlib.sha256(source).hexdigest().encode("ascii"))
+        manifest.extend(b"\n")
+    return hashlib.sha256(manifest).hexdigest()
+
+
+
+def _native_with_environment(callback, environment: dict[str, str], *args, **kwargs):
+    """Run base GitHub tools without inheriting caller host or loader overrides."""
+    previous = os.environ.copy()
+    try:
+        os.environ.clear()
+        os.environ.update(environment)
+        return callback(*args, **kwargs)
+    finally:
+        os.environ.clear()
+        os.environ.update(previous)
+
+def trusted_native_uac(
+    trusted_root: Path,
+    target_root: Path,
+    action: str,
+    campaign_id: str,
+    expected_vm_id: str,
+    pr_number: int | None,
+    python_executable: str,
+    *,
+    head_sha: str = "",
+    base_sha: str = "",
+    runner_manifest_sha256: str = "",
+    qualification_sha256: str = "",
+) -> int:
+    """Delegate native UAC only from the clean exact-base controller."""
+    if action not in _NATIVE_ACTIONS:
+        raise RuntimeError("unsupported trusted native UAC action")
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        raise RuntimeError("trusted native UAC campaign ID is invalid")
+    if action in {"Prepare", "SelfTest", "Verify"}:
+        if re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+            expected_vm_id or "",
+        ) is None:
+            raise RuntimeError("trusted native UAC expected VM ID is invalid")
+    elif expected_vm_id:
+        raise RuntimeError("trusted native UAC expected VM ID is only valid for Prepare/SelfTest/Verify")
+    if action != "Recover" and (type(pr_number) is not int or pr_number < 1):
+        raise RuntimeError("trusted native UAC requires a positive PR number")
+    if action == "Recover" and pr_number is not None and (type(pr_number) is not int or pr_number < 1):
+        raise RuntimeError("trusted native recovery PR hint is invalid")
+    verify_fields = (head_sha, base_sha, runner_manifest_sha256, qualification_sha256)
+    if action == "Verify":
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", head_sha) is None
+            or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None
+            or re.fullmatch(r"[0-9a-f]{64}", runner_manifest_sha256) is None
+            or re.fullmatch(r"[0-9a-f]{64}", qualification_sha256) is None
+        ):
+            raise RuntimeError("trusted native Verify binding is invalid")
+    elif any(verify_fields):
+        raise RuntimeError("trusted native Verify binding is only valid for Verify")
+
+    environment = _native_child_environment()
+    actual_base_sha, wrapper, controller = _native_verify_controller(
+        trusted_root, environment=environment
+    )
+    _native_checkout_root(target_root, environment=environment)
+    if target_root == trusted_root:
+        raise RuntimeError("native UAC target and exact-base checkouts must differ")
+    environment.update({
+        "REPOCTL_TRUSTED_NATIVE_UAC": "1",
+        "REPOCTL_TRUSTED_WRAPPER": str(wrapper),
+        "REPOCTL_TRUSTED_CONTROLLER": str(controller),
+        "REPOCTL_TRUSTED_POLICY_ROOT": str(trusted_root),
+        "REPOCTL_TRUSTED_BASE_SHA": actual_base_sha,
+        "REPOCTL_TRUSTED_TARGET_ROOT": str(target_root),
+    })
+    command = [
+        python_executable, "-I", str(controller), _NATIVE_ACTIONS[action],
+        "--campaign-id", campaign_id,
+    ]
+    if action == "Recover":
+        environment["REPOCTL_TRUSTED_NATIVE_RECOVERY"] = "1"
+    else:
+        from exact_pr_binding import resolve_exact_open_pr, revalidate_exact_open_pr
+        from managed_gh import resolve_managed_gh
+
+        actual_head_sha, head_branch = _native_clean_checkout(
+            target_root, environment=environment, require_branch=True
+        )
+        _native_verify_base_tree(target_root, actual_head_sha, environment=environment)
+        gh = _native_with_environment(resolve_managed_gh, environment, trusted_root)
+        binding = _native_with_environment(
+            resolve_exact_open_pr, environment, _NATIVE_REPOSITORY,
+            actual_head_sha, head_branch, "main", actual_base_sha, gh=gh[0],
+        )
+        if binding.pr_number != pr_number:
+            raise RuntimeError("native UAC target does not match the requested PR")
+        manifest = _native_runner_manifest(
+            target_root, actual_head_sha, environment=environment
+        )
+        if action == "Verify":
+            if (
+                actual_head_sha != head_sha or actual_base_sha != base_sha
+                or manifest != runner_manifest_sha256
+            ):
+                raise RuntimeError("trusted native Verify binding changed during UAC")
+            command += [
+                "--expected-vm-id", expected_vm_id,
+                "--qualification-sha256", qualification_sha256,
+            ]
+        elif action in {"Prepare", "SelfTest"}:
+            command += ["--expected-vm-id", expected_vm_id, "--trusted-root", str(trusted_root)]
+        _native_verify_base_tree(target_root, actual_head_sha, environment=environment)
+        if (
+            _native_verify_controller(trusted_root, environment=environment)[0] != actual_base_sha
+            or _native_clean_checkout(target_root, environment=environment, require_branch=True)
+               != (actual_head_sha, head_branch)
+            or _native_runner_manifest(
+                target_root, actual_head_sha, environment=environment
+            ) != manifest
+            or _native_with_environment(resolve_managed_gh, environment, trusted_root) != gh
+            or _native_with_environment(
+                revalidate_exact_open_pr, environment, binding, gh=gh[0]
+            ) != binding
+        ):
+            raise RuntimeError("native UAC exact PR/controller/runner binding changed")
+        environment.update({
+            "REPOCTL_TRUSTED_HEAD_SHA": actual_head_sha,
+            "REPOCTL_TRUSTED_PR_NUMBER": str(pr_number),
+            "REPOCTL_TRUSTED_NATIVE_RUNNER_MANIFEST_SHA256": manifest,
+        })
+    try:
+        result = subprocess.run(
+            command, cwd=target_root, env=environment, stdin=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError("trusted native controller could not start") from exc
+    return result.returncode
+
+
+
 def bundle_deliver(
     root: Path, trusted_controller: Path, bundle: str, expected_head: str, title: str, base: str, python_executable: str
 ) -> int:
@@ -659,8 +1038,34 @@ def main() -> int:
     transition.add_argument("--pr", required=True, type=int)
     transition.add_argument("--dry-run", action="store_true")
     transition.add_argument("--json", action="store_true")
+    native = subparsers.add_parser("trusted-native-uac")
+    native.add_argument("--target-root", required=True)
+    native.add_argument("--action", choices=tuple(_NATIVE_ACTIONS), required=True)
+    native.add_argument("--campaign-id", required=True)
+    native.add_argument("--expected-vm-id", default="")
+    native.add_argument("--pr", type=int)
+    native.add_argument("--head-sha", default="")
+    native.add_argument("--base-sha", default="")
+    native.add_argument("--runner-manifest-sha256", default="")
+    native.add_argument("--qualification-sha256", default="")
     args = parser.parse_args()
     try:
+        if args.command == "trusted-native-uac":
+            if not sys.flags.isolated:
+                raise RuntimeError("trusted native UAC requires Python isolated mode (-I)")
+            return trusted_native_uac(
+                Path(__file__).resolve().parents[1],
+                Path(args.target_root),
+                args.action,
+                args.campaign_id,
+                args.expected_vm_id,
+                args.pr,
+                sys.executable,
+                head_sha=args.head_sha,
+                base_sha=args.base_sha,
+                runner_manifest_sha256=args.runner_manifest_sha256,
+                qualification_sha256=args.qualification_sha256,
+            )
         if args.command == "trusted-pr-transition":
             return trusted_pr_transition(
                 Path(__file__).resolve().parents[1],

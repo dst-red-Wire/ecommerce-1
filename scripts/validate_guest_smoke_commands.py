@@ -12,7 +12,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS_SOURCES = (
-    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 17),
+    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-VagrantSmokeCommand", 15),
+    (ROOT / "scripts/windows/native-vtx-cycle.ps1", "Invoke-NativeSshInventory", 2),
     (ROOT / "scripts/windows/qualify-rocky-image.ps1", "Invoke-SmokeCommand", 10),
 )
 
@@ -49,7 +50,7 @@ def _windows_commands() -> list[tuple[str, str]]:
         for line in lines:
             owner = f"{path.name}:{invocation}"
             if '-Command ("rpm -q " + ($packages -join' in line:
-                if path.name != "native-vtx-cycle.ps1" or not line.strip().endswith(
+                if invocation != "Invoke-NativeSshInventory" or not line.strip().endswith(
                     '-Command ("rpm -q " + ($packages -join \' \'))'
                 ):
                     raise GuestSmokePreflightError(f"unexpected dynamic guest command: {owner}")
@@ -61,13 +62,43 @@ def _windows_commands() -> list[tuple[str, str]]:
             command = match.group(1).replace("''", "'").replace("{0}", "34359738368")
             commands.append((owner, command))
     network = ROOT / "scripts/windows/LabNetworkSmoke.ps1"
-    security = [line for line in network.read_text(encoding="utf-8").splitlines() if "-Arguments @('ssh','-c'," in line]
+    network_text = network.read_text(encoding="utf-8")
+    security = [line for line in network_text.splitlines()
+                if "Invoke-NativeDirectSshProbe" in line and "-Command '" in line]
     if len(security) != 1:
         raise GuestSmokePreflightError("network-only guest security command inventory changed")
-    match = re.search(r"-Arguments @\('ssh','-c','((?:''|[^'])*)'\)", security[0])
+    match = re.search(r"-Command '((?:''|[^'])*)'", security[0])
     if match is None:
         raise GuestSmokePreflightError("network-only guest security command is not a PowerShell literal")
     commands.append(("LabNetworkSmoke.ps1:guest-security", match.group(1).replace("''", "'")))
+    image = re.search(r"\$checks = @\(\s*(.*?)\s*\)\s*foreach \(\$check in \$checks\)", network_text, re.S)
+    if image is None:
+        raise GuestSmokePreflightError("native image guest command inventory is absent")
+    expected_image = (
+        "rocky_release", "kernel", "architecture_cpu", "memory", "disk", "xfs",
+        "lvm_absent", "swap_absent", "systemd", "network", "fundamental_tools",
+        "rke2_prerequisites", "security",
+    )
+    image_lines = [line.strip() for line in image.group(1).splitlines() if line.strip()]
+    if len(image_lines) != len(expected_image):
+        raise GuestSmokePreflightError("native image guest command inventory changed")
+    for name, line in zip(expected_image, image_lines):
+        item = re.fullmatch(r"@\{ Name='([a-z0-9_]+)'; Command='((?:''|[^'])*)' \}", line)
+        if item is None or item[1] != name:
+            raise GuestSmokePreflightError(f"native image guest command is not an exact literal: {name}")
+        commands.append((f"LabNetworkSmoke.ps1:image:{name}", "set -eu; set -o pipefail; " + item[2].replace("''", "'")))
+    if "$profileCommand = 'rpm -q ' + ($packages -join ' ')" not in network_text:
+        raise GuestSmokePreflightError("native image RPM profile command changed")
+    commands.append(("LabNetworkSmoke.ps1:image:rpm_profile", "set -eu; set -o pipefail; rpm -q bash"))
+    inventory_lines = [line for line in network_text.splitlines()
+                       if "Invoke-LabImageProbe" in line and "-Name 'package_inventory' -Command " in line]
+    if len(inventory_lines) != 1:
+        raise GuestSmokePreflightError("native image RPM inventory command changed")
+    inventory = re.search(r"-Command '((?:''|[^'])*)'$", inventory_lines[0])
+    if inventory is None:
+        raise GuestSmokePreflightError("native image RPM inventory is not a PowerShell literal")
+    commands.append(("LabNetworkSmoke.ps1:image:package_inventory",
+                     "set -eu; set -o pipefail; " + inventory[1].replace("''", "'")))
     return commands
 
 

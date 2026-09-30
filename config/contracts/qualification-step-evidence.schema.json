@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dst-red-Wire/ecommerce-1/blob/main/config/contracts/qualification-step-evidence.schema.json",
+  "title": "QualificationExecutionPolicy step checkpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy", "policy_version", "qualification", "step", "source_sha", "input_digest", "status", "started_at", "finished_at", "duration_seconds", "executed", "reused", "cache_hit"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy": {"const": "QualificationExecutionPolicy"},
+    "policy_version": {"const": 1},
+    "qualification": {"type": "string", "minLength": 1},
+    "step": {"type": "string", "minLength": 1},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "input_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "status": {"enum": ["PASS", "FAIL", "BLOCKED_RUNTIME", "SKIPPED_REUSED_VERIFIED"]},
+    "started_at": {"type": "string", "format": "date-time"},
+    "finished_at": {"type": "string", "format": "date-time"},
+    "duration_seconds": {"type": "number", "minimum": 0},
+    "executed": {"type": "boolean"},
+    "reused": {"type": "boolean"},
+    "cache_hit": {"type": "boolean"},
+    "reused_from": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_sha", "input_digest", "artifact_digest"],
+      "properties": {
+        "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "input_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "artifact_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "runtime_evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "preflight": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capacity", "environment"],
+      "properties": {"capacity": {"const": "PASS"}, "environment": {"const": "PASS"}}
+    }
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "SKIPPED_REUSED_VERIFIED"}}, "required": ["status"]},
+     "then": {"required": ["artifact_digest", "reused_from"], "properties": {"executed": {"const": false}, "reused": {"const": true}, "cache_hit": {"const": true}}}},
+    {"if": {"properties": {"reused": {"const": true}}, "required": ["reused"]},
+     "then": {"required": ["artifact_digest", "reused_from"], "properties": {"status": {"const": "SKIPPED_REUSED_VERIFIED"}}}},
+    {"if": {"properties": {"step": {"const": "preflight"}, "status": {"const": "PASS"}}, "required": ["step", "status"]},
+     "then": {"required": ["preflight"]}}
+  ]
+}

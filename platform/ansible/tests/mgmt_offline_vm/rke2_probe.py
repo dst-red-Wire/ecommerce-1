@@ -75,6 +75,8 @@ def main() -> None:
             failing.append(f"{pod['metadata']['namespace']}/{pod['metadata']['name']}:{phase}")
     if failing:
         raise SystemExit("non-running pods: " + ",".join(sorted(failing)))
+    if pending:
+        raise SystemExit("pending pods: " + ",".join(sorted(pending)))
     public_error = None
     public_denied = False
     probe = socket.socket()
@@ -88,6 +90,9 @@ def main() -> None:
         probe.close()
     if not public_denied:
         raise SystemExit("public egress was not denied")
+    service = output("systemctl", "is-active", "rke2-server.service")
+    if service != "active":
+        raise SystemExit("RKE2 server service is not active")
     print(json.dumps({
         "cilium_ready": status["numberReady"],
         "node": nodes[0]["metadata"]["name"],
@@ -97,6 +102,7 @@ def main() -> None:
         "nft_policies": nft_policies,
         "public_connect_error": public_error,
         "rke2_version": output("/usr/local/bin/rke2", "--version").splitlines()[0],
+        "rke2_service": service,
         "selinux": output("getenforce"),
     }, sort_keys=True))
 

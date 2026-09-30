@@ -262,8 +262,13 @@ class ModernEngineeringTest(unittest.TestCase):
         self.assertEqual("PROVEN", payload["sectors"][0]["capabilities"][0]["status"])
 
     def test_qce_projection_maps_milestones_issues_gates_and_is_deterministic(self):
-        first = MOD.qce_status(ROOT, now=NOW)
-        second = MOD.qce_status(ROOT, now=NOW)
+        # Qualification can replace the exact-head evidence while these two
+        # projections run. Freeze that external input for a determinism test.
+        with mock.patch.object(
+            MOD, "_qualification_evidence", return_value=({}, "test snapshot")
+        ):
+            first = MOD.qce_status(ROOT, now=NOW)
+            second = MOD.qce_status(ROOT, now=NOW)
         self.assertEqual(
             json.dumps(first, sort_keys=True, separators=(",", ":")),
             json.dumps(second, sort_keys=True, separators=(",", ":")),

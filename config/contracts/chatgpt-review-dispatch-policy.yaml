@@ -1,0 +1,8 @@
+version: 1
+provider: ChatGPT
+event: CHATGPT_REVIEW_REQUIRED
+handoff_max_bytes: 8192
+review_order: [CODE, SECURITY]
+verdict_authority: false
+transport_missing_state: BLOCKED_EXTERNAL_REVIEW_TRANSPORT
+require_owner_unedited_marker: true

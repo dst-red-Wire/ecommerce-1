@@ -40,6 +40,15 @@ class NativeControllerBootstrapTest(unittest.TestCase):
             }
             (root / "payload.json").write_text(json.dumps(document), encoding="utf-8")
             self.assertEqual(source_sha, BOOTSTRAP.verify_payload(root, source_sha)["source_sha"])
+            document["source_branch"] = "fix/vm-lifecycle-runtime-proof"
+            (root / "payload.json").write_text(json.dumps(document), encoding="utf-8")
+            self.assertEqual(source_sha, BOOTSTRAP.verify_payload(root, source_sha)["source_sha"])
+            document["source_branch"] = "unapproved-branch"
+            (root / "payload.json").write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaises(BOOTSTRAP.BootstrapError):
+                BOOTSTRAP.verify_payload(root, source_sha)
+            document["source_branch"] = "fix/vm-lifecycle-runtime-proof"
+            (root / "payload.json").write_text(json.dumps(document), encoding="utf-8")
             with self.assertRaises(BOOTSTRAP.BootstrapError):
                 BOOTSTRAP.verify_payload(root, "b" * 40)
             (root / "oras").write_bytes(b"changed")

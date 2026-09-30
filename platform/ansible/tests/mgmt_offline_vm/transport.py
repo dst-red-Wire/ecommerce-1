@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import ipaddress
 import json
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 POWERSHELL = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
@@ -20,7 +20,31 @@ $OutputEncoding = [Console]::OutputEncoding
 $r = Get-Content -Raw -LiteralPath $Request | ConvertFrom-Json
 if ($r.mode -eq "vagrant") {
   Set-Location -LiteralPath $r.directory
-  $env:VAGRANT_HOME = Join-Path $r.directory "vagrant-home"
+  $homeRoot = Join-Path $r.directory "vagrant-home"
+  $boxCache = Join-Path $homeRoot "boxes"
+  foreach ($candidate in @($r.directory, $homeRoot, $boxCache)) {
+    if (Test-Path -LiteralPath $candidate) {
+      $entry = Get-Item -LiteralPath $candidate -Force
+      if (-not $entry.PSIsContainer -or
+          ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "Vagrant state or box cache is redirected: $candidate"
+      }
+    }
+  }
+  if (Test-Path -LiteralPath (Join-Path $homeRoot "Vagrantfile")) {
+    throw "Unexpected global Vagrantfile in isolated VM home"
+  }
+  if ($r.fresh_box -and (Test-Path -LiteralPath $boxCache)) {
+    if (@(Get-ChildItem -LiteralPath $boxCache -Force).Count -ne 0) {
+      throw "Fresh VM creation requires an empty isolated Vagrant box cache"
+    }
+  }
+  foreach ($name in @("VAGRANT_CWD", "VAGRANT_DOTFILE_PATH", "VAGRANT_VAGRANTFILE",
+                     "RUBYOPT", "RUBYLIB", "GEM_HOME", "GEM_PATH",
+                     "BUNDLE_GEMFILE", "BUNDLE_PATH")) {
+    [Environment]::SetEnvironmentVariable($name, $null, "Process")
+  }
+  $env:VAGRANT_HOME = $homeRoot
   $env:VAGRANT_CHECKPOINT_DISABLE = "1"
   $env:VAGRANT_DEFAULT_PROVIDER = "virtualbox"
   $env:VAGRANT_EXPERIMENTAL = "none_communicator"
@@ -42,44 +66,6 @@ if ($r.mode -eq "proxy") {
   } finally { $client.Dispose() }
   exit 0
 }
-if ($r.mode -eq "console") {
-  $pipe = [IO.Pipes.NamedPipeClientStream]::new(".", $r.name, [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
-  $pipe.Connect(10000)
-  function Send-Line([string]$line) {
-    $bytes = [Text.Encoding]::UTF8.GetBytes($line + "`r")
-    $pipe.Write($bytes, 0, $bytes.Length)
-    $pipe.Flush()
-  }
-  function Read-Until([string]$pattern) {
-    $buffer = New-Object byte[] 16384
-    $text = ""
-    $deadline = [DateTime]::UtcNow.AddSeconds(180)
-    while ([DateTime]::UtcNow -lt $deadline) {
-      $task = $pipe.ReadAsync($buffer, 0, $buffer.Length)
-      if (-not $task.Wait(180000)) { throw "Timed out waiting for isolated VM console" }
-      if ($task.Result -eq 0) { throw "Console disconnected" }
-      $text += [Text.Encoding]::UTF8.GetString($buffer, 0, $task.Result)
-      if ($text -match $pattern) { return $text }
-    }
-    throw "Expected console prompt missing"
-  }
-  try {
-    Send-Line ""
-    $initial = Read-Until 'login:|\]\$ '
-    if ($initial -notmatch '\]\$ ') {
-      Send-Line "vagrant"
-      $null = Read-Until "Password:"
-      # Public image-fixture login, never a host/operator credential.
-      Send-Line "vagrant"
-      $null = Read-Until '\]\$ '
-    }
-    Send-Line ("printf %s " + $r.payload + " | base64 -d | sudo -n /bin/bash")
-    $output = Read-Until 'MGMT_CONSOLE_RESULT:[0-9]+'
-    [Console]::Write($output)
-    if ($output -notmatch 'MGMT_CONSOLE_RESULT:0') { exit 1 }
-  } finally { $pipe.Dispose() }
-  exit 0
-}
 throw "Unsupported transport mode"
 """
 
@@ -88,14 +74,72 @@ def windows_path(path: Path) -> str:
     return subprocess.check_output(["wslpath", "-w", str(path)], text=True).strip()
 
 
+def wait_for_bootstrap_marker(state: Path, *, nonce: str, minimum_mtime_ns: int,
+                              offset: int, timeout_seconds: int = 300) -> str:
+    if re.fullmatch(r"[0-9a-f]{32}", nonce) is None or minimum_mtime_ns <= 0 or offset < 0:
+        raise ValueError("invalid serial bootstrap binding")
+    serial = state / "bootstrap-serial.log"
+    marker = re.compile(
+        rf"(?m)^MGMT_BOOTSTRAP_READY:{nonce} "
+        r"MGMT_HOST_KEY:(ssh-ed25519 [A-Za-z0-9+/=]+)\r?$"
+    )
+    failure = re.compile(
+        rf"(?m)^MGMT_BOOTSTRAP_FAIL:{nonce} "
+        r"stage=([a-z_]+) rc=([1-9][0-9]*)\r?$"
+    )
+    cursor = offset
+    data = ""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            status = serial.stat()
+            if status.st_mtime_ns >= minimum_mtime_ns:
+                if status.st_size < cursor:
+                    # VirtualBox may truncate a prior serial file on an explicit resume.
+                    cursor = 0
+                    data = ""
+                with serial.open("rb") as source:
+                    source.seek(cursor)
+                    chunk = source.read(65536)
+                    cursor = source.tell()
+                if chunk:
+                    data = (data + chunk.decode("utf-8", errors="replace"))[-131072:]
+                    failed = failure.search(data)
+                    if failed:
+                        diagnostic = [
+                            line[:219] for line in data[failed.end():].splitlines()
+                            if line.startswith("MGMT_BOOTSTRAP_LOG:")
+                        ][:12]
+                        detail = " | ".join(diagnostic)
+                        raise ValueError(
+                            f"NoCloud bootstrap failed at {failed.group(1)} "
+                            f"(exit {failed.group(2)})" + (f": {detail}" if detail else "")
+                        )
+                    match = marker.search(data)
+                    if match:
+                        return match.group(0).rstrip("\r")
+        except (FileNotFoundError, PermissionError):
+            pass
+        time.sleep(min(1, max(0, deadline - time.monotonic())))
+    raise ValueError("fresh NoCloud serial bootstrap marker missing")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("vagrant", "console", "proxy"))
     parser.add_argument("--state", type=Path, required=True)
-    parser.add_argument("--script", type=Path)
+    parser.add_argument("--nonce")
+    parser.add_argument("--minimum-mtime-ns", type=int)
+    parser.add_argument("--offset", type=int, default=0)
+    parser.add_argument("--fresh-box", action="store_true")
     args, arguments = parser.parse_known_args()
     if args.mode != "vagrant" and arguments:
         parser.error("unexpected transport arguments")
+    vagrant_args = [item for item in arguments if item != "--"]
+    if args.fresh_box and (args.mode != "vagrant" or vagrant_args not in (
+        ["validate"], ["up", "--provider", "virtualbox", "--no-provision"],
+    )):
+        raise ValueError("fresh box cache check is only valid for new VM validation or boot")
     state = args.state.resolve()
     runtime = json.loads((state / "runtime.json").read_text())
     if not re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", runtime["name"]):
@@ -103,23 +147,24 @@ def main() -> int:
     address = ipaddress.IPv4Address(runtime["address"])
     if not address.is_private or address.is_loopback or address.is_unspecified:
         raise ValueError("private host-only test address required")
+    if args.mode == "console":
+        if args.nonce is None or args.minimum_mtime_ns is None:
+            raise ValueError("serial bootstrap requires seed nonce and boot timestamp")
+        print(wait_for_bootstrap_marker(
+            state, nonce=args.nonce, minimum_mtime_ns=args.minimum_mtime_ns,
+            offset=args.offset,
+        ))
+        return 0
     request = {"mode": args.mode, "name": runtime["name"]}
     if args.mode == "vagrant":
         request.update(
             directory=windows_path(state),
             executable=runtime["vagrant_windows"],
-            arguments=[item for item in arguments if item != "--"],
+            arguments=vagrant_args,
+            fresh_box=args.fresh_box,
         )
     elif args.mode == "proxy":
         request["address"] = str(address)
-    else:
-        if args.script is None:
-            raise ValueError("console guest script required")
-        # Exit status marker is encoded too, so input echo cannot impersonate it.
-        payload = "(\n" + args.script.read_text() + "\n)\nresult=$?\nprintf 'MGMT_CONSOLE_RESULT:%s\\n' \"$result\"\n"
-        request["payload"] = base64.b64encode(payload.encode()).decode()
-        if len(request["payload"]) > 3700:
-            raise ValueError("guest console payload exceeds safe terminal line budget")
     bridge = state / "ipc-transport.ps1"
     if not bridge.exists() or bridge.read_text() != PS:
         bridge.write_text(PS)

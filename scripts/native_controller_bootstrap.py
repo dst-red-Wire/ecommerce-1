@@ -18,6 +18,12 @@ class BootstrapError(RuntimeError):
     pass
 
 
+NATIVE_CONTROLLER_BRANCHES = frozenset({
+    "feat/packer-dual-host-rocky-image-pipeline",
+    "fix/vm-lifecycle-runtime-proof",
+})
+
+
 def run(command: list[str], *, cwd: Path | None = None, timeout: int = 1800) -> str:
     try:
         result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
@@ -42,7 +48,7 @@ def verify_payload(payload_root: Path, expected_sha: str) -> dict:
     document = json.loads((payload_root / "payload.json").read_text(encoding="utf-8"))
     if document.get("schema") != 1 or document.get("source_sha") != expected_sha:
         raise BootstrapError("controller payload source SHA is stale")
-    if document.get("source_branch") != "feat/packer-dual-host-rocky-image-pipeline":
+    if document.get("source_branch") not in NATIVE_CONTROLLER_BRANCHES:
         raise BootstrapError("controller payload branch differs from the PR")
     files = document.get("files")
     if not isinstance(files, dict) or len(files) < 5:

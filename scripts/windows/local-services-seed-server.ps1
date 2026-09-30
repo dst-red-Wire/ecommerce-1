@@ -108,7 +108,10 @@ try {
             if ($match.Success) {
                 $name = $match.Groups['name'].Value
                 $path = Join-Path $seed $name
-                $body = if (Test-Path -LiteralPath $path -PathType Leaf) { [IO.File]::ReadAllBytes($path) } else { [byte[]]@() }
+                [byte[]]$body = @()
+                if (Test-Path -LiteralPath $path -PathType Leaf) {
+                    $body = [IO.File]::ReadAllBytes($path)
+                }
                 $header = "HTTP/1.1 200 OK`r`nContent-Type: text/plain`r`nContent-Length: $($body.Length)`r`nConnection: close`r`n`r`n"
             } else {
                 $body = [Text.Encoding]::UTF8.GetBytes("not found`n")

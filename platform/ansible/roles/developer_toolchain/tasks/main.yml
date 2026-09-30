@@ -48,13 +48,7 @@
   tags: [toolchain, go, cgo, node]
 
 - name: Install pinned artifact transport prerequisite
-  ansible.builtin.apt:
-    name: "rsync={{ rsync_package_version }}"
-    state: present
-    update_cache: true
-    cache_valid_time: 86400
-  become: true
-  tags: [toolchain, artifact_transport]
+  ansible.builtin.import_tasks: transport_tools.yml
 
 - name: Detect ansible-lint pipx prerequisite
   ansible.builtin.command:

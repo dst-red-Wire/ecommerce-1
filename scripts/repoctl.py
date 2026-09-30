@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import base64
 import contextlib
 import contextvars
 import copy
 import errno
 import fcntl
+import gzip
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import functools
@@ -22,7 +24,8 @@ import hashlib
 import json
 import math
 import os
-from pathlib import Path
+import pwd
+from pathlib import Path, PureWindowsPath
 import re
 import shlex
 import signal
@@ -31,12 +34,21 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import qualification_cache
+try:
+    import qualification_steps
+except ModuleNotFoundError as exc:
+    if exc.name != "qualification_steps":
+        raise
+    # Trusted delivery controllers copy only the stateless repoctl boundary.
+    # Qualification commands still fail closed when their step validator is absent.
+    qualification_steps = None
 
 
 _MODERN_ENGINEERING = None
@@ -45,6 +57,9 @@ _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=Non
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
 _PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
+_NATIVE_UAC_CONTROLLER_PATH = contextvars.ContextVar("native_uac_controller_path", default=None)
+_NATIVE_UAC_RUNTIME_LOCK_HELD = contextvars.ContextVar("native_uac_runtime_lock_held", default=False)
+_NATIVE_UAC_FRESH_QUALIFICATION = contextvars.ContextVar("native_uac_fresh_qualification", default=None)
 
 
 def _modern_engineering_api():
@@ -93,11 +108,21 @@ except ModuleNotFoundError as exc:
     publish_remote_status = _missing_repository_delivery
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
-ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+_NATIVE_UAC_MODE = os.environ.get("REPOCTL_TRUSTED_NATIVE_UAC") == "1"
+_NATIVE_UAC_GIT = ["/usr/bin/git", "-c", "core.fsmonitor=false",
+                   "-c", "core.hooksPath=/dev/null"]
+ROOT = Path(subprocess.check_output(
+    [*(_NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]),
+     "rev-parse", "--show-toplevel"], text=True).strip())
+
+
+def _toolchain_policy_root() -> Path:
+    # Native UAC runs the base controller with the PR checkout as cwd.
+    return SCRIPT_DIR.parent if _NATIVE_UAC_MODE else ROOT
 
 
 def _raw_toolchain_lock() -> dict:
-    return json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    return json.loads((_toolchain_policy_root() / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
 
 
 def managed_bin_dirs() -> tuple[Path, ...]:
@@ -126,7 +151,7 @@ def toolchain_projection_path(name: str) -> Path:
     relative = projection.get("path") if isinstance(projection, dict) else None
     if not isinstance(relative, str) or not relative:
         raise RuntimeError(f"central toolchain lock missing projection path: {name}")
-    return ROOT / relative
+    return _toolchain_policy_root() / relative
 
 
 def ansible_collections_root() -> Path:
@@ -134,10 +159,16 @@ def ansible_collections_root() -> Path:
     relative = config.get("collections_install_root") if isinstance(config, dict) else None
     if not isinstance(relative, str) or not relative:
         raise RuntimeError("central toolchain lock missing Ansible collections_install_root")
-    return ROOT / relative
+    return _toolchain_policy_root() / relative
 
 
-os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
+if _NATIVE_UAC_MODE:
+    # The base wrapper supplies this fixed system path. Managed bins are user
+    # writable and must not shadow Git/Ruby while deciding elevation authority.
+    if os.environ.get("PATH") != "/usr/bin:/bin:/usr/local/bin":
+        raise RuntimeError("native UAC controller requires the wrapper's system tool path")
+else:
+    os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
@@ -1030,6 +1061,9 @@ def run(
     # A JSON pr-loop owns stdout exclusively; child diagnostics must not escape there.
     diagnostic_capture = not capture and _PR_LOOP_JSON_STDOUT.get() is not None
     capture = capture or diagnostic_capture
+    if (_NATIVE_UAC_MODE and cmd and cmd[0] in {"git", "/usr/bin/git"}
+        and cmd[:len(_NATIVE_UAC_GIT)] != _NATIVE_UAC_GIT):
+        cmd = [*_NATIVE_UAC_GIT, *cmd[1:]]
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -1054,7 +1088,8 @@ def output(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | Non
 
 
 def git(*args: str, check: bool = True) -> str:
-    p = run(["git", *args], check=check, capture=True)
+    command = _NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]
+    p = run([*command, *args], check=check, capture=True)
     return p.stdout
 
 
@@ -1166,6 +1201,7 @@ def _review_policy_document() -> dict:
 
 
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
+_NATIVE_UAC_QUALIFICATION_POLICY: tuple[Path, dict] | None = None
 
 
 def _completed_proof_inputs_unchanged(
@@ -1244,13 +1280,30 @@ def _semantic_region_snapshot_unchanged(
 
 def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
-    global _QUALIFICATION_EXECUTION_POLICY
-    if _QUALIFICATION_EXECUTION_POLICY is None:
-        lock = ruby_yaml("architecture.lock.yaml")
+    if qualification_steps is None:
+        raise RuntimeError("qualification step validator is required")
+    global _QUALIFICATION_EXECUTION_POLICY, _NATIVE_UAC_QUALIFICATION_POLICY
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    if (native_controller and (
+        _NATIVE_UAC_QUALIFICATION_POLICY is None
+        or _NATIVE_UAC_QUALIFICATION_POLICY[0] != policy_root
+    )) or (not native_controller and _QUALIFICATION_EXECUTION_POLICY is None):
+        lock = ruby_yaml(str(policy_root / "architecture.lock.yaml"))
         relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
         if not isinstance(relative, str) or not relative.strip():
             raise RuntimeError("architecture.lock.yaml must register machine_contracts.qualification_execution_policy")
-        policy = ruby_yaml(relative)
+        policy = ruby_yaml(str(policy_root / relative))
+        qualification_steps.validate_policy(policy, policy_root)
+        properties_policy = ruby_yaml(str(
+            policy_root / policy["step_qualification"]["properties_authority"]))
+        if (
+            properties_policy.get("version") != 1
+            or properties_policy.get("kind") != "ExecutionPropertiesPolicy"
+            or properties_policy.get("status") != "enforced"
+            or not isinstance(properties_policy.get("properties"), dict)
+        ):
+            raise RuntimeError("QualificationExecutionPolicy requires the enforced ExecutionPropertiesPolicy")
         if (
             policy.get("kind") != "QualificationExecutionPolicy"
             or policy.get("architecture_authority") != "architecture.lock.yaml"
@@ -1421,6 +1474,7 @@ def qualification_execution_policy() -> dict:
         workflows = policy.get("workflows")
         if not isinstance(workflows, dict) or not workflows:
             raise RuntimeError("qualification execution policy must declare workflows")
+        qualification_steps.validate_graph(workflows.get("rke2_local_virtualbox", {}))
 
         effective_workflows: dict[str, dict] = {}
         default_keys = set(defaults)
@@ -1623,7 +1677,13 @@ def qualification_execution_policy() -> dict:
             or campaign.get("blocking_for_campaign_result") is not True
         ):
             raise RuntimeError("performance_campaign workflow contract is invalid")
-        _QUALIFICATION_EXECUTION_POLICY = policy
+        if native_controller:
+            _NATIVE_UAC_QUALIFICATION_POLICY = (policy_root, policy)
+        else:
+            _QUALIFICATION_EXECUTION_POLICY = policy
+    if native_controller:
+        assert _NATIVE_UAC_QUALIFICATION_POLICY is not None
+        return copy.deepcopy(_NATIVE_UAC_QUALIFICATION_POLICY[1])
     return copy.deepcopy(_QUALIFICATION_EXECUTION_POLICY)
 
 
@@ -3404,6 +3464,7 @@ def api_compat(base: str, head: str) -> int:
 
 
 def contracts(base: str = "", head: str = "WORKTREE", generate: bool = False) -> int:
+    qualification_execution_policy()
     require("ruby")
     run(["ruby", "scripts/validate-openapi.rb"])
     run(["ruby", "scripts/validate-contract-consistency.rb"])
@@ -4707,7 +4768,9 @@ def _fresh_evidence(evidence: dict) -> bool:
 
 def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
     """Conservatively bind declared gates and their transitive tool providers."""
-    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    contract = json.loads((policy_root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
     required = {name for names in contract["gate_requirements"].values() for name in names}
@@ -4866,11 +4929,29 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
     require("ruby")
-    command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    script = (str(Path(native_controller).resolve().parents[1] / "scripts/ci-affected.rb")
+              if native_controller else "scripts/ci-affected.rb")
+    command = ["ruby", script, "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
     p = run(command, capture=True)
     return json.loads(p.stdout)
+
+
+def qualification_impact(base: str, head: str, workflow_name: str) -> dict:
+    workflow = qualification_execution_policy()["workflows"].get(workflow_name)
+    if not isinstance(workflow, dict):
+        raise ValueError(f"unknown qualification workflow: {workflow_name}")
+    graph = qualification_steps.validate_graph(workflow)
+    paths = changed_paths(base, head)
+    components = affected(base, head, strict_unknown=True)
+    classes = qualification_steps.classify_impact(
+        paths, components, workflow["impact_path_rules"]
+    )
+    return {"workflow": workflow_name, "base": base, "head": head,
+            "changed_paths": paths, "affected_components": components,
+            **qualification_steps.invalidate(graph, workflow["impact_inputs"], classes)}
 
 
 def _execute_gate(name: str, command: list[str], env: dict[str, str] | None = None) -> tuple[bool, dict]:
@@ -5114,7 +5195,9 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
 
 
 def _controller_command(*args: str) -> list[str]:
-    controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "scripts/repoctl.py").strip() or "scripts/repoctl.py"
+    controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    if controller is None:
+        controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "scripts/repoctl.py").strip() or "scripts/repoctl.py"
     return [sys.executable, controller, *args]
 
 
@@ -8576,15 +8659,18 @@ _CHATGPT_REVIEW_MARKER_RE = re.compile(
 
 
 def _chatgpt_review_payloads(body: str) -> list[dict]:
-    payloads: list[dict] = []
-    for raw in _CHATGPT_REVIEW_MARKER_RE.findall(body or ""):
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            payloads.append(value)
-    return payloads
+    if "chatgpt-exact-sha-review:v1" not in body:
+        return []
+    markers = _CHATGPT_REVIEW_MARKER_RE.findall(body)
+    if len(markers) != 1 or body.count("chatgpt-exact-sha-review:v1") != 1:
+        raise RuntimeError("ChatGPT review marker is missing, malformed, or ambiguous")
+    try:
+        proof = json.loads(markers[0])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ChatGPT review marker JSON is malformed") from exc
+    if not isinstance(proof, dict):
+        raise RuntimeError("ChatGPT review marker must be a JSON object")
+    return [proof]
 
 
 _CHATGPT_REVIEW_KEYS = {
@@ -8614,7 +8700,9 @@ def _github_repository_identity(gh: str) -> tuple[str, str]:
         payload = json.loads(response.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise RuntimeError("invalid GitHub repository identity JSON") from exc
-    owner_login = str((payload.get("owner") or {}).get("login") or "")
+    if not isinstance(payload, dict) or not isinstance(payload.get("owner"), dict):
+        raise RuntimeError("GitHub repository identity payload is invalid")
+    owner_login = str(payload["owner"].get("login") or "")
     name_with_owner = str(payload.get("nameWithOwner") or "")
     if not owner_login:
         raise RuntimeError("repository owner login is missing")
@@ -8644,7 +8732,9 @@ def _github_pr_comments(gh: str, name_with_owner: str, pr_number: int) -> list[d
         raise RuntimeError("invalid GitHub PR comments JSON") from exc
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise RuntimeError("GitHub PR paginated comments payload is invalid")
-    comments = [comment for page in pages for comment in page if isinstance(comment, dict)]
+    if any(not isinstance(comment, dict) for page in pages for comment in page):
+        raise RuntimeError("GitHub PR comments payload contains a malformed comment")
+    comments = [comment for page in pages for comment in page]
     comments.sort(key=_immutable_comment_order_key)
     return comments
 
@@ -8674,25 +8764,46 @@ def _chatgpt_review_evidence(
     completed: dict[str, dict | None] = {
         kind: None for kind in evidence_contract["required_kinds"]
     }
+    latest_comments: dict[str, dict] = {}
     for comment in _comments_in_immutable_order(comments):
         if _comment_author_login(comment) != owner_login:
             continue
-        for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
+        body = str(comment.get("body") or "")
+        if "chatgpt-exact-sha-review:v1" not in body:
+            continue
+        if comment.get("author_association") != "OWNER":
+            raise RuntimeError("ChatGPT review marker author lacks OWNER authority")
+        if comment.get("updated_at") != comment.get("created_at"):
+            raise RuntimeError("ChatGPT review marker comment was edited")
+        for proof in _chatgpt_review_payloads(body):
             kind = str(proof.get("kind") or "")
             if (
                 set(proof) != _CHATGPT_REVIEW_KEYS
                 or proof.get("provider") != "ChatGPT"
-                or proof.get("head_sha") != head_sha
                 or kind not in completed
-                or not isinstance(proof.get("status"), str)
-                or not proof.get("status")
+                or not isinstance(proof.get("head_sha"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", proof["head_sha"]) is None
+                or type(proof.get("status")) is not str
+                or proof["status"] not in {"PASS", "FAIL"}
+                or type(proof.get("blocking_findings")) is not int
+                or not (
+                    (proof["status"] == "PASS" and proof["blocking_findings"] == 0)
+                    or (proof["status"] == "FAIL" and proof["blocking_findings"] > 0)
+                )
             ):
+                raise RuntimeError("ChatGPT review marker has invalid proof fields")
+            if proof["head_sha"] != head_sha:
                 continue
             completed[kind] = {
                 **proof,
                 "comment_id": comment.get("id"),
                 "source": "github-pr-comment",
             }
+            latest_comments[kind] = comment
+    if ("code" in latest_comments and "security" in latest_comments
+        and _immutable_comment_order_key(latest_comments["security"])
+            <= _immutable_comment_order_key(latest_comments["code"])):
+        raise RuntimeError("ChatGPT SECURITY review must follow the CODE review")
     result: dict[str, dict] = {}
     for kind, proof in completed.items():
         result[kind] = proof or {
@@ -8712,14 +8823,20 @@ def _owner_authorization_evidence(
         if _comment_author_login(comment) != owner_login:
             continue
         command = str(comment.get("body") or "").strip()
-        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
-        if match is None or match.group("scope") != scope:
+        if ("/owner-authorization" not in command
+            or re.search(r"(?<!\S)scope=" + re.escape(scope) + r"(?=\s|$)", command)
+                is None):
             continue
+        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
         latest = {
             "command": command,
-            "action": match.group("action"),
-            "sha": match.group("sha"),
+            "action": match.group("action") if match else "",
+            "sha": match.group("sha") if match else "",
             "comment_id": comment.get("id"),
+            "valid": (match is not None
+                      and match.group("scope") == scope
+                      and comment.get("author_association") == "OWNER"
+                      and comment.get("updated_at") == comment.get("created_at")),
         }
     expected_command = f"/owner-authorization approve scope={scope} sha={head_sha}"
     if latest is None:
@@ -8729,6 +8846,16 @@ def _owner_authorization_evidence(
             "head_sha": head_sha,
             "command": expected_command,
             "source": "github-pr-comment",
+        }
+    if not latest["valid"]:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "latest owner authorization is malformed, edited, or lacks OWNER authority",
+            "superseded_comment_id": latest["comment_id"],
         }
     if latest["sha"] != head_sha:
         return {
@@ -9510,15 +9637,50 @@ def _approved_rke2_manifest_sha256() -> str:
 
 
 def _canonical_rke2_vagrant_version() -> str:
-    contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
-    version = (
-        contract.get("mgmt_local_vm_contract", {})
-        .get("vagrant", {})
-        .get("version")
-    )
+    version = json.loads(
+        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+    )["versions"]["VAGRANT_VERSION"]
     if not isinstance(version, str) or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is None:
         raise RuntimeError("canonical RKE2 Vagrant version is invalid")
     return version
+
+
+def _record_box_reuse_checkpoint(source_sha: str, manifest: dict) -> Path:
+    """Retain exact-head reuse provenance from an already verified box manifest."""
+    reuse = qualification_steps.checkpoint(
+        qualification="m2.5", step="image", source_sha=source_sha,
+        input_digest=manifest["inputs_digest"],
+        artifact_digest=manifest["box_sha256"],
+        status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
+        reused_from={
+            "source_sha": manifest["source_sha"],
+            "input_digest": manifest["inputs_digest"],
+            "artifact_digest": manifest["box_sha256"],
+        },
+    )
+    destination = ROOT / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(reuse, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return destination
+
+
+def _rke2_verified_box(source_sha: str) -> tuple[dict[str, str], dict]:
+    import rocky_box_catalog
+
+    box = rocky_box_catalog.find_matching_box(source_sha)
+    manifest = rocky_box_catalog.verify(box, source_sha)
+    windows_path = subprocess.run(
+        ["wslpath", "-w", str(box.resolve())],
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    if not windows_path or not re.fullmatch(r"[A-Za-z]:\\.+", windows_path):
+        raise ValueError("verified Rocky box is not on a Windows-accessible drive")
+    return {
+        "vm_box_name": box.stem,
+        "vm_box_url": PureWindowsPath(windows_path).as_uri(),
+        "vm_box_sha256": str(manifest["box_sha256"]),
+        "vm_vagrant_version": _canonical_rke2_vagrant_version(),
+    }, manifest
 
 
 def _canonical_rke2_vagrant_ready() -> bool:
@@ -9602,7 +9764,7 @@ def windows_image_pipeline(action: str, *, offline: bool = False) -> int:
 
 
 def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
-    if action not in {"prepare", "reboot", "import", "recover", "selftest"}:
+    if action not in {"prepare", "reboot", "import", "recover", "resetfailed", "selftest"}:
         return fail(f"unsupported Windows native VT-x cycle action: {action}")
     cycle = (
         ruby_yaml("config/contracts/machine-image-lock.yaml")
@@ -9634,6 +9796,7 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
         "reboot": "Reboot",
         "import": "Import",
         "recover": "Recover",
+        "resetfailed": "ResetFailed",
         "selftest": "SelfTest",
     }[action]
     command = [
@@ -9665,12 +9828,12 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
             image_inputs = rocky_box_catalog.build_inputs(source_sha)
         except (OSError, KeyError, ValueError, subprocess.CalledProcessError) as exc:
             return fail(f"cannot bind Packer semantic image inputs: {exc}")
-        command.extend(["-PackerInputsDigest", image_inputs["inputs_digest"],
-                        "-PackerTemplateDigest", image_inputs["packer_template_digest"]])
+        packer_inputs_digest = image_inputs["inputs_digest"]
         try:
             box = rocky_box_catalog.find_matching_box(source_sha)
             manifest = rocky_box_catalog.verify(box, source_sha)
             box_windows = output(["wslpath", "-w", str(box)]).strip()
+            packer_inputs_digest = manifest["inputs_digest"]
             command.extend(["-ReuseBoxPath", box_windows, "-ReuseBoxSha256", manifest["box_sha256"],
                             "-ReuseBoxInputsDigest", manifest["inputs_digest"]])
             print(f"PACKER_REBUILD_DECISION=REUSE box_sha256={manifest['box_sha256']}")
@@ -9678,6 +9841,8 @@ def windows_native_vtx_cycle(action: str, *, offline: bool = False) -> int:
             if "found 0" not in str(exc):
                 return fail(f"ambiguous Packer box reuse decision: {exc}")
             print(f"PACKER_REBUILD_DECISION=BUILD reason={exc}")
+        command.extend(["-PackerInputsDigest", packer_inputs_digest,
+                        "-PackerTemplateDigest", image_inputs["packer_template_digest"]])
     if action == "prepare":
         preflight_command = command.copy()
         preflight_command[preflight_command.index("Prepare")] = "Preflight"
@@ -9715,7 +9880,8 @@ def windows_lab_ssh_identity() -> int:
 
 
 def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_failed_vm: bool = False,
-                      global_deadline: int = 900) -> int:
+                      global_deadline: int = 900, retain_vm: bool = False,
+                      diagnostic_nem: bool = False) -> int:
     """Verify a retained box or stage a single exact-SHA native network smoke."""
     import rocky_box_catalog
 
@@ -9726,11 +9892,12 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
             return fail(f"verified Rocky box is absent: {selected}")
         if action == "verify":
             manifest = rocky_box_catalog.verify(selected, source_sha)
+            _record_box_reuse_checkpoint(source_sha, manifest)
             print(json.dumps({"box_reuse": "REUSED", "box_sha256": manifest["box_sha256"],
                               "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
         elif action == "prepare-smoke":
             prepared = rocky_box_catalog.prepare_smoke(
-                selected, source_sha, box_sha256, keep_failed_vm, global_deadline
+                selected, source_sha, box_sha256, keep_failed_vm, global_deadline, retain_vm, diagnostic_nem
             )
             print(json.dumps(prepared, sort_keys=True))
         else:
@@ -9740,21 +9907,1658 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
     return 0
 
 
-def lab_network_clean(campaign_id: str) -> int:
+NATIVE_SHADOW_BASE = Path("/mnt/c/Program Files/EcommerceNativeSmoke")
+
+
+def _native_shadow_windows_path(path: Path) -> str:
+    parts = path.parts
+    if len(parts) >= 4 and parts[:2] == ("/", "mnt") and len(parts[2]) == 1:
+        return str(PureWindowsPath(parts[2].upper() + ":/", *parts[3:]))
+    return str(path)
+
+
+def _native_shadow_path_safe(root: Path, target: Path) -> bool:
+    try:
+        relative = target.relative_to(root)
+    except ValueError:
+        return False
+    if any(part in {".", ".."} for part in relative.parts):
+        return False
+    current = root
+    if current.is_symlink():
+        return False
+    for part in relative.parts:
+        current = current / part
+        if current.is_symlink():
+            return False
+    return True
+
+
+def lab_network_action(action: str, campaign_id: str) -> int:
+    if action not in {"Clean", "Resume"}:
+        return fail("unsupported network-smoke action")
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
-        return fail("lab-clean requires an exact network-smoke CAMPAIGN_ID")
+        return fail("network-smoke action requires an exact CAMPAIGN_ID")
     stage = Path("/mnt/c/ecommerce-lab/network-smoke") / campaign_id
     runner = stage / "scripts/windows/LabNetworkSmoke.ps1"
-    if not runner.is_file():
+    runner_source_sha = ""
+    shadow = None
+    if action == "Resume":
+        import rocky_box_catalog
+
+        if output(["git", "status", "--porcelain", "--untracked-files=all"]).strip():
+            return fail("network SSH resume requires a clean exact-SHA worktree")
+        runner_source_sha = output(["git", "rev-parse", "HEAD"]).strip()
+        shadow = NATIVE_SHADOW_BASE / f"{campaign_id}-{runner_source_sha}"
+        stage = shadow / campaign_id
+        runner = shadow / f"runner-{runner_source_sha}" / "scripts/windows/LabNetworkSmoke.ps1"
+        if (not _native_shadow_path_safe(shadow, stage)
+            or not _native_shadow_path_safe(shadow, runner)
+            or not _native_shadow_path_safe(shadow, stage / "prepared.json")):
+            return fail("network SSH resume protected input is a symlink")
+        if not shadow.is_dir() or not stage.is_dir() or not runner.is_file():
+            return fail("network SSH resume requires the protected exact-SHA shadow campaign")
+        try:
+            prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
+            if not isinstance(prepared, dict) or not isinstance(prepared.get("box_path"), str):
+                return fail("network SSH resume protected campaign is malformed")
+            box_path = Path(output(["wslpath", "-u", prepared["box_path"]]).strip())
+            rocky_box_catalog.verify(box_path, runner_source_sha)
+        except (OSError, KeyError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
+            return fail(f"network SSH resume box no longer matches current image inputs: {exc}")
+    elif not runner.is_file():
         return fail(f"network-smoke campaign is absent: {campaign_id}")
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
     stage_windows = output(["wslpath", "-w", str(stage)]).strip()
     runner_windows = output(["wslpath", "-w", str(runner)]).strip()
-    return run(
-        [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-         "-File", runner_windows, "-Action", "Clean", "-StageRoot", stage_windows],
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-File", runner_windows, "-Action", action, "-StageRoot", stage_windows]
+    if action == "Resume":
+        command.extend(["-RunnerSourceSha", runner_source_sha,
+                        "-ShadowRoot", output(["wslpath", "-w", str(shadow)]).strip()])
+    completed = run(
+        command,
         cwd=Path("/mnt/c/Windows"), env=_windows_powershell_environment(), check=False,
-    ).returncode
+    )
+    return completed.returncode
+
+
+def lab_network_import(campaign_id: str, *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab"),
+                       shadow_root: Path | None = None) -> int:
+    """Import a native-boot result after WSL is restored, without touching the VM."""
+    import m25_runtime_evidence
+    import rocky_box_catalog
+
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-import requires an exact CAMPAIGN_ID")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("lab-network-import requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    if shadow_root is None:
+        shadow_root = (NATIVE_SHADOW_BASE if laboratory_root == Path("/mnt/c/ecommerce-lab")
+                       else laboratory_root / "protected-shadow")
+    shadow = shadow_root / f"{campaign_id}-{head}"
+    any_shadow = shadow_root.is_symlink() or any(shadow_root.glob(f"{campaign_id}-*"))
+    if any_shadow and (shadow_root.is_symlink() or shadow.is_symlink() or not shadow.is_dir()):
+        return fail("native network-smoke shadow exists but the exact current SHA is absent or unsafe")
+    stage = (shadow / campaign_id if any_shadow
+             else laboratory_root / "network-smoke" / campaign_id)
+    result_path = (shadow / "evidence/network-smoke" / campaign_id / "result.json" if any_shadow
+                   else laboratory_root / "evidence/network-smoke" / campaign_id / "result.json")
+    try:
+        if (any_shadow and (not _native_shadow_path_safe(shadow, stage)
+                            or not _native_shadow_path_safe(shadow, result_path))):
+            return fail("native network-smoke protected result traverses a symlink")
+        if stage.is_symlink() or result_path.is_symlink() or not result_path.is_file():
+            return fail("native network-smoke result is absent or a symlink")
+        prepared_path = stage / "prepared.json"
+        if any_shadow and not _native_shadow_path_safe(shadow, prepared_path):
+            return fail("native network-smoke protected campaign traverses a symlink")
+        prepared = json.loads(prepared_path.read_text(encoding="utf-8-sig"))
+        result_bytes = result_path.read_bytes()
+        result = json.loads(result_bytes.decode("utf-8-sig"))
+        if not isinstance(prepared, dict) or not isinstance(result, dict):
+            return fail("native network-smoke campaign or result is malformed")
+        manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
+        if (prepared.get("campaign_id") != campaign_id
+            or prepared.get("box_sha256") != manifest["box_sha256"]
+            or result.get("campaign_id") != campaign_id):
+            return fail("native network-smoke campaign or box binding differs")
+        vagrant_relative = "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        original_vagrantfile = rocky_box_catalog.source_file(prepared.get("source_sha"), vagrant_relative)
+        if original_vagrantfile != (ROOT / vagrant_relative).read_bytes():
+            return fail("native network-smoke retained VM definition differs from current source")
+        m25_runtime_evidence.validate_current_smoke(ROOT, result, head, manifest)
+        boot_path = (shadow / "native-boot.json" if any_shadow
+                     else laboratory_root / "network-smoke/native-boot.json")
+        if boot_path.is_symlink() or (any_shadow and not _native_shadow_path_safe(shadow, boot_path)):
+            return fail("native network-smoke boot state is a symlink")
+        if any_shadow and not boot_path.is_file():
+            return fail("native network-smoke protected boot state is absent")
+        if boot_path.is_file():
+            boot = json.loads(boot_path.read_text(encoding="utf-8-sig"))
+            if not isinstance(boot, dict):
+                return fail("native network-smoke boot state is malformed")
+            if any_shadow or boot.get("campaign_id") == campaign_id:
+                result_digest = hashlib.sha256(result_bytes).hexdigest()
+                if (boot.get("mode") != "NETWORK_SMOKE_NATIVE"
+                    or boot.get("campaign_id") != campaign_id
+                    or boot.get("phase") != "RECOVERED"
+                    or boot.get("run_status") != "PASS"
+                    or boot.get("source_sha") != head
+                    or boot.get("source_tree_sha") != git("rev-parse", "HEAD^{tree}").strip()
+                    or boot.get("vm_id") != result["cleanup"]["vm_id"]
+                    or (any_shadow and (
+                        not isinstance(boot.get("expected_vm_id"), str)
+                        or boot["expected_vm_id"].casefold() != str(boot.get("vm_id", "")).casefold()
+                    ))
+                    or boot.get("box_sha256") != manifest["box_sha256"]
+                    or boot.get("result_sha256") != result_digest
+                    or (any_shadow and (
+                        not isinstance(boot.get("shadow_root"), str)
+                        or boot["shadow_root"].rstrip("\\").casefold()
+                           != _native_shadow_windows_path(shadow).rstrip("\\").casefold()
+                    ))):
+                    return fail("native network-smoke result differs from the recovered boot run")
+                if any_shadow:
+                    runner_path = shadow / f"runner-{head}" / "runner.json"
+                    if not _native_shadow_path_safe(shadow, runner_path) or not runner_path.is_file():
+                        return fail("native network-smoke protected runner manifest is absent")
+                    runner_bytes = runner_path.read_bytes()
+                    if hashlib.sha256(runner_bytes).hexdigest() != boot.get("runner_manifest_sha256"):
+                        return fail("native network-smoke protected runner manifest differs")
+                    runner = json.loads(runner_bytes.decode("utf-8-sig"))
+                    if (not isinstance(runner, dict)
+                        or runner.get("campaign_id") != campaign_id
+                        or runner.get("source_sha") != head
+                        or runner.get("source_tree_sha") != boot.get("source_tree_sha")
+                        or runner.get("runner_files") != result.get("resume_runner_files")):
+                        return fail("native network-smoke protected runner binding differs")
+                    package_relative = "config/artifacts/rocky-10.2-base-packages.lock.json"
+                    package_path = stage / package_relative
+                    manifest_path = stage / "SHA256SUMS"
+                    if (not _native_shadow_path_safe(shadow, package_path)
+                        or not _native_shadow_path_safe(shadow, manifest_path)):
+                        return fail("native network-smoke package lock traverses a symlink")
+                    package_digest = m25_runtime_evidence._digest(ROOT / package_relative)
+                    if (runner.get("package_lock_sha256") != package_digest
+                        or m25_runtime_evidence._digest(package_path) != package_digest
+                        or f"{package_digest}  {package_relative}" not in
+                           manifest_path.read_text(encoding="utf-8-sig").splitlines()):
+                        return fail("native network-smoke package lock differs from current source")
+                    qualification = result.get("image_qualification")
+                    if (not isinstance(qualification, dict)
+                        or qualification.get("status") != "PASS"
+                        or qualification.get("source_sha") != head
+                        or qualification.get("source_tree_sha") != boot.get("source_tree_sha")
+                        or qualification.get("box_sha256") != manifest["box_sha256"]
+                        or qualification.get("vm_id") != boot.get("vm_id")
+                        or qualification.get("virtualbox_backend") != "NATIVE_VTX"):
+                        return fail("native network-smoke image qualification identity is invalid")
+                    log_relative = qualification.get("virtualbox_log_relative")
+                    if (not isinstance(log_relative, str)
+                        or re.fullmatch(r"logs/ssh-resume-[0-9]{8}T[0-9]{6}Z/VBox\.log",
+                                        log_relative) is None):
+                        return fail("native network-smoke VirtualBox log path is invalid")
+                    log_path = stage / log_relative
+                    if not _native_shadow_path_safe(shadow, log_path) or not log_path.is_file():
+                        return fail("native network-smoke VirtualBox log is absent or redirected")
+                    if log_path.stat().st_size > 16 * 1024 * 1024:
+                        return fail("native network-smoke VirtualBox log exceeds the bounded proof size")
+                    log_bytes = log_path.read_bytes()
+                    log_text = log_bytes.decode("utf-8", errors="replace")
+                    if (qualification.get("virtualbox_log_sha256")
+                            != hashlib.sha256(log_bytes).hexdigest()
+                        or re.search(r"(?im)\bHM:.*(?:VT-x|AMD-V)", log_text) is None
+                        or re.search(r"(?im)Attempting fall back to NEM|\bNEM:|WHvCapabilityCodeHypervisorPresent",
+                                     log_text) is not None):
+                        return fail("native network-smoke VirtualBox log does not prove native VT-x")
+        completed_at = datetime.fromisoformat(str(result["completed_at"]).replace("Z", "+00:00"))
+        if completed_at.tzinfo is None or not 0 <= time.time() - completed_at.timestamp() <= 86400:
+            return fail("native network-smoke result is stale")
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError,
+            subprocess.CalledProcessError) as exc:
+        return fail(f"native network-smoke import rejected: {exc}")
+    destination = ROOT / ".context/evidence/network-smoke/current.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_bytes(result_bytes)
+    os.replace(temporary, destination)
+    print(f"PASS lab-network-import campaign={campaign_id} source_sha={head} evidence={destination}")
+    return 0
+
+
+def lab_network_native_prepare(campaign_id: str,
+                               *, laboratory_root: Path = Path("/mnt/c/ecommerce-lab")) -> int:
+    """Stage exact-head runner bytes for a Windows native boot without changing the VM."""
+    import m25_runtime_evidence
+    import rocky_box_catalog
+
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-native-prepare requires an exact CAMPAIGN_ID")
+    if git("status", "--porcelain", "--untracked-files=all").strip():
+        return fail("lab-network-native-prepare requires a clean exact-SHA worktree")
+    head = git("rev-parse", "HEAD").strip()
+    tree = git("rev-parse", "HEAD^{tree}").strip()
+    stage = laboratory_root / "network-smoke" / campaign_id
+    result_path = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+    try:
+        prepared = json.loads((stage / "prepared.json").read_text(encoding="utf-8-sig"))
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(prepared, dict) or not isinstance(result, dict):
+            return fail("native runner preparation campaign or result is malformed")
+        manifest = rocky_box_catalog.verify(rocky_box_catalog.find_matching_box(head), head)
+        cleanup = result.get("cleanup")
+        if (prepared.get("campaign_id") != campaign_id
+            or prepared.get("box_sha256") != manifest["box_sha256"]
+            or result.get("campaign_id") != campaign_id
+            or not isinstance(cleanup, dict)
+            or cleanup.get("vm_preserved") is not True):
+            return fail("native runner preparation requires the owned preserved campaign and verified box")
+        source_vagrantfile = ROOT / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        staged_vagrantfile = stage / "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        runtime_vagrantfile = stage / "smoke-run/Vagrantfile"
+        original_vagrantfile = rocky_box_catalog.source_file(
+            prepared.get("source_sha"), "platform/vagrant/rocky-image-smoke/Vagrantfile"
+        )
+        if original_vagrantfile != source_vagrantfile.read_bytes():
+            return fail("native runner preparation requires the original VM definition on the current head")
+        current_vagrant_digest = m25_runtime_evidence._digest(source_vagrantfile)
+        if (m25_runtime_evidence._digest(staged_vagrantfile) != current_vagrant_digest
+            or m25_runtime_evidence._digest(runtime_vagrantfile) != current_vagrant_digest):
+            return fail("native runner preparation requires the current retained VM Vagrantfile")
+        package_relative = "config/artifacts/rocky-10.2-base-packages.lock.json"
+        package_source = ROOT / package_relative
+        package_digest = m25_runtime_evidence._digest(package_source)
+        destination = laboratory_root / "network-smoke" / f"runner-{head}" / "scripts/windows"
+        if not _native_shadow_path_safe(laboratory_root, destination):
+            return fail("native runner preparation destination traverses a symlink")
+        destination.mkdir(parents=True, exist_ok=True)
+        if not _native_shadow_path_safe(laboratory_root, destination):
+            return fail("native runner preparation destination changed into a symlink")
+        digests = {}
+        for name in m25_runtime_evidence.NETWORK_RUNNER_FILES:
+            source = ROOT / "scripts/windows" / name
+            target = destination / name
+            if not _native_shadow_path_safe(laboratory_root, target):
+                return fail(f"native runner staging traverses a symlink: {name}")
+            descriptor, temporary = tempfile.mkstemp(prefix=f".{name}-", dir=destination)
+            os.close(descriptor)
+            try:
+                shutil.copyfile(source, temporary)
+                os.replace(temporary, target)
+            finally:
+                if os.path.exists(temporary):
+                    os.unlink(temporary)
+            digests[name] = m25_runtime_evidence._digest(target)
+            if digests[name] != m25_runtime_evidence._digest(source):
+                return fail(f"native runner staging differs: {name}")
+        runner_package = destination.parent.parent / package_relative
+        if package_source.is_symlink() or not _native_shadow_path_safe(laboratory_root, runner_package):
+            return fail("native runner package lock traverses a symlink")
+        runner_package.parent.mkdir(parents=True, exist_ok=True)
+        if not _native_shadow_path_safe(laboratory_root, runner_package):
+            return fail("native runner package directory changed into a symlink")
+        descriptor, temporary = tempfile.mkstemp(prefix=".packages-", dir=runner_package.parent)
+        os.close(descriptor)
+        try:
+            shutil.copyfile(package_source, temporary)
+            os.replace(temporary, runner_package)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        if m25_runtime_evidence._digest(runner_package) != package_digest:
+            return fail("native runner package lock differs from the current source")
+        binding = {"source_sha": head, "source_tree_sha": tree,
+                   "campaign_id": campaign_id, "runner_files": digests,
+                   "vagrantfile_sha256": current_vagrant_digest,
+                   "package_lock_sha256": package_digest}
+        runner_manifest = destination.parent.parent / "runner.json"
+        if not _native_shadow_path_safe(laboratory_root, runner_manifest):
+            return fail("native runner manifest traverses a symlink")
+        descriptor, temporary = tempfile.mkstemp(prefix=".runner-", dir=runner_manifest.parent)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as output_file:
+                output_file.write(json.dumps(binding, indent=2, sort_keys=True) + "\n")
+                output_file.flush()
+                os.fsync(output_file.fileno())
+            os.replace(temporary, runner_manifest)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+    except (OSError, KeyError, ValueError, json.JSONDecodeError,
+            subprocess.CalledProcessError) as exc:
+        return fail(f"native runner preparation failed: {exc}")
+    runner_windows = output(["wslpath", "-w", str(destination / "LabNetworkSmoke.ps1")]).strip()
+    shadow = NATIVE_SHADOW_BASE / f"{campaign_id}-{head}"
+    protected_runner = _native_shadow_windows_path(
+        shadow / f"runner-{head}" / "scripts/windows/LabNetworkSmoke.ps1"
+    )
+    protected_stage = _native_shadow_windows_path(shadow / campaign_id)
+    protected_root = _native_shadow_windows_path(shadow)
+    print(f"PASS lab-network-native-prepare source_sha={head} runner={runner_windows}")
+    print(f"NATIVE_RESUME=powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{protected_runner}\" -Action Resume -StageRoot \"{protected_stage}\" -RunnerSourceSha {head} -ShadowRoot \"{protected_root}\"")
+    return 0
+
+
+_NATIVE_UAC_REPOSITORY = "dst-red-Wire/ecommerce-1"
+_NATIVE_UAC_RUNNER_NAMES = (
+    "LabNativeBoot.ps1", "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1",
+    "NativeVagrantSshSmoke.ps1", "LabNetworkSeed.ps1", "LabSshIdentity.ps1",
+    "local-services-seed-server.ps1",
+)
+
+
+def _native_uac_trusted_context(action: str) -> dict[str, object]:
+    """Accept native elevation only from an executing exact-base controller."""
+    if os.environ.get("REPOCTL_TRUSTED_NATIVE_UAC") != "1":
+        raise RuntimeError("native UAC requires the exact-base trusted controller")
+    if action != "Recover":
+        if os.environ.get("REPOCTL_TRUSTED_NATIVE_RECOVERY"):
+            raise RuntimeError("native recovery context cannot authorize an elevated run")
+        # The regular delivery context caches its result. Native preparation has
+        # multiple boundaries, so every call must reread both checkouts.
+        global _TRUSTED_PR_EXECUTION_CONTEXT
+        _TRUSTED_PR_EXECUTION_CONTEXT = None
+        context = _require_trusted_pr_execution()
+        if (context["trusted_root"] == context["target_root"]
+            or context["base_sha"] == context["head_sha"]):
+            raise RuntimeError("native UAC cannot authorize itself from the target PR")
+        return context
+    if os.environ.get("REPOCTL_TRUSTED_NATIVE_RECOVERY") != "1":
+        raise RuntimeError("native recovery requires the base-owned offline recovery context")
+    names = (
+        "REPOCTL_TRUSTED_WRAPPER", "REPOCTL_TRUSTED_CONTROLLER",
+        "REPOCTL_TRUSTED_POLICY_ROOT", "REPOCTL_TRUSTED_TARGET_ROOT",
+        "REPOCTL_TRUSTED_BASE_SHA",
+    )
+    values = {name: os.environ.get(name, "").strip() for name in names}
+    if not all(values.values()):
+        raise RuntimeError("native recovery trusted context is incomplete")
+    if os.environ.get("REPOCTL_TRUSTED_HEAD_SHA") or os.environ.get("REPOCTL_TRUSTED_PR_NUMBER"):
+        raise RuntimeError("native recovery must not reuse a reviewed PR context")
+    if any(not Path(value).is_absolute() for name, value in values.items()
+           if name != "REPOCTL_TRUSTED_BASE_SHA"):
+        raise RuntimeError("native recovery trusted paths must be absolute")
+    base_sha = values["REPOCTL_TRUSTED_BASE_SHA"]
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError("native recovery exact base SHA is invalid")
+    trusted_root = Path(values["REPOCTL_TRUSTED_POLICY_ROOT"])
+    target_root = Path(values["REPOCTL_TRUSTED_TARGET_ROOT"])
+    wrapper = Path(values["REPOCTL_TRUSTED_WRAPPER"])
+    controller = Path(values["REPOCTL_TRUSTED_CONTROLLER"])
+    if (not trusted_root.is_dir() or trusted_root.is_symlink()
+        or trusted_root.resolve(strict=True) != trusted_root
+        or trusted_root == ROOT.resolve()
+        or target_root != ROOT.resolve()
+        or wrapper != trusted_root / "scripts/repository_delivery.py"
+        or controller != trusted_root / "scripts/repoctl.py"
+        or Path(__file__).resolve() != controller):
+        raise RuntimeError("native recovery is not running from the exact-base controller")
+
+    def base_git(*args: str, binary: bool = False):
+        result = subprocess.run(
+            [*_NATIVE_UAC_GIT, "-C", str(trusted_root), *args], capture_output=True,
+            text=not binary, check=False, timeout=30)
+        if result.returncode:
+            raise RuntimeError("native recovery exact-base Git verification failed")
+        return result.stdout if binary else result.stdout.strip()
+
+    if (base_git("rev-parse", "--show-toplevel") != str(trusted_root)
+        or base_git("rev-parse", "HEAD") != base_sha
+        or base_git("status", "--porcelain=v1", "--untracked-files=all")):
+        raise RuntimeError("native recovery exact-base checkout is not clean")
+    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py"):
+        file = trusted_root / relative
+        if (file.is_symlink() or not file.is_file()
+            or file.resolve(strict=True) != file
+            or not base_git("ls-files", "--error-unmatch", "--", relative)
+            or file.read_bytes() != base_git("show", f"{base_sha}:{relative}", binary=True)):
+            raise RuntimeError(f"native recovery exact-base file differs: {relative}")
+    return {"trusted_root": trusted_root, "target_root": target_root,
+            "base_sha": base_sha}
+
+
+def _native_uac_runner_manifest(binding) -> dict[str, str]:
+    """Bind the complete fixed Windows runner allowlist to reviewed Git bytes."""
+    attributes = ROOT / ".gitattributes"
+    attribute_blob = subprocess.run(
+        [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:.gitattributes"],
+        cwd=ROOT, capture_output=True, check=False, timeout=30)
+    if (attributes.is_symlink() or not attributes.is_file()
+        or attribute_blob.returncode or attributes.read_bytes() != attribute_blob.stdout
+        or b"*.ps1 text eol=crlf" not in attribute_blob.stdout.splitlines()):
+        raise RuntimeError("native UAC PowerShell checkout attribute differs from reviewed Git")
+    digests: dict[str, str] = {}
+    entries: list[bytes] = []
+    for name in sorted(_NATIVE_UAC_RUNNER_NAMES):
+        relative = f"scripts/windows/{name}"
+        file = ROOT / relative
+        if file.is_symlink() or not file.is_file() or file.resolve(strict=True) != file:
+            raise RuntimeError(f"native UAC runner path is unsafe: {relative}")
+        tree_line = git("ls-tree", binding.head_sha, "--", relative).strip()
+        if (not tree_line.startswith(("100644 blob ", "100755 blob "))
+            or not tree_line.endswith("\t" + relative)):
+            raise RuntimeError(f"native UAC runner is not a regular tracked Git file: {relative}")
+        result = subprocess.run(
+            [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:{relative}"], cwd=ROOT,
+            capture_output=True, check=False, timeout=30)
+        raw = file.read_bytes()
+        projected = raw.replace(b"\r\n", b"\n") if name.endswith(".ps1") else raw
+        if (result.returncode or b"\r" in projected or projected != result.stdout):
+            raise RuntimeError(f"native UAC runner bytes differ from reviewed Git: {relative}")
+        digest = hashlib.sha256(raw).hexdigest()
+        digests[name] = digest
+        entries.append(relative.encode("utf-8") + b"\0" + digest.encode("ascii") + b"\n")
+    manifest = hashlib.sha256(b"".join(entries)).hexdigest()
+    expected = os.environ.get("REPOCTL_TRUSTED_NATIVE_RUNNER_MANIFEST_SHA256", "")
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None or manifest != expected:
+        raise RuntimeError("native UAC reviewed runner manifest changed")
+    return digests
+
+
+def _native_uac_pinned_gh(trusted_root: str) -> tuple[str, str, str]:
+    from managed_gh import resolve_managed_gh
+
+    root = Path(trusted_root)
+    if not root.is_absolute() or root.resolve(strict=True) != root:
+        raise ValueError("native UAC managed gh requires the exact-base checkout")
+    return resolve_managed_gh(root)
+
+
+def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
+    response = run(
+        [gh, "api", "--paginate", endpoint],
+        check=False, capture=True,
+    )
+    if response.returncode:
+        raise RuntimeError("native UAC GitHub comments are unavailable")
+    content = response.stdout or ""
+    decoder = json.JSONDecoder()
+    offset = 0
+    comments: list[dict] = []
+    try:
+        while offset < len(content):
+            while offset < len(content) and content[offset].isspace():
+                offset += 1
+            if offset == len(content):
+                break
+            page, offset = decoder.raw_decode(content, offset)
+            if not isinstance(page, list) or any(not isinstance(comment, dict) for comment in page):
+                raise RuntimeError("native UAC GitHub comment page is malformed")
+            comments.extend(page)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("native UAC GitHub comment pages are malformed") from exc
+    if not content.strip():
+        raise RuntimeError("native UAC GitHub returned no comment pages")
+    comments.sort(key=_immutable_comment_order_key)
+    return comments
+
+
+def _native_uac_review_gate(gh: str, binding, campaign_id: str,
+                            expected_vm_id: str) -> tuple[bool, str]:
+    """Revalidate one immutable PR and its owner evidence before elevation."""
+    if (re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                        expected_vm_id or "") is None):
+        return False, "native UAC exact campaign or VM identity is invalid"
+    try:
+        from exact_pr_binding import ExactPRBinding, revalidate_exact_open_pr
+
+        if (not isinstance(binding, ExactPRBinding)
+            or binding.repository != _NATIVE_UAC_REPOSITORY
+            or binding.base != "main"):
+            return False, "native UAC immutable PR binding is invalid"
+        if ExactPRBinding.from_dict(binding.as_dict()) != binding:
+            return False, "native UAC immutable PR binding fields are invalid"
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            return False, "native UAC PR binding changed before owner verification"
+        evidence_policy = pull_request_review_policy()["ai_reviewer"]["evidence"]
+        comments = _native_uac_paginated_comments(
+            gh, f"repos/{binding.repository}/issues/{binding.pr_number}/comments?per_page=100")
+        owner_login = binding.repository.split("/", 1)[0]
+        latest: dict[str, tuple[dict, dict]] = {}
+        for comment in comments:
+            if _comment_author_login(comment).casefold() != owner_login.casefold():
+                continue
+            body = str(comment.get("body") or "")
+            if "chatgpt-exact-sha-review:v1" not in body:
+                continue
+            if comment.get("author_association") != "OWNER":
+                return False, "native UAC ChatGPT marker author lacks OWNER authority"
+            markers = _CHATGPT_REVIEW_MARKER_RE.findall(body)
+            if len(markers) != 1 or body.count("chatgpt-exact-sha-review:v1") != 1:
+                return False, "native UAC ChatGPT review marker is ambiguous"
+            proof = json.loads(markers[0])
+            if (not isinstance(proof, dict) or set(proof) != _CHATGPT_REVIEW_KEYS
+                or proof.get("provider") != "ChatGPT"
+                or proof.get("kind") not in {"code", "security"}
+                or not isinstance(proof.get("head_sha"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", proof["head_sha"]) is None
+                or not isinstance(proof.get("status"), str)
+                or type(proof.get("blocking_findings")) is not int
+                or proof["blocking_findings"] < 0):
+                return False, "native UAC ChatGPT review marker is malformed"
+            if proof["head_sha"] != binding.head_sha:
+                continue
+            if comment.get("updated_at") != comment.get("created_at"):
+                return False, "native UAC ChatGPT review comment was edited"
+            latest[proof["kind"]] = (comment, proof)
+        for kind in evidence_policy["required_kinds"]:
+            if kind not in latest:
+                return False, f"native UAC ChatGPT {kind} review is absent for exact SHA"
+            proof = latest[kind][1]
+            if proof["status"] != "PASS" or proof["blocking_findings"] != 0:
+                return False, f"native UAC latest ChatGPT {kind} review is not clean"
+        code = latest["code"][0]
+        security = latest["security"][0]
+        if _immutable_comment_order_key(security) <= _immutable_comment_order_key(code):
+            return False, "native UAC SECURITY review must follow the CODE review"
+        expected = (
+            f"NATIVE-UAC-V1 PR={binding.pr_number} SHA={binding.head_sha} "
+            f"CAMPAIGN={campaign_id} VM={expected_vm_id.lower()} "
+            f"CODE={code['id']} SECURITY={security['id']} APPROVED"
+        )
+        owner_comments = [comment for comment in comments
+                          if _comment_author_login(comment).casefold()
+                             == owner_login.casefold()
+                          and str(comment.get("body") or "").startswith("NATIVE-UAC-V1 ")]
+        if (not owner_comments
+            or owner_comments[-1].get("author_association") != "OWNER"
+            or owner_comments[-1].get("updated_at") != owner_comments[-1].get("created_at")
+            or str(owner_comments[-1].get("body") or "") != expected):
+            return False, f"native UAC exact owner authorization is absent or superseded; required: {expected}"
+        owner_order = _immutable_comment_order_key(owner_comments[-1])
+        if (owner_order <= _immutable_comment_order_key(code)
+            or owner_order <= _immutable_comment_order_key(security)):
+            return False, "native UAC owner authorization predates a required ChatGPT review"
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            return False, "native UAC PR binding changed during owner verification"
+    except Exception as exc:
+        return False, f"native UAC GitHub authority is unavailable or malformed: {exc}"
+    return True, "native UAC ChatGPT CODE, SECURITY and owner authorization are clean"
+
+
+def _native_boot_powershell_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _native_boot_encoded(source: str) -> str:
+    """Keep the base-owned UAC bootstrap self-contained within Windows' CLI limit."""
+    packed = base64.b64encode(gzip.compress(source.encode("utf-8"), mtime=0)).decode("ascii")
+    loader = (
+        "$bytes=[Convert]::FromBase64String('" + packed + "');"
+        "$memory=[IO.MemoryStream]::new($bytes);"
+        "$zip=[IO.Compression.GZipStream]::new($memory,"
+        "[IO.Compression.CompressionMode]::Decompress);"
+        "$reader=[IO.StreamReader]::new($zip,[Text.Encoding]::UTF8);"
+        "try { & ([ScriptBlock]::Create($reader.ReadToEnd())) }"
+        "finally { $reader.Dispose();$zip.Dispose();$memory.Dispose() }"
+    )
+    return base64.b64encode(loader.encode("utf-16-le")).decode("ascii")
+
+
+def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
+                             distribution: str, repo_windows: str,
+                             expected_vm_id: str = "", binding=None,
+                             pinned_gh: tuple[str, str, str] | None = None,
+                             runner_digests: dict[str, str] | None = None,
+                             trusted_root: str = "",
+                             qualification_witness: str = "") -> str:
+    """Build the only code run elevated before the protected runner is verified."""
+    if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
+        raise ValueError("unsupported native bootstrap action")
+    if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        raise ValueError("native bootstrap requires an exact source SHA")
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        raise ValueError("native bootstrap requires a WSL distribution")
+    if (not repo_windows.startswith("\\\\wsl.localhost\\" + distribution + "\\")
+        or re.search(r"[\r\n]", repo_windows)):
+        raise ValueError("native bootstrap requires the exact WSL UNC repository")
+    reviewed = action in {"Prepare", "SelfTest", "Reboot"}
+    if reviewed and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id
+    ) is None:
+        raise ValueError("native reviewed action requires an explicit VM UUID")
+    if reviewed:
+        if (re.fullmatch(r"/[A-Za-z0-9._/-]+", trusted_root or "") is None
+            or ".." in Path(trusted_root).parts
+            or re.fullmatch(r"/[A-Za-z0-9._/-]+", str(ROOT)) is None
+            or ".." in ROOT.parts
+            or re.fullmatch(r"[0-9a-f]{64}", qualification_witness or "") is None):
+            raise ValueError("native bootstrap requires a safe base root and fresh qualification witness")
+        from exact_pr_binding import ExactPRBinding
+
+        if (not isinstance(binding, ExactPRBinding)
+            or binding.repository != _NATIVE_UAC_REPOSITORY
+            or binding.base != "main"
+            or binding.head_sha != source_sha):
+            raise ValueError("native bootstrap requires the exact immutable PR binding")
+        try:
+            if ExactPRBinding.from_dict(binding.as_dict()) != binding:
+                raise ValueError("native bootstrap PR binding changed during validation")
+        except RuntimeError as exc:
+            raise ValueError("native bootstrap PR binding is malformed") from exc
+        if (not isinstance(pinned_gh, tuple) or len(pinned_gh) != 3
+            or not all(isinstance(value, str) for value in pinned_gh)
+            or re.fullmatch(r"/[A-Za-z0-9._/-]+", pinned_gh[0]) is None
+            or ".." in Path(pinned_gh[0]).parts
+            or re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", pinned_gh[1]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", pinned_gh[2]) is None
+            or not pinned_gh[0].endswith(
+                f"/tools/gh-{pinned_gh[1]}/bin/gh")):
+            raise ValueError("native bootstrap requires the verified managed gh binary")
+        if (not isinstance(runner_digests, dict)
+            or set(runner_digests) != set(_NATIVE_UAC_RUNNER_NAMES)
+            or any(not isinstance(value, str)
+                   or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                   for value in runner_digests.values())):
+            raise ValueError("native bootstrap requires all seven reviewed runner digests")
+    token = uuid.uuid4().hex
+    manifest_lines = b"".join(
+        f"scripts/windows/{name}".encode("utf-8") + b"\0"
+        + runner_digests[name].encode("ascii") + b"\n"
+        for name in sorted(_NATIVE_UAC_RUNNER_NAMES)
+    ) if runner_digests else b""
+    runner_manifest = hashlib.sha256(manifest_lines).hexdigest() if runner_digests else ""
+    values = {
+        "@@ACTION@@": action,
+        "@@CAMPAIGN@@": campaign_id,
+        "@@SHA@@": source_sha,
+        "@@DISTRO@@": distribution,
+        "@@REPO_WIN@@": repo_windows,
+        "@@REPO_WSL@@": str(ROOT),
+        "@@VM_ID@@": expected_vm_id,
+        "@@PR_NUMBER@@": str(binding.pr_number) if binding else "",
+        "@@PR_REPOSITORY@@": binding.repository if binding else "",
+        "@@PR_BRANCH@@": binding.head_branch if binding else "",
+        "@@PR_BASE@@": binding.base if binding else "",
+        "@@PR_BASE_SHA@@": binding.base_sha if binding else "",
+        "@@GH_PATH@@": pinned_gh[0] if pinned_gh else "",
+        "@@GH_VERSION@@": pinned_gh[1] if pinned_gh else "",
+        "@@GH_SHA256@@": pinned_gh[2] if pinned_gh else "",
+        "@@TOKEN@@": token,
+        "@@RUNNER_MANIFEST@@": runner_manifest,
+        "@@TRUSTED_ROOT@@": trusted_root,
+        "@@QUALIFICATION_WITNESS@@": qualification_witness,
+    }
+    script = r"""
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$action = @@ACTION@@
+$campaign = @@CAMPAIGN@@
+$sha = @@SHA@@
+$distro = @@DISTRO@@
+$repoWindows = @@REPO_WIN@@
+$repoWsl = @@REPO_WSL@@
+$expectedVmId = @@VM_ID@@
+$prNumber = @@PR_NUMBER@@
+$prRepository = @@PR_REPOSITORY@@
+$prBranch = @@PR_BRANCH@@
+$prBase = @@PR_BASE@@
+$prBaseSha = @@PR_BASE_SHA@@
+$g = @@GH_PATH@@
+$v = @@GH_VERSION@@
+$d = @@GH_SHA256@@
+$token = @@TOKEN@@
+$runnerManifest = @@RUNNER_MANIFEST@@
+$trustedRoot = @@TRUSTED_ROOT@@
+$qualificationWitness = @@QUALIFICATION_WITNESS@@
+$system = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+$wsl = Join-Path $system 'System32\wsl.exe'
+$adminSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
+$systemSid = [Security.Principal.SecurityIdentifier]'S-1-5-18'
+$usersSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-545'
+$ownerRightsSid = [Security.Principal.SecurityIdentifier]'S-1-3-4'
+$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $selfEncoded = [Environment]::GetCommandLineArgs()[-1]
+    if ($selfEncoded -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
+        throw 'UAC command missing'
+    }
+    $powershell = Join-Path $system 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $child = Start-Process -FilePath $powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop -ArgumentList (
+        '-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ' + $selfEncoded)
+    exit $child.ExitCode
+}
+if ($system -ine 'C:\Windows' -or -not [IO.File]::Exists($wsl)) {
+    throw 'Windows tools unavailable'
+}
+$env:SystemRoot = $system
+$env:PATH = (Join-Path $system 'System32') + ';' + $system
+$env:PSModulePath = Join-Path $system 'System32\WindowsPowerShell\v1.0\Modules'
+
+function Assert-Regular {
+    param([string]$Path, [bool]$Directory)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+    if ($item.PSIsContainer -ne $Directory -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "unsafe path: $Path"
+    }
+}
+function New-ProtectedAcl {
+    param([bool]$Directory)
+    $acl = if ($Directory) { New-Object Security.AccessControl.DirectorySecurity }
+           else { New-Object Security.AccessControl.FileSecurity }
+    $acl.SetAccessRuleProtection($true,$false)
+    $acl.SetOwner($adminSid)
+    $inherit = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
+               else { [Security.AccessControl.InheritanceFlags]::None }
+    foreach ($entry in @(
+        @($adminSid,[Security.AccessControl.FileSystemRights]::FullControl),
+        @($systemSid,[Security.AccessControl.FileSystemRights]::FullControl),
+        @($usersSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute),
+        @($ownerRightsSid,[Security.AccessControl.FileSystemRights]::ReadAndExecute)
+    )) {
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+            $entry[0],$entry[1],$inherit,[Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+    }
+    return $acl
+}
+function Assert-Protected {
+    param([string]$Path, [bool]$Directory)
+    Assert-Regular -Path $Path -Directory $Directory
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $adminSid.Value -or
+        -not $acl.AreAccessRulesProtected) {
+        throw "ACL owner/inheritance differs: $Path"
+    }
+    $expected = @{
+        $adminSid.Value=[Security.AccessControl.FileSystemRights]::FullControl
+        $systemSid.Value=[Security.AccessControl.FileSystemRights]::FullControl
+        $usersSid.Value=([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+        $ownerRightsSid.Value=([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
+    }
+    $inherit = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
+               else { [Security.AccessControl.InheritanceFlags]::None }
+    $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+    if ($rules.Count -ne $expected.Count) { throw "ACL rule count differs: $Path" }
+    foreach ($rule in $rules) {
+        $sid = $rule.IdentityReference.Value
+        if (-not $expected.ContainsKey($sid) -or
+            $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            $rule.FileSystemRights -ne $expected[$sid] -or
+            $rule.InheritanceFlags -ne $inherit -or
+            $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
+            throw "ACL rights differ: $Path"
+        }
+    }
+}
+function Assert-ProgramFiles {
+    foreach ($path in @('C:\','C:\Program Files')) {
+        Assert-Regular -Path $path -Directory $true
+        $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
+        $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($owner -notin @($adminSid.Value,$systemSid.Value) -and $owner -notmatch '^S-1-5-80-') {
+            throw "unsafe parent owner: $path"
+        }
+        foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+            if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                ($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0 -or
+                $rule.IdentityReference.Value -in @($adminSid.Value,$systemSid.Value) -or
+                $rule.IdentityReference.Value -match '^S-1-5-80-') { continue }
+            $mutate = [Security.AccessControl.FileSystemRights]::Delete -bor
+                [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
+                [Security.AccessControl.FileSystemRights]::TakeOwnership
+            if ($path -eq 'C:\Program Files') {
+                $mutate = $mutate -bor [Security.AccessControl.FileSystemRights]::Write -bor
+                    [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
+            }
+            if (($rule.FileSystemRights -band $mutate) -ne 0) {
+                throw "unsafe parent rights: $path"
+            }
+        }
+    }
+}
+function Invoke-WslBounded {
+    param([string[]]$Arguments, [int]$TimeoutSeconds)
+    if ($Arguments.Count -gt 1 -and $Arguments[0] -ceq '/usr/bin/git') {
+        $Arguments = @('/usr/bin/git','-c','core.fsmonitor=false',
+            '-c','core.hooksPath=/dev/null') + @($Arguments[1..($Arguments.Count - 1)])
+    }
+    foreach ($argument in $Arguments) {
+        if ($argument -match '[\s"]') { throw 'unsafe WSL argument' }
+    }
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $wsl
+    $start.Arguments = ('-d ' + $distro + ' --cd ' + $repoWsl + ' --exec ' + ($Arguments -join ' '))
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::Start($start)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $process.Kill()
+            throw 'WSL timeout'
+        }
+        $out = $stdout.GetAwaiter().GetResult()
+        $err = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0 -or $out.Length -gt 65536 -or $err.Length -gt 65536) {
+            throw "WSL verification failed: $err"
+        }
+        return $out.Trim()
+    }
+    finally { $process.Dispose() }
+}
+function Assert-CurrentAuthority {
+    $wrapper = $trustedRoot + '/scripts/repository_delivery.py'
+    [void](Invoke-WslBounded -Arguments @(
+        '/usr/bin/python3','-I',$wrapper,'trusted-native-uac',
+        '--action','Verify','--target-root',$repoWsl,'--pr',$prNumber,
+        '--campaign-id',$campaign,'--expected-vm-id',$expectedVmId,
+        '--head-sha',$sha,'--base-sha',$prBaseSha,
+        '--runner-manifest-sha256',$runnerManifest,
+        '--qualification-sha256',$qualificationWitness
+    ) -TimeoutSeconds 900)
+}
+function Get-GitBlobSha1 {
+    param([byte[]]$Bytes)
+    $utf8 = [Text.UTF8Encoding]::new($false,$true)
+    $text = $utf8.GetString($Bytes).Replace(([string][char]13 + [char]10),[string][char]10)
+    if ($text.Contains([string][char]13)) { throw 'script newline invalid' }
+    $content = $utf8.GetBytes($text)
+    $prefix = [Text.Encoding]::ASCII.GetBytes('blob ' + $content.Length + [char]0)
+    $blob = New-Object byte[] ($prefix.Length + $content.Length)
+    [Buffer]::BlockCopy($prefix,0,$blob,0,$prefix.Length)
+    [Buffer]::BlockCopy($content,0,$blob,$prefix.Length,$content.Length)
+    $digest = [Security.Cryptography.SHA1]::Create()
+    try { return -join ($digest.ComputeHash($blob) | ForEach-Object { $_.ToString('x2') }) }
+    finally { $digest.Dispose() }
+}
+function Assert-ShadowRunnerBytes {
+    param([string]$RunnerRoot, [string]$Action)
+    $manifestFile = Join-Path $RunnerRoot 'runner.json'
+    Assert-Protected -Path $manifestFile -Directory $false
+    $stored = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($manifestFile)) -ErrorAction Stop
+    if ($stored.source_sha -cne $sha -or $stored.campaign_id -cne $campaign -or
+        $stored.runner_files.PSObject.Properties.Count -ne 7) {
+        throw 'protected shadow runner manifest identity differs'
+    }
+    if ($Action -eq 'Recover') {
+        $stateFile = Join-Path $shadow 'native-boot.json'
+        Assert-Protected -Path $stateFile -Directory $false
+        $state = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($stateFile)) -ErrorAction Stop
+        $manifestDigest = (Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($state.source_sha -cne $sha -or $state.campaign_id -cne $campaign -or
+            [string]$state.runner_manifest_sha256 -cne $manifestDigest) {
+            throw 'protected recovery runner manifest differs from prepared state'
+        }
+    }
+    $manifestText = ''
+    foreach ($name in @(
+        'LabNativeBoot.ps1','LabNetworkSeed.ps1','LabNetworkSmoke.ps1',
+        'LabSshIdentity.ps1','NativeVagrantSshSmoke.ps1','RockyImagePipeline.psm1',
+        'local-services-seed-server.ps1')) {
+        $file = Join-Path (Join-Path $RunnerRoot 'scripts\windows') $name
+        Assert-Protected -Path $file -Directory $false
+        $digest = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expected = [string]$stored.runner_files.PSObject.Properties[$name].Value
+        if ($expected -notmatch '^[0-9a-f]{64}$' -or $digest -cne $expected) {
+            throw "protected shadow runner digest differs: $name"
+        }
+        $manifestText += 'scripts/windows/' + $name + [char]0 + $digest + [char]10
+    }
+    if ($Action -eq 'Reboot') {
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $actual = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($manifestText)) |
+                ForEach-Object { $_.ToString('x2') })
+        }
+        finally { $hash.Dispose() }
+        if ($actual -cne $runnerManifest) {
+            throw 'protected shadow runner differs from reviewed PR manifest'
+        }
+    }
+}
+function Assert-PublishedHead {
+    foreach ($tool in @('/usr/bin/git',$g)) {
+        [void](Invoke-WslBounded -Arguments @('/usr/bin/test','-x',$tool) -TimeoutSeconds 20)
+    }
+    $head = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse','HEAD') -TimeoutSeconds 45
+    if ($head -ne $sha) { throw 'Git HEAD differs' }
+    $dirty = Invoke-WslBounded -Arguments @('/usr/bin/git','status','--porcelain=v1','--untracked-files=all') -TimeoutSeconds 45
+    if ($dirty) { throw 'worktree dirty' }
+    $branch = Invoke-WslBounded -Arguments @('/usr/bin/git','symbolic-ref','--quiet','--short','HEAD') -TimeoutSeconds 45
+    if ($branch -cne $prBranch) { throw 'branch differs' }
+    $ghDigest = Invoke-WslBounded -Arguments @('/usr/bin/sha256sum',$g) -TimeoutSeconds 45
+    if ($ghDigest -notmatch ('^' + $d + '\s')) {
+        throw 'gh checksum differs'
+    }
+    $prEndpoint = 'repos/' + $prRepository + '/pulls/' + $prNumber
+    $prResult = Invoke-WslBounded -Arguments @($g,'api',$prEndpoint) -TimeoutSeconds 60
+    $pr = ConvertFrom-Json -InputObject $prResult -ErrorAction Stop
+    if ([string]$pr.number -cne $prNumber -or $pr.state -cne 'open' -or
+        $pr.draft -ne $false -or $null -ne $pr.merged_at -or
+        $pr.base.ref -cne $prBase -or $pr.base.sha -cne $prBaseSha -or
+        $pr.base.repo.full_name -cne $prRepository -or
+        $pr.head.ref -cne $prBranch -or $pr.head.sha -cne $sha -or
+        $pr.head.repo.full_name -cne $prRepository) {
+        throw 'PR changed'
+    }
+    $baseEndpoint = 'repos/' + $prRepository + '/branches/' + $prBase
+    $baseResult = Invoke-WslBounded -Arguments @($g,'api',$baseEndpoint) -TimeoutSeconds 60
+    $base = ConvertFrom-Json -InputObject $baseResult -ErrorAction Stop
+    if ($base.name -cne $prBase -or $base.commit.sha -cne $prBaseSha) {
+        throw 'PR base changed'
+    }
+}
+
+Assert-ProgramFiles
+$base = 'C:\Program Files\EcommerceNativeSmoke'
+if (-not [IO.Directory]::Exists($base)) {
+    [void][IO.Directory]::CreateDirectory($base,(New-ProtectedAcl -Directory $true))
+}
+Assert-Protected -Path $base -Directory $true
+$shadow = Join-Path $base ($campaign + '-' + $sha)
+if ($action -in @('Prepare','SelfTest')) {
+    Assert-CurrentAuthority
+    $bootstrap = Join-Path $base ('bootstrap-' + $sha + '-' + $token)
+    [void][IO.Directory]::CreateDirectory($bootstrap,(New-ProtectedAcl -Directory $true))
+    Assert-Protected -Path $bootstrap -Directory $true
+    $manifestText = ''
+    foreach ($name in @(
+        'LabNativeBoot.ps1','LabNetworkSeed.ps1','LabNetworkSmoke.ps1',
+        'LabSshIdentity.ps1','NativeVagrantSshSmoke.ps1','RockyImagePipeline.psm1',
+        'local-services-seed-server.ps1')) {
+        $source = Join-Path (Join-Path $repoWindows 'scripts\windows') $name
+        $target = Join-Path $bootstrap $name
+        $bytes = [IO.File]::ReadAllBytes($source)
+        $stream = [IO.File]::Create($target,4096,[IO.FileOptions]::None,(New-ProtectedAcl -Directory $false))
+        try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) }
+        finally { $stream.Dispose() }
+        Assert-Protected -Path $target -Directory $false
+        $relative = 'scripts/windows/' + $name
+        $object = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse',($sha + ':' + $relative)) -TimeoutSeconds 45
+        if ($object -notmatch '^[0-9a-f]{40}$' -or
+            (Get-GitBlobSha1 -Bytes ([IO.File]::ReadAllBytes($target))) -ne $object) {
+            throw "copied script differs from Git: $name"
+        }
+        $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifestText += $relative + [char]0 + $digest + [char]10
+    }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actualManifest = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($manifestText)) |
+            ForEach-Object { $_.ToString('x2') })
+    }
+    finally { $hash.Dispose() }
+    if ($actualManifest -cne $runnerManifest) {
+        throw 'protected runner SHA-256 manifest differs'
+    }
+    Assert-PublishedHead
+    Assert-CurrentAuthority
+    $runner = Join-Path $bootstrap 'LabNativeBoot.ps1'
+    & $runner -Action SelfTest
+    if (-not $?) { throw 'Protected elevated native boot SelfTest failed' }
+    if ($action -eq 'Prepare') {
+        & $runner -Action Prepare -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl -ExpectedVmId $expectedVmId -PrNumber $prNumber -PrRepository $prRepository -PrBase $prBase -PrBaseSha $prBaseSha -PrBranch $prBranch -PinnedGhPath $g -PinnedGhVersion $v -PinnedGhSha256 $d
+    }
+}
+else {
+    Assert-Protected -Path $shadow -Directory $true
+    if ($action -eq 'Reboot') { Assert-CurrentAuthority }
+    $runnerRoot = Join-Path $shadow ('runner-' + $sha)
+    Assert-Protected -Path $runnerRoot -Directory $true
+    $runnerScripts = Join-Path $runnerRoot 'scripts'
+    Assert-Protected -Path $runnerScripts -Directory $true
+    $runnerScripts = Join-Path $runnerScripts 'windows'
+    Assert-Protected -Path $runnerScripts -Directory $true
+    $runner = Join-Path $runnerScripts 'LabNativeBoot.ps1'
+    $module = Join-Path $runnerScripts 'RockyImagePipeline.psm1'
+    Assert-Protected -Path $runner -Directory $false
+    Assert-Protected -Path $module -Directory $false
+    Assert-ShadowRunnerBytes -RunnerRoot $runnerRoot -Action $action
+    if ($action -eq 'Reboot') { Assert-CurrentAuthority }
+    & $runner -Action $action -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl
+}
+"""
+    for marker, value in values.items():
+        script = script.replace(marker, _native_boot_powershell_literal(value))
+    return "\n".join(line.strip() for line in script.splitlines() if line.strip()) + "\n"
+
+
+def _native_boot_elevation_command(powershell: Path, bootstrap: str) -> list[str]:
+    command = [str(powershell), "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+               "Bypass", "-EncodedCommand", _native_boot_encoded(bootstrap)]
+    if len(subprocess.list2cmdline(command)) >= 32767:
+        raise ValueError("native bootstrap exceeds the Windows command-line limit")
+    return command
+
+
+def _native_boot_shadow_state(campaign_id: str, action: str) -> dict:
+    """Locate the one protected prepared state without consulting a later Git HEAD."""
+    matches = list(NATIVE_SHADOW_BASE.glob(f"{campaign_id}-" + "[0-9a-f]" * 40))
+    if len(matches) != 1:
+        raise ValueError("native boot requires one protected state for the campaign")
+    shadow = matches[0]
+    state_path = shadow / "native-boot.json"
+    if (not _native_shadow_path_safe(NATIVE_SHADOW_BASE, state_path)
+        or not state_path.is_file() or state_path.stat().st_size > 1024 * 1024):
+        raise ValueError("native boot protected state is absent or redirected")
+    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(state, dict):
+        raise ValueError("native boot protected state is malformed")
+    source_sha = state.get("source_sha")
+    if (not isinstance(source_sha, str)
+        or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or state.get("campaign_id") != campaign_id
+        or not isinstance(state.get("shadow_root"), str)
+        or state["shadow_root"].casefold() != _native_shadow_windows_path(shadow).casefold()
+        or not isinstance(state.get("vm_id"), str)
+        or re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", state["vm_id"]
+        ) is None
+        or not isinstance(state.get("expected_vm_id"), str)
+        or state["vm_id"].casefold() != state["expected_vm_id"].casefold()
+        or (action == "Reboot" and state.get("phase") != "PREPARED")):
+        raise ValueError("native boot protected state identity or phase differs")
+    return state
+
+
+def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
+    return str(_native_boot_shadow_state(campaign_id, action)["source_sha"])
+
+
+def _native_uac_worktree_matches(binding) -> tuple[bool, str]:
+    """Keep the complete reviewed tree and local identity exact at each boundary."""
+    try:
+        from repository_delivery import _native_child_environment, _native_verify_base_tree
+
+        _native_verify_base_tree(
+            ROOT, binding.head_sha, environment=_native_child_environment())
+        if git("status", "--porcelain", "--untracked-files=all").strip():
+            return False, "native UAC exact-SHA worktree became dirty"
+        if git("rev-parse", "HEAD").strip() != binding.head_sha:
+            return False, "native UAC HEAD_CHANGED during preparation"
+        if git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != binding.head_branch:
+            return False, "native UAC branch changed during preparation"
+    except (OSError, RuntimeError, ValueError) as exc:
+        return False, f"native UAC local Git identity is unavailable: {exc}"
+    return True, "native UAC local Git identity remains exact"
+
+
+def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
+    """Verify the explicit exact-base checkout before using its controller identity."""
+    if not trusted_root or not Path(trusted_root).is_absolute():
+        raise ValueError("native UAC requires an explicit absolute TRUSTED_ROOT")
+    root = Path(trusted_root)
+    if (not root.is_dir() or root.is_symlink() or root.resolve(strict=True) != root
+        or root == ROOT.resolve()):
+        raise ValueError("native UAC trusted root is absent, redirected or the target checkout")
+
+    def git_read(*args: str, binary: bool = False):
+        result = subprocess.run(
+            [*_NATIVE_UAC_GIT, "-C", str(root), *args], capture_output=True,
+            text=not binary, check=False, timeout=30)
+        if result.returncode:
+            raise RuntimeError("native UAC exact-base Git verification failed")
+        return result.stdout if binary else result.stdout.strip()
+
+    if (git_read("rev-parse", "--show-toplevel") != str(root)
+        or git_read("rev-parse", "HEAD") != binding.base_sha
+        or git_read("status", "--porcelain=v1", "--untracked-files=all")):
+        raise ValueError("native UAC trusted checkout is not clean at the bound base SHA")
+    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py",
+                     "scripts/performance_audit.py"):
+        source = root / relative
+        if (source.is_symlink() or not source.is_file()
+            or source.resolve(strict=True) != source
+            or not git_read("ls-files", "--error-unmatch", "--", relative)):
+            raise ValueError(f"native UAC trusted controller source is unsafe: {relative}")
+        if source.read_bytes() != git_read("show", f"{binding.base_sha}:{relative}", binary=True):
+            raise ValueError(f"native UAC trusted controller differs from Git: {relative}")
+    from repository_delivery import _native_child_environment, _native_verify_controller
+
+    verified_sha, verified_wrapper, verified_controller = _native_verify_controller(
+        root, environment=_native_child_environment())
+    if (verified_sha != binding.base_sha
+        or verified_wrapper != root / "scripts/repository_delivery.py"
+        or verified_controller != root / "scripts/repoctl.py"):
+        raise ValueError("native UAC exact-base tree verification changed")
+    return verified_controller
+
+
+def _native_uac_qualification_witness(binding, evidence: Path, audit: Path) -> str:
+    """Bind exact-base qualification results to the bytes actually checked."""
+    digests: list[str] = []
+    for path in (evidence, audit):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("native UAC qualification artifact is unsafe")
+        digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    payload = (b"native-uac-qualification-v1\0"
+               + binding.base_sha.encode("ascii") + b"\0"
+               + binding.head_sha.encode("ascii") + b"\0"
+               + digests[0].encode("ascii") + b"\0" + digests[1].encode("ascii"))
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _native_uac_qualification_matches(binding, trusted_root: str,
+                                      expected_witness: str | None = None) -> tuple[bool, str]:
+    """Reject local JSON unless it matches a fresh base-controller execution."""
+    try:
+        witness = expected_witness
+        if witness is None:
+            fresh = _NATIVE_UAC_FRESH_QUALIFICATION.get()
+            if (not isinstance(fresh, tuple) or len(fresh) != 3
+                or fresh[:2] != (binding.base_sha, binding.head_sha)):
+                return False, "native UAC fresh exact-base qualification witness is absent"
+            witness = fresh[2]
+        if not isinstance(witness, str) or re.fullmatch(r"[0-9a-f]{64}", witness) is None:
+            return False, "native UAC qualification witness is malformed"
+        controller = _native_uac_trusted_controller(binding, trusted_root)
+        token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
+        try:
+            evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
+            audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
+        finally:
+            _NATIVE_UAC_CONTROLLER_PATH.reset(token)
+        if evidence is None or audit is None:
+            return False, "native UAC exact-SHA qualification PASS evidence is absent or invalid"
+        if _native_uac_qualification_witness(binding, evidence, audit) != witness:
+            return False, "native UAC qualification artifacts differ from the fresh witness"
+        if _native_uac_trusted_controller(binding, trusted_root) != controller:
+            return False, "native UAC exact-base controller changed during qualification verification"
+    except Exception as exc:
+        return False, f"native UAC exact-SHA qualification is unavailable: {exc}"
+    return True, "native UAC fresh exact-base qualification remains PASS"
+
+
+def _native_uac_fresh_qualification(context: dict[str, object], campaign_id: str,
+                                    expected_vm_id: str, action: str) -> str:
+    """Execute every authoritative gate and audit before the native runtime lock."""
+    from exact_pr_binding import resolve_exact_open_pr
+
+    base_root = str(context["trusted_root"])
+    source_sha = str(context["head_sha"])
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    pinned_gh = _native_uac_pinned_gh(base_root)
+    binding = resolve_exact_open_pr(
+        _NATIVE_UAC_REPOSITORY, source_sha, branch, "main", gh=pinned_gh[0])
+    _require_trusted_pr_execution(
+        pr_number=binding.pr_number, base_sha=binding.base_sha,
+        head_sha=binding.head_sha)
+    _native_uac_runner_manifest(binding)
+    stable, reason = _native_uac_worktree_matches(binding)
+    if not stable:
+        raise RuntimeError(reason)
+    if action == "Reboot":
+        state = _native_boot_shadow_state(campaign_id, action)
+        if state["source_sha"] != source_sha or state["expected_vm_id"] != expected_vm_id:
+            raise RuntimeError("native UAC protected state changed before qualification")
+    authorized, reason = _native_uac_review_gate(
+        pinned_gh[0], binding, campaign_id, expected_vm_id)
+    if not authorized:
+        raise RuntimeError(reason)
+
+    controller = _native_uac_trusted_controller(binding, base_root)
+    evidence_path = CONTEXT / "evidence" / f"{source_sha}.json"
+    token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
+    try:
+        audit_path = _qualification_audit_path(source_sha)
+        for artifact in (evidence_path, audit_path):
+            if (artifact.is_symlink() or CONTEXT.is_symlink()
+                or artifact.parent.is_symlink()
+                or not artifact.resolve().is_relative_to(ROOT.resolve())):
+                raise RuntimeError("native UAC qualification artifact path is unsafe")
+            artifact.unlink(missing_ok=True)
+        previous_force = os.environ.get("ECOMMERCE_FORCE_FULL_QUALIFICATION")
+        os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
+        try:
+            verified = verify_change(binding.base_sha, binding.head_sha, profile="full")
+        finally:
+            if previous_force is None:
+                os.environ.pop("ECOMMERCE_FORCE_FULL_QUALIFICATION", None)
+            else:
+                os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = previous_force
+        if verified:
+            raise RuntimeError("native UAC fresh full qualification failed")
+        evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
+        if evidence is None:
+            raise RuntimeError("native UAC fresh exact-SHA evidence is invalid")
+        audit_script = Path(base_root) / "scripts/performance_audit.py"
+        result = run(
+            [sys.executable, "-I", str(audit_script), "--evidence", str(evidence),
+             "--output", str(audit_path)], check=False)
+        if result.returncode:
+            raise RuntimeError("native UAC fresh base-owned performance audit failed")
+        audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
+        if audit is None:
+            raise RuntimeError("native UAC fresh performance audit is invalid")
+        witness = _native_uac_qualification_witness(binding, evidence, audit)
+    finally:
+        _NATIVE_UAC_CONTROLLER_PATH.reset(token)
+    stable, reason = _native_uac_worktree_matches(binding)
+    if not stable or _native_uac_trusted_controller(binding, base_root) != controller:
+        raise RuntimeError(f"native UAC checkout changed during fresh qualification: {reason}")
+    return witness
+
+
+def lab_network_native_boot(action: str, campaign_id: str,
+                            expected_vm_id: str = "", trusted_root: str = "") -> int:
+    """Run native actions only under a freshly checked exact-base controller."""
+    if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
+        return fail("unsupported native network-smoke boot action")
+    try:
+        context = _native_uac_trusted_context(action)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return fail(str(exc))
+    if not _NATIVE_UAC_RUNTIME_LOCK_HELD.get():
+        return fail("native UAC requires the trusted runtime lock")
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("native network-smoke boot requires an exact CAMPAIGN_ID")
+    if action in {"Prepare", "SelfTest"} and re.fullmatch(
+        r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id or ""
+    ) is None:
+        return fail("native network-smoke elevated Prepare/SelfTest requires --expected-vm-id UUID")
+    base_root = str(context["trusted_root"])
+    if trusted_root and Path(trusted_root).resolve() != Path(base_root):
+        return fail("native UAC trusted root differs from the exact-base controller")
+    source_sha = ""
+    binding = None
+    pinned_gh = None
+    runner_digests = None
+    if action in {"Prepare", "SelfTest", "Reboot"}:
+        try:
+            from exact_pr_binding import resolve_exact_open_pr
+
+            if action == "Reboot":
+                state = _native_boot_shadow_state(campaign_id, action)
+                source_sha = str(state["source_sha"])
+                expected_vm_id = str(state["expected_vm_id"])
+            else:
+                source_sha = str(context["head_sha"])
+            if source_sha != context["head_sha"]:
+                return fail("native UAC protected state differs from the reviewed PR head")
+            pinned_gh = _native_uac_pinned_gh(base_root)
+            gh = pinned_gh[0]
+            branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+            binding = resolve_exact_open_pr(
+                _NATIVE_UAC_REPOSITORY, source_sha, branch, "main", gh=gh)
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            runner_digests = _native_uac_runner_manifest(binding)
+        except Exception as exc:
+            return fail(f"native UAC exact open PR or reviewed runner cannot be resolved: {exc}")
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
+        qualified, reason = _native_uac_qualification_matches(binding, base_root)
+        if not qualified:
+            return fail(reason)
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, binding, campaign_id, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
+        print(f"PASS native UAC PR #{binding.pr_number} exact-SHA review authority: {review_reason}")
+    if action == "Prepare":
+        if lab_network_native_prepare(campaign_id):
+            return 2
+        try:
+            _native_uac_trusted_context(action)
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            if _native_uac_runner_manifest(binding) != runner_digests:
+                return fail("native UAC reviewed runner changed after staging")
+        except Exception as exc:
+            return fail(f"native UAC context changed after staging: {exc}")
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, binding, campaign_id, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
+    powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
+    script = ROOT / "scripts/windows/LabNativeBoot.ps1"
+    if not powershell.is_file() or (action in {"Prepare", "SelfTest"} and not script.is_file()):
+        return fail("native network-smoke boot PowerShell entrypoint is unavailable")
+    distribution = os.environ.get("WSL_DISTRO_NAME", "").strip()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", distribution) is None:
+        return fail("native network-smoke boot requires a WSL distribution")
+    try:
+        repo_windows = output(["wslpath", "-w", str(ROOT)]).strip()
+    except RuntimeError as exc:
+        return fail(f"native network-smoke boot repository path is unavailable: {exc}")
+    try:
+        if action == "Recover":
+            source_sha = _native_boot_shadow_source_sha(campaign_id, action)
+        bootstrap = _native_bootstrap_script(
+            action, campaign_id, source_sha,
+            distribution, repo_windows, expected_vm_id, binding, pinned_gh,
+            runner_digests=runner_digests, trusted_root=base_root,
+            qualification_witness=(
+                _NATIVE_UAC_FRESH_QUALIFICATION.get() or (None, None, ""))[2])
+        command = _native_boot_elevation_command(powershell, bootstrap)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail(str(exc))
+    try:
+        final_context = _native_uac_trusted_context(action)
+        if final_context != context:
+            return fail("native UAC trusted controller context changed before elevation")
+        if action in {"Prepare", "SelfTest", "Reboot"}:
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            if _native_uac_runner_manifest(binding) != runner_digests:
+                return fail("native UAC reviewed runner changed before elevation")
+    except Exception as exc:
+        return fail(f"native UAC trusted context changed before elevation: {exc}")
+    if action in {"Prepare", "SelfTest", "Reboot"}:
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
+        try:
+            if _native_uac_pinned_gh(base_root) != pinned_gh:
+                return fail("native UAC managed gh changed before elevation")
+        except ValueError as exc:
+            return fail(str(exc))
+        qualified, reason = _native_uac_qualification_matches(binding, base_root)
+        if not qualified:
+            return fail(reason)
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, binding, campaign_id, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
+    return run(command, cwd=Path("/mnt/c/Windows"),
+               env=_windows_powershell_environment(), check=False).returncode
+
+
+def lab_network_native_boot_authority_check(campaign_id: str, expected_vm_id: str,
+                                             qualification_witness: str) -> int:
+    """Recheck review authority after UAC without elevation or a nested lock."""
+    if not sys.flags.isolated:
+        return fail("native post-UAC authority check requires Python isolated mode")
+    if (re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                        expected_vm_id or "") is None
+        or re.fullmatch(r"[0-9a-f]{64}", qualification_witness or "") is None):
+        return fail("native post-UAC authority arguments are invalid")
+    try:
+        context = _native_uac_trusted_context("Prepare")
+        from exact_pr_binding import resolve_exact_open_pr
+
+        base_root = str(context["trusted_root"])
+        pinned_gh = _native_uac_pinned_gh(base_root)
+        branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+        binding = resolve_exact_open_pr(
+            _NATIVE_UAC_REPOSITORY, str(context["head_sha"]), branch,
+            "main", gh=pinned_gh[0])
+        for _boundary in ("initial", "final"):
+            current = _native_uac_trusted_context("Prepare")
+            if current != context:
+                raise RuntimeError("native post-UAC exact-base context changed")
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            _native_uac_runner_manifest(binding)
+            stable, reason = _native_uac_worktree_matches(binding)
+            if not stable:
+                raise RuntimeError(reason)
+            if _native_uac_pinned_gh(base_root) != pinned_gh:
+                raise RuntimeError("native post-UAC managed gh changed")
+            qualified, reason = _native_uac_qualification_matches(
+                binding, base_root, expected_witness=qualification_witness)
+            if not qualified:
+                raise RuntimeError(reason)
+            reviewed, reason = _native_uac_review_gate(
+                pinned_gh[0], binding, campaign_id, expected_vm_id)
+            if not reviewed:
+                raise RuntimeError(reason)
+    except Exception as exc:
+        return fail(f"native post-UAC authority revoked or unavailable: {exc}")
+    print(f"PASS native post-UAC authority PR #{binding.pr_number} exact SHA {binding.head_sha}")
+    return 0
+
+
+def _native_uac_runtime_directory() -> None:
+    """Prevent caller-controlled XDG/HOME values from selecting another lock."""
+    current_uid = os.getuid()
+    runtime_value = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime_value:
+        canonical = Path(f"/run/user/{current_uid}")
+        directory = Path(runtime_value)
+        if (runtime_value != str(canonical) or directory.is_symlink()
+            or not directory.is_dir() or directory.resolve(strict=True) != canonical
+            or directory.stat().st_uid != current_uid
+            or directory.stat().st_mode & 0o777 != 0o700):
+            raise RuntimeError("native UAC runtime directory differs from the host-user lock")
+    else:
+        canonical_home = Path(pwd.getpwuid(current_uid).pw_dir).resolve(strict=True)
+        if Path.home().resolve(strict=True) != canonical_home:
+            raise RuntimeError("native UAC fallback home differs from the user account")
+
+
+def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
+                                         expected_vm_id: str = "",
+                                         trusted_root: str = "") -> int:
+    """Run native UAC inside the base-owned exclusive runtime lock."""
+    actions = {
+        "lab-network-native-boot-prepare": "Prepare",
+        "lab-network-native-boot-reboot": "Reboot",
+        "lab-network-native-boot-recover": "Recover",
+        "lab-network-native-boot-self-test": "SelfTest",
+    }
+    action = actions.get(command)
+    if action is None:
+        return fail("unsupported native runtime action")
+    try:
+        context = _native_uac_trusted_context(action)
+        _native_uac_runtime_directory()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return fail(str(exc))
+    if (os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1"
+        or _NATIVE_UAC_RUNTIME_LOCK_HELD.get()):
+        return fail("native UAC caller cannot bypass the runtime lock")
+    if action == "Reboot":
+        try:
+            state = _native_boot_shadow_state(campaign_id, action)
+            expected_vm_id = str(state["expected_vm_id"])
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            return fail(f"native UAC protected reboot state is unavailable: {exc}")
+    fresh_witness = None
+    if action != "Recover":
+        try:
+            fresh_witness = _native_uac_fresh_qualification(
+                context, campaign_id, expected_vm_id, action)
+        except Exception as exc:
+            return fail(f"native UAC fresh exact-base qualification failed: {exc}")
+    records: list[dict] = []
+
+    def execute(runtime_env: dict[str, str]) -> int:
+        if (runtime_env.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1"
+            or not runtime_env.get("ECOMMERCE_RUNTIME_RUN_ID")):
+            return fail("native UAC runtime lock was not acquired")
+        held = _NATIVE_UAC_RUNTIME_LOCK_HELD.set(True)
+        try:
+            result = lab_network_native_boot(
+                action, campaign_id, expected_vm_id, trusted_root)
+        finally:
+            _NATIVE_UAC_RUNTIME_LOCK_HELD.reset(held)
+        records.append({"gate": command, "status": "PASS" if result == 0 else "FAIL",
+                        "exit_code": result})
+        return result
+
+    token = _NATIVE_UAC_CONTROLLER_PATH.set(
+        str(Path(context["trusted_root"]) / "scripts/repoctl.py"))
+    witness_token = _NATIVE_UAC_FRESH_QUALIFICATION.set(
+        (context["base_sha"], context.get("head_sha"), fresh_witness)
+        if fresh_witness else None)
+    try:
+        policy = qualification_execution_policy()
+        capability = (policy.get("runtime_orchestration", {})
+                      .get("capabilities", {})
+                      .get("local-virtualization-serialization", {}))
+        if not isinstance(capability, dict) or capability.get("global_lock") is not True:
+            return fail("native UAC exact-base policy lacks the exclusive runtime lock")
+        return _execute_with_runtime(
+            [], execute, workflow=f"network-smoke:{command}", head="WORKTREE",
+            environment=os.environ.copy(),
+            workflow_capabilities=["local-virtualization-serialization"],
+            records=records,
+        )
+    finally:
+        _NATIVE_UAC_FRESH_QUALIFICATION.reset(witness_token)
+        _NATIVE_UAC_CONTROLLER_PATH.reset(token)
+
+
+def _native_network_status_snapshot(campaign_id: str, shadow_root: Path) -> tuple[dict, dict, Path, bool] | None:
+    """Read one protected native campaign without using its historical result as proof."""
+    if shadow_root.is_symlink() or (shadow_root.exists() and not shadow_root.is_dir()):
+        raise ValueError("native network-smoke shadow root is unsafe")
+    shadows = list(shadow_root.glob(f"{campaign_id}-*")) if shadow_root.is_dir() else []
+    if not shadows:
+        return None
+    if len(shadows) != 1:
+        raise ValueError("native network-smoke requires one protected shadow for the campaign")
+    shadow = shadows[0]
+    source_sha = shadow.name[len(campaign_id) + 1:]
+    if (re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or not _native_shadow_path_safe(shadow_root, shadow)
+        or not shadow.is_dir()):
+        raise ValueError("native network-smoke shadow identity is invalid")
+    state_path = shadow / "native-boot.json"
+    evidence = shadow / "evidence/network-smoke" / campaign_id / "result.json"
+    for path in (state_path, evidence):
+        if (not _native_shadow_path_safe(shadow_root, path) or not path.is_file()
+            or path.stat().st_size > 1024 * 1024):
+            raise ValueError(f"native network-smoke protected status path is unsafe: {path}")
+    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    result_bytes = evidence.read_bytes()
+    result = json.loads(result_bytes.decode("utf-8-sig"))
+    if not isinstance(state, dict) or not isinstance(result, dict):
+        raise ValueError("native network-smoke protected state or result is malformed")
+    phase = state.get("phase")
+    run_status = state.get("run_status")
+    cleanup = result.get("cleanup")
+    vm_id = state.get("vm_id")
+    vm_name = state.get("vm_name")
+    if (state.get("mode") != "NETWORK_SMOKE_NATIVE"
+        or state.get("campaign_id") != campaign_id
+        or state.get("source_sha") != source_sha
+        or str(state.get("shadow_root", "")).rstrip("\\").casefold()
+           != _native_shadow_windows_path(shadow).rstrip("\\").casefold()
+        or phase not in {"PREPARED", "BOOT_PENDING", "RUNNING", "RETURN_PENDING", "FAILED", "RECOVERED"}
+        or run_status not in {None, "PASS", "FAIL"}
+        or not isinstance(vm_id, str)
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", vm_id) is None
+        or not isinstance(state.get("expected_vm_id"), str)
+        or state["expected_vm_id"].casefold() != vm_id.casefold()
+        or not isinstance(vm_name, str)
+        or re.fullmatch(r"ecommerce-rocky-10-2-smoke-[0-9a-f]{12}", vm_name) is None
+        or result.get("campaign_id") != campaign_id
+        or result.get("vm_name") != vm_name
+        or not isinstance(cleanup, dict)
+        or not isinstance(cleanup.get("vm_id"), str)
+        or cleanup["vm_id"].casefold() != vm_id.casefold()):
+        raise ValueError("native network-smoke protected status binding differs")
+    completed_run = run_status == "PASS"
+    digest = state.get("result_sha256")
+    if completed_run:
+        if (phase not in {"RETURN_PENDING", "RECOVERED"}
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or digest != hashlib.sha256(result_bytes).hexdigest()
+            or result.get("status") != "PASS"
+            or result.get("resume_runner_source_sha") != source_sha):
+            raise ValueError("native network-smoke protected result differs from the successful run")
+    elif digest not in {None, ""}:
+        raise ValueError("native network-smoke has an unbound result digest")
+    return state, result, evidence, completed_run
+
+
+def lab_network_status(campaign_id: str, *,
+                       laboratory_root: Path = Path("/mnt/c/ecommerce-lab"),
+                       shadow_root: Path = NATIVE_SHADOW_BASE) -> int:
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        return fail("lab-network-status requires an exact CAMPAIGN_ID")
+    try:
+        native = _native_network_status_snapshot(campaign_id, shadow_root)
+        if native is None:
+            evidence = laboratory_root / "evidence/network-smoke" / campaign_id / "result.json"
+            if evidence.is_symlink() or not evidence.is_file():
+                return fail(f"network-smoke result is absent or redirected: {campaign_id}")
+            result = json.loads(evidence.read_text(encoding="utf-8-sig"))
+            if not isinstance(result, dict) or result.get("campaign_id") != campaign_id:
+                return fail("network-smoke result campaign binding differs")
+            state = None
+            completed_run = True
+        else:
+            state, result, evidence, completed_run = native
+    except (OSError, ValueError, TypeError, UnicodeError, json.JSONDecodeError) as exc:
+        return fail(f"network-smoke status rejected: {exc}")
+    reported = result if completed_run else {"vm_name": state["vm_name"]}
+    network = reported.get("network_smoke")
+    if network is None:
+        network = {}
+    if not isinstance(network, dict):
+        return fail("network-smoke status network evidence is malformed")
+    cleanup = reported.get("cleanup")
+    if cleanup is None:
+        cleanup = {}
+    if not isinstance(cleanup, dict):
+        return fail("network-smoke status cleanup evidence is malformed")
+    vm_name = reported.get("vm_name") or ""
+    vm_state = "UNKNOWN"
+    vbox = Path("/mnt/c/Program Files/Oracle/VirtualBox/VBoxManage.exe")
+    if vm_name and vbox.is_file():
+        try:
+            probe = subprocess.run([str(vbox), "showvminfo", vm_name, "--machinereadable"],
+                                   capture_output=True, text=True, timeout=20, check=False)
+            match = re.search(r'^VMState="([^"]+)"\s*$', probe.stdout, re.MULTILINE)
+            vm_state = match.group(1).upper() if probe.returncode == 0 and match else "ABSENT"
+        except (OSError, subprocess.TimeoutExpired):
+            vm_state = "UNKNOWN"
+    native_status = None
+    if state:
+        if state["phase"] == "RECOVERED" and completed_run:
+            native_status = "PASS"
+        elif state.get("run_status") == "FAIL" or state["phase"] == "FAILED":
+            native_status = "FAIL"
+        elif state["phase"] == "RECOVERED":
+            native_status = "NOT_RUN"
+        else:
+            native_status = "PENDING"
+    print(json.dumps({
+        "campaign_id": campaign_id,
+        "source_sha": state["source_sha"] if state else result.get("source_git_sha"),
+        "evidence_source": "protected-shadow" if state else "legacy-laboratory",
+        "native_phase": state["phase"] if state else None,
+        "native_run_status": state.get("run_status") if state else None,
+        "native_error": state.get("run_error") if state else None,
+        "native_status": native_status,
+        "vm_name": vm_name,
+        "vm_state": vm_state,
+        "virtualbox_backend": reported.get("virtualbox_backend"),
+        "ssh_host": network.get("address"),
+        "ssh_port": network.get("port"),
+        "ssh_user": network.get("user"),
+        "tcp_probe": network.get("tcp_22_ready"),
+        "tcp_failure_class": network.get("tcp_last_error"),
+        "ssh_handshake": network.get("ssh_auth_ready"),
+        "remote_command": network.get("remote_command_ready"),
+        "rocky_runtime": network.get("rocky_runtime"),
+        "guest_security": reported.get("guest_security"),
+        "rocky_version": network.get("rocky_version"),
+        "vagrant_ssh_wrapper": network.get("vagrant_ssh_command"),
+        "direct_openssh": network.get("remote_command_ready"),
+        "packer_rebuild": "NOT_REQUIRED" if reported.get("box_digest_verified") == "PASS" else "UNVERIFIED",
+        "vm_recreate": reported.get("vm_recreate"),
+        "artifacts_retained": cleanup.get("vm_preserved"),
+        "checkpoints": reported.get("checkpoints"),
+        "resume_from": reported.get("resume_from"),
+        "resume_runner_source_sha": reported.get("resume_runner_source_sha"),
+        "resume_seed_server": reported.get("resume_seed_server"),
+        "failure_code": network.get("failure_code"),
+        "evidence": str(evidence),
+    }, sort_keys=True))
+    return 0
 
 
 def linux_image_pipeline(action: str, *, offline: bool = False) -> int:
@@ -10241,6 +12045,20 @@ def _rke2_registered_vm_identity(vm_name: str) -> str | None:
 
 def rke2_local_virtualbox_qualification(inputs: str) -> int:
     workflow = qualification_workflow("rke2_local_virtualbox")
+    if workflow.get("resumable") is not False:
+        return fail("RKE2 local qualification must declare that persisted checkpoints are diagnostic only")
+    backend_policy = qualification_execution_policy()["workflows"]["rke2_local_virtualbox"].get(
+        "virtualbox_backend_policy"
+    )
+    if backend_policy != {
+        "image_execution_required": "NATIVE_VTX",
+        "rke2_functional_allowed": ["NATIVE_VTX", "NEM"],
+        "observed_backend_evidence": ".context/mgmt-offline-vm/<name>/backend-probe.json",
+    }:
+        return fail("RKE2 VirtualBox backend policy is missing or ambiguous")
+    graph = qualification_steps.validate_graph(
+        qualification_execution_policy()["workflows"]["rke2_local_virtualbox"]
+    )
     expected_entrypoint = (
         "scripts/repoctl.py rke2-local-virtualbox-qualification "
         "--inputs .context/mgmt-vm-inputs.json"
@@ -10288,6 +12106,11 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             "RKE2 local qualification inputs contain unsupported fields: "
             + ", ".join(unsupported_fields)
         )
+    if type(input_values.get("vm_cpus")) is not int or input_values["vm_cpus"] != 4:
+        return fail("RKE2 local qualification requires explicit vm_cpus=4 before VM creation")
+    if (type(input_values.get("vm_memory")) is not int
+        or not 4096 <= input_values["vm_memory"] <= 16384):
+        return fail("RKE2 local qualification requires explicit vm_memory=4096..16384 before VM creation")
     vm_name = input_values.get("vm_name")
     if not isinstance(vm_name, str) or re.fullmatch(r"ecommerce-mgmt-test-[a-z0-9-]+", vm_name) is None:
         return fail("RKE2 local qualification inputs must declare a valid vm_name")
@@ -10298,7 +12121,42 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
             "RKE2 local qualification inputs must use the canonical approved manifest digest"
         )
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
-    frozen_inputs = json.dumps(input_values, sort_keys=True, separators=(",", ":"))
+    try:
+        verified_box, box_manifest = _rke2_verified_box(head_sha)
+        if verified_box["vm_box_sha256"] != box_manifest["box_sha256"]:
+            raise ValueError("RKE2 box and reuse manifest digests differ")
+        _record_box_reuse_checkpoint(head_sha, box_manifest)
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
+        return fail(f"RKE2 local qualification requires a verified native Rocky box: {exc}")
+    frozen_inputs = json.dumps(
+        {**input_values, **verified_box}, sort_keys=True, separators=(",", ":")
+    )
+    input_digest = hashlib.sha256(frozen_inputs.encode("utf-8")).hexdigest()
+    step_records: dict[str, dict] = {}
+    checkpoint_root = vm_state / "step-checkpoints"
+
+    def record_step(index: int, action: str, step: str, status: str,
+                    started_at: datetime, runtime_file: str | None = None) -> None:
+        runtime_path = vm_state / runtime_file if runtime_file and status == "PASS" else None
+        if runtime_path is not None:
+            if runtime_path.stat().st_mtime < started_at.timestamp() - 1:
+                raise ValueError(f"stale runtime evidence: {runtime_path.name}")
+            runtime_payload = json.loads(runtime_path.read_text(encoding="utf-8"))
+            if not isinstance(runtime_payload, dict) or not runtime_payload:
+                raise ValueError(f"runtime evidence is empty: {runtime_path.name}")
+        record = qualification_steps.checkpoint(
+            qualification="rke2_local_virtualbox", step=step, source_sha=head_sha,
+            input_digest=input_digest, status=status, started_at=started_at,
+            artifact_digest=(verified_box["vm_box_sha256"] if step in {"image", "vm-smoke"}
+                             else approved_manifest if step in {"input-lock", "offline-bundle"} else None),
+            runtime_path=runtime_path, preflight=(step == "preflight" and status == "PASS"),
+        )
+        checkpoint_root.mkdir(parents=True, exist_ok=True)
+        (checkpoint_root / f"{index:02d}-{action}.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        if status == "PASS":
+            step_records[step] = record
 
     def source_is_frozen() -> bool:
         return (
@@ -10331,6 +12189,7 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "validate",
         "create",
         "test",
+        "diagnostics",
         "server",
         "server",
         "restage",
@@ -10339,16 +12198,210 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         "server",
         "destroy",
     ]
-    for action in actions:
+    campaign_started_at = datetime.now(timezone.utc)
+    observed_actions: list[dict[str, object]] = []
+    observed_vm_uuid = ""
+    backend_probe: dict[str, object] | None = None
+    server_count = 0
+    action_step = {
+        "validate": "preflight", "create": "vm-smoke", "test": "offline-bundle",
+        "server": "rke2-single", "restage": "recovery", "tamper": "recovery",
+    }
+    runtime_file = {
+        "create": "preflight.json", "test": "cold-role-result.json",
+        "server": "rke2-result.json", "restage": "role-result.json",
+        "tamper": "tamper-result.json",
+    }
+    for index, action in enumerate(actions):
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed after freeze")
+        step = action_step.get(action)
+        if step and action != "validate":
+            try:
+                qualification_steps.guard_start(
+                    qualification="rke2_local_virtualbox", step=step, graph=graph, source_sha=head_sha,
+                    input_digest=input_digest, checkpoints=step_records,
+                )
+            except ValueError as exc:
+                return fail(f"RKE2 qualification step {action} blocked: {exc}")
+        if action == "destroy":
+            try:
+                qualification_steps.guard_cleanup(
+                    final_evidence_captured=False,
+                    explicitly_authorized=(
+                        len(observed_actions) == len(actions) - 1
+                        and (vm_state / "tamper-result.json").is_file()
+                        and (vm_state / "rke2-result.json").is_file()
+                    ),
+                )
+            except ValueError as exc:
+                return fail(f"RKE2 diagnostic VM cleanup blocked: {exc}")
+        started_at = datetime.now(timezone.utc)
+        started = time.monotonic()
         result = run([*command, "-e", f"vm_action={action}"], check=False)
         if result.returncode:
+            if step:
+                record_step(index, action, step, "FAIL", started_at)
             return result.returncode
+        if action == "create":
+            import rke2_virtualbox_backend
+
+            try:
+                backend_probe = rke2_virtualbox_backend.probe(
+                    vm_name, expected_cpus=int(input_values["vm_cpus"]),
+                    expected_memory=int(input_values["vm_memory"]),
+                    expected_version=json.loads(
+                        (ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8")
+                    )["versions"]["VIRTUALBOX_VERSION"],
+                    minimum_log_mtime=started_at.timestamp(),
+                    snapshot_path=vm_state / "backend-VBox.log",
+                )
+                backend_probe["head_sha"] = head_sha
+                backend_probe["head_tree_sha"] = git("rev-parse", "HEAD^{tree}").strip()
+                backend_probe["box_sha256"] = verified_box["vm_box_sha256"]
+                (vm_state / "backend-probe.json").write_text(
+                    json.dumps(backend_probe, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+                if backend_probe["virtualbox_backend"] not in backend_policy["rke2_functional_allowed"]:
+                    return fail("BLOCKED_RUNTIME RKE2 VirtualBox backend is incompatible with the contract")
+                observed_vm_uuid = str(backend_probe["vm_uuid"])
+            except (OSError, ValueError, KeyError, subprocess.TimeoutExpired, json.JSONDecodeError) as exc:
+                return fail(f"BLOCKED_RUNTIME RKE2 VirtualBox backend cannot be proven: {exc}")
         if action == "server" and not source_evidence_matches():
             return fail("RKE2 local qualification source evidence is not bound to the frozen exact SHA")
+        if action == "test":
+            cold_path = vm_state / "role-result.json"
+            try:
+                if cold_path.stat().st_mtime < started_at.timestamp() - 1:
+                    return fail("RKE2 cold role result predates the current test action")
+                cold_result = json.loads(cold_path.read_text(encoding="utf-8"))
+                if not isinstance(cold_result, dict):
+                    return fail("RKE2 cold role result must be a JSON object")
+                trial = cold_result.get("trial")
+                if (cold_result.get("exit_code") != 0 or not isinstance(trial, dict)
+                    or trial.get("cold_trial") is not True
+                    or trial.get("previous_attempt") is not False):
+                    return fail("RKE2 first offline installation was not a cold trial")
+                (vm_state / "cold-role-result.json").write_bytes(cold_path.read_bytes())
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 cold role result cannot be preserved: {exc}")
+        observation: dict[str, object] = {
+            "action": action, "status": "PASS",
+            "duration_seconds": round(time.monotonic() - started, 3),
+        }
+        if action in {"test", "restage"}:
+            try:
+                transfer_result = json.loads((vm_state / "role-result.json").read_text(encoding="utf-8"))
+                if not isinstance(transfer_result, dict):
+                    raise ValueError("offline role result is malformed")
+                qualification_steps.validate_transfer_record(
+                    transfer_result.get("transfer"), approved_manifest=approved_manifest,
+                )
+                observation["transfer"] = transfer_result["transfer"]
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 {action} lacks verified transfer evidence: {exc}")
+        if action == "server":
+            try:
+                invocation = json.loads((vm_state / "server-invocation.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 server replay decision is missing: {exc}")
+            if not isinstance(invocation, dict):
+                return fail("RKE2 server replay decision must be a JSON object")
+            expected_install = (True, False, True)[server_count]
+            uuid = invocation.get("vm_uuid")
+            if (invocation.get("install_required") is not expected_install
+                or not isinstance(uuid, str)
+                or re.fullmatch(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}", uuid) is None
+                or (observed_vm_uuid and uuid != observed_vm_uuid)):
+                return fail("RKE2 server replay or owned VM identity differs from the observed sequence")
+            observed_vm_uuid = uuid
+            observation["install_required"] = expected_install
+            observation["vm_uuid"] = uuid
+            server_count += 1
+        if step:
+            try:
+                record_step(index, action, step, "PASS", started_at, runtime_file.get(action))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 qualification step {action} lacks a valid checkpoint: {exc}")
+        if action == "validate":
+            try:
+                for prerequisite in ("input-lock", "image"):
+                    qualification_steps.guard_start(
+                        qualification="rke2_local_virtualbox", step=prerequisite,
+                        graph=graph, source_sha=head_sha, input_digest=input_digest,
+                        checkpoints=step_records,
+                    )
+                    record_step(index, prerequisite, prerequisite, "PASS", started_at)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 verified input or image checkpoint is invalid: {exc}")
+        if action == "create":
+            try:
+                guest = json.loads((vm_state / "preflight.json").read_text(encoding="utf-8"))
+                ssh_access = {
+                    "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
+                    "permitrootlogin": "no", "authenticationmethods": "publickey",
+                }
+                if (
+                    not isinstance(guest, dict)
+                    or not re.match(r"^Rocky Linux release 10\.2\b", guest.get("rocky_release", ""))
+                    or guest.get("selinux") != "Enforcing"
+                    or guest.get("ssh_access") != ssh_access
+                    or guest.get("public_connect_errno") != 101
+                    or guest.get("nft_policies") != {"output": "drop", "forward": "drop"}
+                    or any(not isinstance(guest.get(route), list) for route in ("ipv4_routes", "ipv6_routes"))
+                    or any(not isinstance(row, dict) or row.get("dst") == "default"
+                           for route in ("ipv4_routes", "ipv6_routes") for row in guest[route])
+                    or not isinstance(guest.get("kernel"), str) or not guest["kernel"]
+                    or guest.get("online_cpus") != int(input_values["vm_cpus"])
+                    or type(guest.get("memory_kib")) is not int or guest["memory_kib"] < 3 * 1024 * 1024
+                    or guest.get("systemd") != "running"
+                    or not isinstance(guest.get("boot_id"), str)
+                    or re.fullmatch(r"[0-9a-f-]{36}", guest["boot_id"]) is None
+                ):
+                    return fail("RKE2 fresh VM lacks SSH, Rocky runtime, or isolated network proof")
+                for smoke_step in ("network-ssh", "rocky-runtime"):
+                    record_step(index, smoke_step, smoke_step, "PASS", started_at, "preflight.json")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                return fail(f"RKE2 fresh VM smoke proof is invalid: {exc}")
+        observed_actions.append(observation)
         if not source_is_frozen():
             return fail("RKE2 local qualification source changed during execution")
+    try:
+        role = json.loads((vm_state / "role-result.json").read_text(encoding="utf-8"))
+        rke2 = json.loads((vm_state / "rke2-result.json").read_text(encoding="utf-8"))
+        tamper = json.loads((vm_state / "tamper-result.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 campaign source result is missing: {exc}")
+    if not all(isinstance(value, dict) for value in (role, rke2, tamper)):
+        return fail("RKE2 role, server, and tamper results must be JSON objects")
+    if (role.get("exit_code") != 0 or role.get("vm_uuid") != observed_vm_uuid
+        or rke2.get("node_ready") is not True or rke2.get("cilium_ready") != 1
+        or tamper.get("blocked_task") != "Revalidate every staged byte immediately before privileged installation"):
+        return fail("RKE2 campaign lacks coherent role, server, or tamper results")
+    try:
+        for index, (step, runtime_file) in enumerate((
+            ("evidence", "rke2-result.json"), ("final", "tamper-result.json")
+        ), start=len(actions)):
+            qualification_steps.guard_start(
+                qualification="rke2_local_virtualbox", step=step, graph=graph,
+                source_sha=head_sha, input_digest=input_digest, checkpoints=step_records,
+            )
+            record_step(index, step, step, "PASS", campaign_started_at, runtime_file)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return fail(f"RKE2 campaign terminal graph checkpoint is incomplete: {exc}")
+    head_tree = git("rev-parse", "HEAD^{tree}").strip()
+    campaign = {
+        "schema_version": 1, "status": "PASS", "head_sha": head_sha,
+        "head_tree_sha": head_tree, "vm_uuid": observed_vm_uuid,
+        "box_sha256": verified_box["vm_box_sha256"],
+        "virtualbox_backend": backend_probe["virtualbox_backend"] if backend_probe else None,
+        "manifest_sha256": approved_manifest,
+        "vm_memory_mib": int(input_values["vm_memory"]),
+        "created_at_epoch": int(time.time()), "actions": observed_actions,
+    }
+    (vm_state / "campaign-result.json").write_text(
+        json.dumps(campaign, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     return 0
 
 
@@ -10368,6 +12421,8 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     inventory = payload.get("inventory", {})
     safety = payload.get("safety", {})
     if (
@@ -10377,6 +12432,7 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
         or payload.get("evidence_status") != "PASS"
         or not isinstance(inventory, dict)
         or inventory.get("failed_gates") != 0
+        or not isinstance(safety, dict)
         or safety.get("content_cache_authorizes_pass_reuse") is not False
         or safety.get("verdict_reuse_policy") != "exact-direct-parent-only"
     ):
@@ -10469,8 +12525,12 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     repetitions = int(qualification_workflow("performance_campaign")["repetitions"])
     expected_tree = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    budgets = payload.get("budgets")
+    safety = payload.get("safety")
     if (
         payload.get("schema_version") != 1
         or payload.get("status") != "PASS"
@@ -10478,11 +12538,13 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
         or payload.get("head_tree_sha") != expected_tree
         or payload.get("qualification_identity") != qualification_identity()
         or payload.get("repetitions") != repetitions
-        or not isinstance(payload.get("budgets"), dict)
-        or not payload["budgets"]
-        or any(item.get("status") != "PASS" for item in payload["budgets"].values())
-        or payload.get("safety", {}).get("native_dependency_caches_preserved") is not True
-        or payload.get("safety", {}).get("product_runtime_tests_remain_fresh") is not True
+        or not isinstance(budgets, dict)
+        or not budgets
+        or any(not isinstance(item, dict) or item.get("status") != "PASS"
+               for item in budgets.values())
+        or not isinstance(safety, dict)
+        or safety.get("native_dependency_caches_preserved") is not True
+        or safety.get("product_runtime_tests_remain_fresh") is not True
     ):
         return None
     return path
@@ -12030,12 +14092,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 str(result["pr"]),
             ]
             result["review_request"] = {
+                "schema_version": 1,
                 "event": "CHATGPT_REVIEW_REQUIRED",
                 "state": "CHATGPT_REVIEW_REQUIRED",
                 "provider": "ChatGPT",
                 "review_kind": review_kind,
+                "repository": name_with_owner,
                 "pr": result["pr"],
+                "base": initial["base"],
+                "base_sha": initial["base_sha"],
                 "head_sha": result["head_sha"],
+                "head_branch": initial["head_branch"],
                 "handoff": handoff,
                 "handoff_bytes": len(handoff.encode()),
                 "handoff_sha256": hashlib.sha256(handoff.encode()).hexdigest(),
@@ -12052,6 +14119,16 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                     "controller_source": "exact-pr-base-sha",
                     "after_valid_marker": True,
                 },
+                "verdict_authority": False,
+            }
+            result["review_dispatch"] = {
+                "status": "NOT_REQUESTED",
+                "provider": "ChatGPT",
+                "kind": review_kind,
+                "pr": result["pr"],
+                "head_sha": result["head_sha"],
+                "handoff_sha256": result["review_request"]["handoff_sha256"],
+                "transport": "EXTERNAL_DISPATCHER",
                 "verdict_authority": False,
             }
         _emit_pr_loop_result(result, json_output=json_output)
@@ -12319,6 +14396,8 @@ def main() -> int:
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
+    m25 = sub.add_parser("m25-runtime-evidence")
+    m25.add_argument("--vm-name", required=True)
     sub.add_parser("roadmap-sync")
     qce = sub.add_parser("qce-status")
     qce.add_argument("--json", action="store_true")
@@ -12379,6 +14458,10 @@ def main() -> int:
     a.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     a.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     a.add_argument("--json", action="store_true")
+    qi = sub.add_parser("qualification-impact")
+    qi.add_argument("--workflow", default="rke2_local_virtualbox")
+    qi.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    qi.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     v = sub.add_parser("verify-change")
     v.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
     v.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
@@ -12411,6 +14494,7 @@ def main() -> int:
     sub.add_parser("image-rocky-windows-native-reboot")
     sub.add_parser("image-rocky-windows-native-import")
     sub.add_parser("image-rocky-windows-native-recover")
+    sub.add_parser("image-rocky-windows-native-reset-failed")
     sub.add_parser("image-rocky-windows-native-self-test")
     sub.add_parser("lab-ssh-key")
     packer_box = sub.add_parser("packer-box")
@@ -12419,9 +14503,26 @@ def main() -> int:
     network_smoke.add_argument("--box", default=os.environ.get("BOX_PATH", ""))
     network_smoke.add_argument("--box-sha256", default=os.environ.get("BOX_SHA256", ""))
     network_smoke.add_argument("--keep-failed-vm", action="store_true")
+    network_smoke.add_argument("--retain-vm", action="store_true")
+    network_smoke.add_argument("--diagnostic-nem", action="store_true")
     network_smoke.add_argument("--global-deadline", type=int, default=900)
     lab_clean = sub.add_parser("lab-clean")
     lab_clean.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_resume = sub.add_parser("lab-network-resume")
+    lab_resume.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_import = sub.add_parser("lab-network-import")
+    lab_import.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    lab_native_prepare = sub.add_parser("lab-network-native-prepare")
+    lab_native_prepare.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+    for name in ("lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
+                 "lab-network-native-boot-recover", "lab-network-native-boot-self-test"):
+        native_boot = sub.add_parser(name)
+        native_boot.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
+        if name in {"lab-network-native-boot-prepare", "lab-network-native-boot-self-test"}:
+            native_boot.add_argument("--expected-vm-id", required=True)
+            native_boot.add_argument("--trusted-root", required=True)
+    lab_status = sub.add_parser("lab-network-status")
+    lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
     sub.add_parser("image-rocky-linux-static-validate")
     image_linux_build = sub.add_parser("image-rocky-linux-build")
@@ -12654,6 +14755,9 @@ def main() -> int:
             comps = affected(args.base, args.head)
             print(json.dumps(comps) if args.json else "\n".join(comps))
             return 0
+        if args.cmd == "qualification-impact":
+            print(json.dumps(qualification_impact(args.base, args.head, args.workflow), sort_keys=True))
+            return 0
         if args.cmd == "verify-change":
             return verify_change(args.base, args.head, args.profile)
         if args.cmd == "global-check":
@@ -12666,10 +14770,18 @@ def main() -> int:
             "image-rocky-windows-qualify", "image-rocky-windows-release",
             "image-rocky-windows-native-prepare", "image-rocky-windows-native-reboot",
             "image-rocky-windows-native-import", "image-rocky-windows-native-recover",
+            "image-rocky-windows-native-reset-failed",
             "image-rocky-linux-preflight", "image-rocky-linux-build",
             "image-rocky-linux-qualify", "image-rocky-linux-release",
         } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
             return image_phase_with_runtime(args.cmd, offline=getattr(args, "offline", False))
+        if args.cmd in {
+            "lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
+            "lab-network-native-boot-recover", "lab-network-native-boot-self-test",
+        }:
+            return lab_network_native_boot_with_runtime(
+                args.cmd, args.campaign_id, getattr(args, "expected_vm_id", ""),
+                getattr(args, "trusted_root", ""))
         if args.cmd == "image-rocky-preflight":
             return windows_image_pipeline("preflight")
         if args.cmd == "image-rocky-build":
@@ -12694,6 +14806,8 @@ def main() -> int:
             return windows_native_vtx_cycle("import")
         if args.cmd == "image-rocky-windows-native-recover":
             return windows_native_vtx_cycle("recover")
+        if args.cmd == "image-rocky-windows-native-reset-failed":
+            return windows_native_vtx_cycle("resetfailed")
         if args.cmd == "image-rocky-windows-native-self-test":
             return windows_native_vtx_cycle("selftest")
         if args.cmd == "lab-ssh-key":
@@ -12702,9 +14816,28 @@ def main() -> int:
             return rocky_box_command("verify", box=args.box)
         if args.cmd == "lab-network-smoke":
             return rocky_box_command("prepare-smoke", box=args.box, box_sha256=args.box_sha256,
-                                     keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline)
+                                     keep_failed_vm=args.keep_failed_vm, global_deadline=args.global_deadline,
+                                     retain_vm=args.retain_vm, diagnostic_nem=args.diagnostic_nem)
         if args.cmd == "lab-clean":
-            return lab_network_clean(args.campaign_id)
+            return lab_network_action("Clean", args.campaign_id)
+        if args.cmd == "lab-network-resume":
+            return lab_network_action("Resume", args.campaign_id)
+        if args.cmd == "lab-network-import":
+            return lab_network_import(args.campaign_id)
+        if args.cmd == "lab-network-native-prepare":
+            return lab_network_native_prepare(args.campaign_id)
+        if args.cmd.startswith("lab-network-native-boot-"):
+            action = {
+                "lab-network-native-boot-prepare": "Prepare",
+                "lab-network-native-boot-reboot": "Reboot",
+                "lab-network-native-boot-recover": "Recover",
+                "lab-network-native-boot-self-test": "SelfTest",
+            }[args.cmd]
+            return lab_network_native_boot(
+                action, args.campaign_id, getattr(args, "expected_vm_id", ""),
+                getattr(args, "trusted_root", ""))
+        if args.cmd == "lab-network-status":
+            return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":
             return linux_image_pipeline("preflight")
         if args.cmd == "image-rocky-linux-static-validate":
@@ -12734,15 +14867,17 @@ def main() -> int:
                     input_path = ROOT / input_path
                 try:
                     input_values = json.loads(input_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    input_values = {}
+                except (OSError, json.JSONDecodeError) as exc:
+                    return fail(f"RKE2 local qualification inputs are invalid JSON: {exc}")
+                if not isinstance(input_values, dict):
+                    return fail("RKE2 local qualification inputs must be a JSON object")
                 contract = ruby_yaml("platform/ansible/tests/mgmt_offline_vm/contract.yml")
                 resources = contract["mgmt_local_vm_contract"]["resources"]
                 defaults = resources["artifact_default"]
                 capability_context = {
                     "vm_memory": input_values.get("vm_memory", defaults["memory_mib"]),
                     "vm_cpus": input_values.get("vm_cpus", defaults["cpus"]),
-                    "vagrant_expected_stdout": f"Vagrant {contract['mgmt_local_vm_contract']['vagrant']['version']}",
+                    "vagrant_expected_stdout": f"Vagrant {_canonical_rke2_vagrant_version()}",
                 }
                 return _execute_workflow_with_runtime(
                     "rke2_local_virtualbox",
@@ -12804,6 +14939,15 @@ def main() -> int:
             return branch_cleanup(dry_run=args.dry_run)
         if args.cmd == "roadmap-check":
             return roadmap_check()
+        if args.cmd == "m25-runtime-evidence":
+            import m25_runtime_evidence
+            if git("status", "--porcelain", "--untracked-files=all").strip():
+                return fail("M2.5 evidence requires a clean exact-SHA worktree")
+            head = git("rev-parse", "HEAD").strip()
+            tree = git("rev-parse", "HEAD^{tree}").strip()
+            destination = m25_runtime_evidence.create(ROOT, head, tree, args.vm_name)
+            print(f"PASS M2.5 runtime evidence {destination.relative_to(ROOT)}")
+            return 0
         if args.cmd == "roadmap-sync":
             return roadmap_sync()
         if args.cmd == "qce-status":
@@ -12925,5 +15069,17 @@ def main() -> int:
     return 2
 
 
+def _native_uac_authority_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="lab-network-native-boot-authority-check")
+    parser.add_argument("--campaign-id", required=True)
+    parser.add_argument("--expected-vm-id", required=True)
+    parser.add_argument("--qualification-sha256", required=True)
+    args = parser.parse_args(argv)
+    return lab_network_native_boot_authority_check(
+        args.campaign_id, args.expected_vm_id, args.qualification_sha256)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["lab-network-native-boot-authority-check"]:
+        raise SystemExit(_native_uac_authority_cli(sys.argv[2:]))
     raise SystemExit(main())

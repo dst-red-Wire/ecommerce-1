@@ -34,12 +34,21 @@ repository_governance:
         - image-rocky-windows-native-prepare
         - image-rocky-windows-native-reboot
         - image-rocky-windows-native-recover
+        - image-rocky-windows-native-reset-failed
         - image-rocky-windows-native-self-test
         - image-rocky-windows-preflight
         - image-rocky-windows-qualify
         - image-rocky-windows-release
         - lab-clean
+        - lab-network-import
+        - lab-network-native-boot-prepare
+        - lab-network-native-boot-reboot
+        - lab-network-native-boot-recover
+        - lab-network-native-boot-self-test
+        - lab-network-native-prepare
+        - lab-network-resume
         - lab-network-smoke
+        - lab-network-status
         - lab-ssh-key
         - local-services-assets
         - local-services-capabilities
@@ -69,6 +78,7 @@ repository_governance:
         - product-benchmark
         - branch-cleanup
         - roadmap-check
+        - m25-runtime-evidence
         - roadmap-sync
         - qce-status
         - qce-trace
@@ -85,6 +95,7 @@ repository_governance:
         - frontend
         - service
         - affected
+        - qualification-impact
         - verify-change
         - global-check
         - qualification-proof
@@ -829,11 +840,13 @@ machine_contracts:
   progressive_delivery_policy: config/contracts/progressive-delivery-policy.yaml
   public_api_contracts: config/contracts/public-api-contracts.yaml
   qualification_execution_policy: config/contracts/qualification-execution-policy.yaml
+  qualification_step_evidence_schema: config/contracts/qualification-step-evidence.schema.json
   qualification_tools: config/contracts/qualification-tools.yaml
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
   roadmap_policy: config/contracts/roadmap-policy.yaml
   review_budget: config/contracts/review-budget.json
+  chatgpt_review_dispatch_policy: config/contracts/chatgpt-review-dispatch-policy.yaml
   review_policy: config/contracts/review-policy.yaml
   repository_authority_model: config/contracts/repository-authority-model.yaml
   runtime_efficiency: config/contracts/runtime-efficiency.yaml

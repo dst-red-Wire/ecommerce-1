@@ -3,14 +3,10 @@
 # architecture remains owned by config/infrastructure and architecture.lock.yaml.
 mgmt_local_vm_contract:
   schema_version: 1
-  status: superseded-rocky-9.8-evidence-only
-  replacement: config/contracts/machine-image-lock.yaml#packer_image.outputs.virtualbox
-  vagrant:
-    version: 2.4.9
-  rocky_box:
-    name: ecommerce/rocky-9.8-20260525.0
-    url: https://dl.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-Vagrant-Vbox-9.8-20260525.0.x86_64.vagrant.virtualbox.box
-    sha256: beace4853d89f5d1def29fca6eec8893564882d7db85841d3d9c287ac84fb9e4
+  status: active-rocky-10.2-exact-local-box
+  image_authority: config/contracts/machine-image-lock.yaml
+  box_resolution: scripts/rocky_box_catalog.py#find_matching_box
+  tool_authority: config/contracts/toolchain-lock.json
   resources:
     cpu_minimum: 2
     cpu_maximum: 4

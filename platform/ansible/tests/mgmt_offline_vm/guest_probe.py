@@ -22,6 +22,38 @@ def sha256(path):
     return digest.hexdigest()
 
 
+def verify_bundle_rpms(artifacts, installed_rows, compare_versions):
+    """Accept exact bundle NEVRAs or newer RPMs already supplied by the image."""
+    installed = {}
+    for row in installed_rows:
+        name, epoch, version, release, arch = row.split("\t")
+        nevra = f"{name}-{epoch}:{version}-{release}.{arch}"
+        installed.setdefault((name, arch), []).append(((epoch, version, release), nevra))
+    all_nevras = {nevra for variants in installed.values() for _, nevra in variants}
+    superseded = []
+    exact = 0
+    for item in artifacts:
+        if item["category"] != "rpm":
+            continue
+        expected = item["nevra"]
+        if expected in all_nevras:
+            exact += 1
+            continue
+        name = item["package"]
+        suffix = expected.removeprefix(name + "-")
+        assert suffix != expected, "manifest package and NEVRA differ"
+        epoch, version_release = suffix.split(":", 1)
+        version, release_arch = version_release.rsplit("-", 1)
+        release, arch = release_arch.rsplit(".", 1)
+        newer = [
+            nevra for label, nevra in installed.get((name, arch), ())
+            if compare_versions(label, (epoch, version, release)) > 0
+        ]
+        assert newer, f"manifest RPM is absent without a newer installed image package: {expected}"
+        superseded.append({"expected_nevra": expected, "installed_nevra": sorted(newer)[-1]})
+    return exact, sorted(superseded, key=lambda row: row["expected_nevra"])
+
+
 def main():
     restage = "--before-restage" in sys.argv or "--restage" in sys.argv
     selinux = output("getenforce")
@@ -59,10 +91,13 @@ def main():
     }, "only the generated non-root SSH identity may authenticate"
     systemd = subprocess.run(["systemctl", "is-system-running"], text=True, capture_output=True, check=False)
     result = {
+        "rocky_release": Path("/etc/rocky-release").read_text().strip(),
         "selinux": selinux,
         "ssh_access": ssh_access,
         "kernel": output("uname", "-r"),
         "online_cpus": os.cpu_count(),
+        "memory_kib": int(next(line.split()[1] for line in Path("/proc/meminfo").read_text().splitlines()
+                               if line.startswith("MemTotal:"))),
         "systemd": systemd.stdout.strip(),
         "public_connect_errno": errno,
         "ipv4_routes": routes,
@@ -89,11 +124,13 @@ def main():
         manifest_path = Path("/var/lib/ecommerce/bootstrap") / pin / "manifest.json"
         assert sha256(manifest_path) == pin
         manifest = json.loads(manifest_path.read_text())
-        expected = {item["nevra"] for item in manifest["artifacts"] if item["category"] == "rpm"}
-        installed = set(
-            output("rpm", "-qa", "--queryformat", "%{NAME}-%{EPOCHNUM}:%{VERSION}-%{RELEASE}.%{ARCH}\n").splitlines()
+        import rpm
+        installed_rows = output(
+            "rpm", "-qa", "--queryformat", "%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\n"
+        ).splitlines()
+        exact, superseded = verify_bundle_rpms(
+            manifest["artifacts"], installed_rows, rpm.labelCompare
         )
-        assert expected <= installed, "manifest NEVRAs missing after installation"
         images = {}
         for item in manifest["artifacts"]:
             if item["category"] in {"images-core", "images-cilium"}:
@@ -114,7 +151,9 @@ def main():
         assert services and "active" not in services, "RKE2 startup is outside this artifact-only trial"
         result.update(
             manifest_sha256=pin,
-            exact_installed_rpms=len(expected),
+            exact_installed_rpms=exact,
+            newer_image_rpms=superseded,
+            bundle_rpm_dependencies_satisfied=exact + len(superseded),
             staged_images=images,
             manifest_rke2_version=manifest["rke2_version"],
             rke2_selinux_modules=[row for row in output("semodule", "-l").splitlines() if "rke2" in row],

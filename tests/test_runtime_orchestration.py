@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -52,6 +53,66 @@ class ExecutionEnvironmentDetectionTests(unittest.TestCase):
         common = dict(environ={}, proc_version="", cgroup="", mountinfo="", docker_env=False, container_env=False)
         self.assertEqual("native_linux", detect_execution_environment(platform_name="linux", **common).name)
         self.assertEqual("unknown", detect_execution_environment(platform_name="darwin", **common).name)
+
+
+class WindowsInteropOutputTests(unittest.TestCase):
+    def test_invalid_console_bytes_do_not_abort_runtime_probe(self):
+        result = BuiltinCapabilityDriver._run(
+            [sys.executable, "-c", "import os; os.write(1, b'\\x82')"]
+        )
+        self.assertEqual(0, result.returncode)
+        self.assertEqual("\ufffd", result.stdout)
+
+    def test_windows_host_cpu_capacity_uses_windows_probe(self):
+        qualification = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        contract = yaml.safe_load((ROOT / "platform/ansible/tests/mgmt_offline_vm/contract.yml").read_text())
+        required_cpus = contract["mgmt_local_vm_contract"]["resources"]["rke2_server"]["cpus"]
+        item = RuntimePlanner(qualification["runtime_orchestration"]).resolve(
+            [CapabilityRequest("windows-host-cpu-capacity")]
+        )[-1]
+        command = item.parameters["command"]
+        self.assertEqual("command", item.spec.handler)
+        self.assertEqual("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", command[0])
+        self.assertEqual("-NonInteractive", command[2])
+        self.assertEqual(
+            f"if ([Environment]::ProcessorCount -ge {required_cpus}) {{ exit 0 }} else {{ exit 1 }}",
+            command[-1],
+        )
+        driver = BuiltinCapabilityDriver()
+        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess(command, 0, "", "")) as probe:
+            state = driver.capture(item)
+        self.assertEqual(command, probe.call_args.args[0])
+        self.assertTrue(state["satisfied"])
+        self.assertEqual("PASS", driver.preflight(item, state)["status"])
+
+    def test_windows_host_cpu_probe_fails_closed_when_powershell_rejects_host(self):
+        qualification = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        item = RuntimePlanner(qualification["runtime_orchestration"]).resolve(
+            [CapabilityRequest("windows-host-cpu-capacity")]
+        )[-1]
+        driver = BuiltinCapabilityDriver()
+        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess([], 1, "", "insufficient CPUs")):
+            state = driver.capture(item)
+        self.assertFalse(state["satisfied"])
+        with self.assertRaisesRegex(RuntimeBlocked, "windows-host-cpu-capacity"):
+            driver.preflight(item, state)
+
+    def test_linux_cpu_capacity_still_uses_local_cpu_count(self):
+        item = planned("cpu-capacity", "cpu")
+        item = PlannedCapability(item.spec, {"minimum_count": 2})
+        driver = BuiltinCapabilityDriver()
+        with mock.patch("scripts.runtime_orchestration.os.cpu_count", return_value=2):
+            state = driver.capture(item)
+        self.assertEqual(2, state["available_count"])
+        self.assertEqual("PASS", driver.preflight(item, state)["status"])
+
+    def test_rke2_policy_requires_windows_host_cpu_and_interop(self):
+        policy = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        names = [item["name"] for item in policy["workflows"]["rke2_local_virtualbox"]["runtime_capabilities"]]
+        self.assertIn("windows-host-cpu-capacity", names)
+        self.assertNotIn("cpu-capacity", names)
+        self.assertEqual(["wsl-windows-interop"],
+                         policy["runtime_orchestration"]["capabilities"]["windows-host-cpu-capacity"]["requires"])
 
 
 def capability(
