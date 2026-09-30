@@ -16,6 +16,7 @@ import contextvars
 import copy
 import errno
 import fcntl
+import gzip
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import functools
@@ -23,6 +24,7 @@ import hashlib
 import json
 import math
 import os
+import pwd
 from pathlib import Path, PureWindowsPath
 import re
 import shlex
@@ -56,6 +58,8 @@ _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default
 _PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 _NATIVE_UAC_CONTROLLER_PATH = contextvars.ContextVar("native_uac_controller_path", default=None)
+_NATIVE_UAC_RUNTIME_LOCK_HELD = contextvars.ContextVar("native_uac_runtime_lock_held", default=False)
+_NATIVE_UAC_FRESH_QUALIFICATION = contextvars.ContextVar("native_uac_fresh_qualification", default=None)
 
 
 def _modern_engineering_api():
@@ -104,11 +108,21 @@ except ModuleNotFoundError as exc:
     publish_remote_status = _missing_repository_delivery
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
-ROOT = Path(subprocess.check_output(["git", "rev-parse", "--show-toplevel"], text=True).strip())
+_NATIVE_UAC_MODE = os.environ.get("REPOCTL_TRUSTED_NATIVE_UAC") == "1"
+_NATIVE_UAC_GIT = ["/usr/bin/git", "-c", "core.fsmonitor=false",
+                   "-c", "core.hooksPath=/dev/null"]
+ROOT = Path(subprocess.check_output(
+    [*(_NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]),
+     "rev-parse", "--show-toplevel"], text=True).strip())
+
+
+def _toolchain_policy_root() -> Path:
+    # Native UAC runs the base controller with the PR checkout as cwd.
+    return SCRIPT_DIR.parent if _NATIVE_UAC_MODE else ROOT
 
 
 def _raw_toolchain_lock() -> dict:
-    return json.loads((ROOT / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
+    return json.loads((_toolchain_policy_root() / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
 
 
 def managed_bin_dirs() -> tuple[Path, ...]:
@@ -137,7 +151,7 @@ def toolchain_projection_path(name: str) -> Path:
     relative = projection.get("path") if isinstance(projection, dict) else None
     if not isinstance(relative, str) or not relative:
         raise RuntimeError(f"central toolchain lock missing projection path: {name}")
-    return ROOT / relative
+    return _toolchain_policy_root() / relative
 
 
 def ansible_collections_root() -> Path:
@@ -145,10 +159,16 @@ def ansible_collections_root() -> Path:
     relative = config.get("collections_install_root") if isinstance(config, dict) else None
     if not isinstance(relative, str) or not relative:
         raise RuntimeError("central toolchain lock missing Ansible collections_install_root")
-    return ROOT / relative
+    return _toolchain_policy_root() / relative
 
 
-os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
+if _NATIVE_UAC_MODE:
+    # The base wrapper supplies this fixed system path. Managed bins are user
+    # writable and must not shadow Git/Ruby while deciding elevation authority.
+    if os.environ.get("PATH") != "/usr/bin:/bin:/usr/local/bin":
+        raise RuntimeError("native UAC controller requires the wrapper's system tool path")
+else:
+    os.environ["PATH"] = f"{os.pathsep.join(str(path) for path in managed_bin_dirs())}{os.pathsep}{os.environ.get('PATH', '')}"
 PROJECT_COLLECTIONS = ansible_collections_root()
 # Every Ansible subprocess resolves collections from the project-owned path only.
 # This prevents a user or distro installation from silently changing execution.
@@ -1041,6 +1061,9 @@ def run(
     # A JSON pr-loop owns stdout exclusively; child diagnostics must not escape there.
     diagnostic_capture = not capture and _PR_LOOP_JSON_STDOUT.get() is not None
     capture = capture or diagnostic_capture
+    if (_NATIVE_UAC_MODE and cmd and cmd[0] in {"git", "/usr/bin/git"}
+        and cmd[:len(_NATIVE_UAC_GIT)] != _NATIVE_UAC_GIT):
+        cmd = [*_NATIVE_UAC_GIT, *cmd[1:]]
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -1065,7 +1088,8 @@ def output(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | Non
 
 
 def git(*args: str, check: bool = True) -> str:
-    p = run(["git", *args], check=check, capture=True)
+    command = _NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]
+    p = run([*command, *args], check=check, capture=True)
     return p.stdout
 
 
@@ -1177,6 +1201,7 @@ def _review_policy_document() -> dict:
 
 
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
+_NATIVE_UAC_QUALIFICATION_POLICY: tuple[Path, dict] | None = None
 
 
 def _completed_proof_inputs_unchanged(
@@ -1257,15 +1282,21 @@ def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
     if qualification_steps is None:
         raise RuntimeError("qualification step validator is required")
-    global _QUALIFICATION_EXECUTION_POLICY
-    if _QUALIFICATION_EXECUTION_POLICY is None:
-        lock = ruby_yaml("architecture.lock.yaml")
+    global _QUALIFICATION_EXECUTION_POLICY, _NATIVE_UAC_QUALIFICATION_POLICY
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    if (native_controller and (
+        _NATIVE_UAC_QUALIFICATION_POLICY is None
+        or _NATIVE_UAC_QUALIFICATION_POLICY[0] != policy_root
+    )) or (not native_controller and _QUALIFICATION_EXECUTION_POLICY is None):
+        lock = ruby_yaml(str(policy_root / "architecture.lock.yaml"))
         relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
         if not isinstance(relative, str) or not relative.strip():
             raise RuntimeError("architecture.lock.yaml must register machine_contracts.qualification_execution_policy")
-        policy = ruby_yaml(relative)
-        qualification_steps.validate_policy(policy, ROOT)
-        properties_policy = ruby_yaml(policy["step_qualification"]["properties_authority"])
+        policy = ruby_yaml(str(policy_root / relative))
+        qualification_steps.validate_policy(policy, policy_root)
+        properties_policy = ruby_yaml(str(
+            policy_root / policy["step_qualification"]["properties_authority"]))
         if (
             properties_policy.get("version") != 1
             or properties_policy.get("kind") != "ExecutionPropertiesPolicy"
@@ -1646,7 +1677,13 @@ def qualification_execution_policy() -> dict:
             or campaign.get("blocking_for_campaign_result") is not True
         ):
             raise RuntimeError("performance_campaign workflow contract is invalid")
-        _QUALIFICATION_EXECUTION_POLICY = policy
+        if native_controller:
+            _NATIVE_UAC_QUALIFICATION_POLICY = (policy_root, policy)
+        else:
+            _QUALIFICATION_EXECUTION_POLICY = policy
+    if native_controller:
+        assert _NATIVE_UAC_QUALIFICATION_POLICY is not None
+        return copy.deepcopy(_NATIVE_UAC_QUALIFICATION_POLICY[1])
     return copy.deepcopy(_QUALIFICATION_EXECUTION_POLICY)
 
 
@@ -4731,7 +4768,9 @@ def _fresh_evidence(evidence: dict) -> bool:
 
 def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
     """Conservatively bind declared gates and their transitive tool providers."""
-    contract = json.loads((ROOT / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    contract = json.loads((policy_root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
     required = {name for names in contract["gate_requirements"].values() for name in names}
@@ -4890,7 +4929,10 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
 
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
     require("ruby")
-    command = ["ruby", "scripts/ci-affected.rb", "--base", base, "--head", head, "--format", "json"]
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    script = (str(Path(native_controller).resolve().parents[1] / "scripts/ci-affected.rb")
+              if native_controller else "scripts/ci-affected.rb")
+    command = ["ruby", script, "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
     p = run(command, capture=True)
@@ -10200,12 +10242,128 @@ def lab_network_native_prepare(campaign_id: str,
 
 
 _NATIVE_UAC_REPOSITORY = "dst-red-Wire/ecommerce-1"
+_NATIVE_UAC_RUNNER_NAMES = (
+    "LabNativeBoot.ps1", "LabNetworkSmoke.ps1", "RockyImagePipeline.psm1",
+    "NativeVagrantSshSmoke.ps1", "LabNetworkSeed.ps1", "LabSshIdentity.ps1",
+    "local-services-seed-server.ps1",
+)
 
 
-def _native_uac_pinned_gh() -> tuple[str, str, str]:
+def _native_uac_trusted_context(action: str) -> dict[str, object]:
+    """Accept native elevation only from an executing exact-base controller."""
+    if os.environ.get("REPOCTL_TRUSTED_NATIVE_UAC") != "1":
+        raise RuntimeError("native UAC requires the exact-base trusted controller")
+    if action != "Recover":
+        if os.environ.get("REPOCTL_TRUSTED_NATIVE_RECOVERY"):
+            raise RuntimeError("native recovery context cannot authorize an elevated run")
+        # The regular delivery context caches its result. Native preparation has
+        # multiple boundaries, so every call must reread both checkouts.
+        global _TRUSTED_PR_EXECUTION_CONTEXT
+        _TRUSTED_PR_EXECUTION_CONTEXT = None
+        context = _require_trusted_pr_execution()
+        if (context["trusted_root"] == context["target_root"]
+            or context["base_sha"] == context["head_sha"]):
+            raise RuntimeError("native UAC cannot authorize itself from the target PR")
+        return context
+    if os.environ.get("REPOCTL_TRUSTED_NATIVE_RECOVERY") != "1":
+        raise RuntimeError("native recovery requires the base-owned offline recovery context")
+    names = (
+        "REPOCTL_TRUSTED_WRAPPER", "REPOCTL_TRUSTED_CONTROLLER",
+        "REPOCTL_TRUSTED_POLICY_ROOT", "REPOCTL_TRUSTED_TARGET_ROOT",
+        "REPOCTL_TRUSTED_BASE_SHA",
+    )
+    values = {name: os.environ.get(name, "").strip() for name in names}
+    if not all(values.values()):
+        raise RuntimeError("native recovery trusted context is incomplete")
+    if os.environ.get("REPOCTL_TRUSTED_HEAD_SHA") or os.environ.get("REPOCTL_TRUSTED_PR_NUMBER"):
+        raise RuntimeError("native recovery must not reuse a reviewed PR context")
+    if any(not Path(value).is_absolute() for name, value in values.items()
+           if name != "REPOCTL_TRUSTED_BASE_SHA"):
+        raise RuntimeError("native recovery trusted paths must be absolute")
+    base_sha = values["REPOCTL_TRUSTED_BASE_SHA"]
+    if re.fullmatch(r"[0-9a-f]{40}", base_sha) is None:
+        raise RuntimeError("native recovery exact base SHA is invalid")
+    trusted_root = Path(values["REPOCTL_TRUSTED_POLICY_ROOT"])
+    target_root = Path(values["REPOCTL_TRUSTED_TARGET_ROOT"])
+    wrapper = Path(values["REPOCTL_TRUSTED_WRAPPER"])
+    controller = Path(values["REPOCTL_TRUSTED_CONTROLLER"])
+    if (not trusted_root.is_dir() or trusted_root.is_symlink()
+        or trusted_root.resolve(strict=True) != trusted_root
+        or trusted_root == ROOT.resolve()
+        or target_root != ROOT.resolve()
+        or wrapper != trusted_root / "scripts/repository_delivery.py"
+        or controller != trusted_root / "scripts/repoctl.py"
+        or Path(__file__).resolve() != controller):
+        raise RuntimeError("native recovery is not running from the exact-base controller")
+
+    def base_git(*args: str, binary: bool = False):
+        result = subprocess.run(
+            [*_NATIVE_UAC_GIT, "-C", str(trusted_root), *args], capture_output=True,
+            text=not binary, check=False, timeout=30)
+        if result.returncode:
+            raise RuntimeError("native recovery exact-base Git verification failed")
+        return result.stdout if binary else result.stdout.strip()
+
+    if (base_git("rev-parse", "--show-toplevel") != str(trusted_root)
+        or base_git("rev-parse", "HEAD") != base_sha
+        or base_git("status", "--porcelain=v1", "--untracked-files=all")):
+        raise RuntimeError("native recovery exact-base checkout is not clean")
+    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py"):
+        file = trusted_root / relative
+        if (file.is_symlink() or not file.is_file()
+            or file.resolve(strict=True) != file
+            or not base_git("ls-files", "--error-unmatch", "--", relative)
+            or file.read_bytes() != base_git("show", f"{base_sha}:{relative}", binary=True)):
+            raise RuntimeError(f"native recovery exact-base file differs: {relative}")
+    return {"trusted_root": trusted_root, "target_root": target_root,
+            "base_sha": base_sha}
+
+
+def _native_uac_runner_manifest(binding) -> dict[str, str]:
+    """Bind the complete fixed Windows runner allowlist to reviewed Git bytes."""
+    attributes = ROOT / ".gitattributes"
+    attribute_blob = subprocess.run(
+        [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:.gitattributes"],
+        cwd=ROOT, capture_output=True, check=False, timeout=30)
+    if (attributes.is_symlink() or not attributes.is_file()
+        or attribute_blob.returncode or attributes.read_bytes() != attribute_blob.stdout
+        or b"*.ps1 text eol=crlf" not in attribute_blob.stdout.splitlines()):
+        raise RuntimeError("native UAC PowerShell checkout attribute differs from reviewed Git")
+    digests: dict[str, str] = {}
+    entries: list[bytes] = []
+    for name in sorted(_NATIVE_UAC_RUNNER_NAMES):
+        relative = f"scripts/windows/{name}"
+        file = ROOT / relative
+        if file.is_symlink() or not file.is_file() or file.resolve(strict=True) != file:
+            raise RuntimeError(f"native UAC runner path is unsafe: {relative}")
+        tree_line = git("ls-tree", binding.head_sha, "--", relative).strip()
+        if (not tree_line.startswith(("100644 blob ", "100755 blob "))
+            or not tree_line.endswith("\t" + relative)):
+            raise RuntimeError(f"native UAC runner is not a regular tracked Git file: {relative}")
+        result = subprocess.run(
+            [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:{relative}"], cwd=ROOT,
+            capture_output=True, check=False, timeout=30)
+        raw = file.read_bytes()
+        projected = raw.replace(b"\r\n", b"\n") if name.endswith(".ps1") else raw
+        if (result.returncode or b"\r" in projected or projected != result.stdout):
+            raise RuntimeError(f"native UAC runner bytes differ from reviewed Git: {relative}")
+        digest = hashlib.sha256(raw).hexdigest()
+        digests[name] = digest
+        entries.append(relative.encode("utf-8") + b"\0" + digest.encode("ascii") + b"\n")
+    manifest = hashlib.sha256(b"".join(entries)).hexdigest()
+    expected = os.environ.get("REPOCTL_TRUSTED_NATIVE_RUNNER_MANIFEST_SHA256", "")
+    if re.fullmatch(r"[0-9a-f]{64}", expected) is None or manifest != expected:
+        raise RuntimeError("native UAC reviewed runner manifest changed")
+    return digests
+
+
+def _native_uac_pinned_gh(trusted_root: str) -> tuple[str, str, str]:
     from managed_gh import resolve_managed_gh
 
-    return resolve_managed_gh(ROOT)
+    root = Path(trusted_root)
+    if not root.is_absolute() or root.resolve(strict=True) != root:
+        raise ValueError("native UAC managed gh requires the exact-base checkout")
+    return resolve_managed_gh(root)
 
 
 def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
@@ -10326,13 +10484,27 @@ def _native_boot_powershell_literal(value: str) -> str:
 
 
 def _native_boot_encoded(source: str) -> str:
-    return base64.b64encode(source.encode("utf-16-le")).decode("ascii")
+    """Keep the base-owned UAC bootstrap self-contained within Windows' CLI limit."""
+    packed = base64.b64encode(gzip.compress(source.encode("utf-8"), mtime=0)).decode("ascii")
+    loader = (
+        "$bytes=[Convert]::FromBase64String('" + packed + "');"
+        "$memory=[IO.MemoryStream]::new($bytes);"
+        "$zip=[IO.Compression.GZipStream]::new($memory,"
+        "[IO.Compression.CompressionMode]::Decompress);"
+        "$reader=[IO.StreamReader]::new($zip,[Text.Encoding]::UTF8);"
+        "try { & ([ScriptBlock]::Create($reader.ReadToEnd())) }"
+        "finally { $reader.Dispose();$zip.Dispose();$memory.Dispose() }"
+    )
+    return base64.b64encode(loader.encode("utf-16-le")).decode("ascii")
 
 
 def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
                              distribution: str, repo_windows: str,
                              expected_vm_id: str = "", binding=None,
-                             pinned_gh: tuple[str, str, str] | None = None) -> str:
+                             pinned_gh: tuple[str, str, str] | None = None,
+                             runner_digests: dict[str, str] | None = None,
+                             trusted_root: str = "",
+                             qualification_witness: str = "") -> str:
     """Build the only code run elevated before the protected runner is verified."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         raise ValueError("unsupported native bootstrap action")
@@ -10343,11 +10515,18 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
     if (not repo_windows.startswith("\\\\wsl.localhost\\" + distribution + "\\")
         or re.search(r"[\r\n]", repo_windows)):
         raise ValueError("native bootstrap requires the exact WSL UNC repository")
-    if action in {"Prepare", "SelfTest"} and re.fullmatch(
+    reviewed = action in {"Prepare", "SelfTest", "Reboot"}
+    if reviewed and re.fullmatch(
         r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id
     ) is None:
-        raise ValueError("native Prepare/SelfTest requires an explicit VM UUID")
-    if action in {"Prepare", "SelfTest"}:
+        raise ValueError("native reviewed action requires an explicit VM UUID")
+    if reviewed:
+        if (re.fullmatch(r"/[A-Za-z0-9._/-]+", trusted_root or "") is None
+            or ".." in Path(trusted_root).parts
+            or re.fullmatch(r"/[A-Za-z0-9._/-]+", str(ROOT)) is None
+            or ".." in ROOT.parts
+            or re.fullmatch(r"[0-9a-f]{64}", qualification_witness or "") is None):
+            raise ValueError("native bootstrap requires a safe base root and fresh qualification witness")
         from exact_pr_binding import ExactPRBinding
 
         if (not isinstance(binding, ExactPRBinding)
@@ -10369,7 +10548,19 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
             or not pinned_gh[0].endswith(
                 f"/tools/gh-{pinned_gh[1]}/bin/gh")):
             raise ValueError("native bootstrap requires the verified managed gh binary")
+        if (not isinstance(runner_digests, dict)
+            or set(runner_digests) != set(_NATIVE_UAC_RUNNER_NAMES)
+            or any(not isinstance(value, str)
+                   or re.fullmatch(r"[0-9a-f]{64}", value) is None
+                   for value in runner_digests.values())):
+            raise ValueError("native bootstrap requires all seven reviewed runner digests")
     token = uuid.uuid4().hex
+    manifest_lines = b"".join(
+        f"scripts/windows/{name}".encode("utf-8") + b"\0"
+        + runner_digests[name].encode("ascii") + b"\n"
+        for name in sorted(_NATIVE_UAC_RUNNER_NAMES)
+    ) if runner_digests else b""
+    runner_manifest = hashlib.sha256(manifest_lines).hexdigest() if runner_digests else ""
     values = {
         "@@ACTION@@": action,
         "@@CAMPAIGN@@": campaign_id,
@@ -10387,6 +10578,9 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
         "@@GH_VERSION@@": pinned_gh[1] if pinned_gh else "",
         "@@GH_SHA256@@": pinned_gh[2] if pinned_gh else "",
         "@@TOKEN@@": token,
+        "@@RUNNER_MANIFEST@@": runner_manifest,
+        "@@TRUSTED_ROOT@@": trusted_root,
+        "@@QUALIFICATION_WITNESS@@": qualification_witness,
     }
     script = r"""
 Set-StrictMode -Version Latest
@@ -10407,6 +10601,9 @@ $g = @@GH_PATH@@
 $v = @@GH_VERSION@@
 $d = @@GH_SHA256@@
 $token = @@TOKEN@@
+$runnerManifest = @@RUNNER_MANIFEST@@
+$trustedRoot = @@TRUSTED_ROOT@@
+$qualificationWitness = @@QUALIFICATION_WITNESS@@
 $system = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $wsl = Join-Path $system 'System32\wsl.exe'
 $adminSid = [Security.Principal.SecurityIdentifier]'S-1-5-32-544'
@@ -10517,6 +10714,10 @@ function Assert-ProgramFiles {
 }
 function Invoke-WslBounded {
     param([string[]]$Arguments, [int]$TimeoutSeconds)
+    if ($Arguments.Count -gt 1 -and $Arguments[0] -ceq '/usr/bin/git') {
+        $Arguments = @('/usr/bin/git','-c','core.fsmonitor=false',
+            '-c','core.hooksPath=/dev/null') + @($Arguments[1..($Arguments.Count - 1)])
+    }
     foreach ($argument in $Arguments) {
         if ($argument -match '[\s"]') { throw 'unsafe WSL argument' }
     }
@@ -10544,6 +10745,17 @@ function Invoke-WslBounded {
     }
     finally { $process.Dispose() }
 }
+function Assert-CurrentAuthority {
+    $wrapper = $trustedRoot + '/scripts/repository_delivery.py'
+    [void](Invoke-WslBounded -Arguments @(
+        '/usr/bin/python3','-I',$wrapper,'trusted-native-uac',
+        '--action','Verify','--target-root',$repoWsl,'--pr',$prNumber,
+        '--campaign-id',$campaign,'--expected-vm-id',$expectedVmId,
+        '--head-sha',$sha,'--base-sha',$prBaseSha,
+        '--runner-manifest-sha256',$runnerManifest,
+        '--qualification-sha256',$qualificationWitness
+    ) -TimeoutSeconds 900)
+}
 function Get-GitBlobSha1 {
     param([byte[]]$Bytes)
     $utf8 = [Text.UTF8Encoding]::new($false,$true)
@@ -10557,6 +10769,51 @@ function Get-GitBlobSha1 {
     $digest = [Security.Cryptography.SHA1]::Create()
     try { return -join ($digest.ComputeHash($blob) | ForEach-Object { $_.ToString('x2') }) }
     finally { $digest.Dispose() }
+}
+function Assert-ShadowRunnerBytes {
+    param([string]$RunnerRoot, [string]$Action)
+    $manifestFile = Join-Path $RunnerRoot 'runner.json'
+    Assert-Protected -Path $manifestFile -Directory $false
+    $stored = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($manifestFile)) -ErrorAction Stop
+    if ($stored.source_sha -cne $sha -or $stored.campaign_id -cne $campaign -or
+        $stored.runner_files.PSObject.Properties.Count -ne 7) {
+        throw 'protected shadow runner manifest identity differs'
+    }
+    if ($Action -eq 'Recover') {
+        $stateFile = Join-Path $shadow 'native-boot.json'
+        Assert-Protected -Path $stateFile -Directory $false
+        $state = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($stateFile)) -ErrorAction Stop
+        $manifestDigest = (Get-FileHash -LiteralPath $manifestFile -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($state.source_sha -cne $sha -or $state.campaign_id -cne $campaign -or
+            [string]$state.runner_manifest_sha256 -cne $manifestDigest) {
+            throw 'protected recovery runner manifest differs from prepared state'
+        }
+    }
+    $manifestText = ''
+    foreach ($name in @(
+        'LabNativeBoot.ps1','LabNetworkSeed.ps1','LabNetworkSmoke.ps1',
+        'LabSshIdentity.ps1','NativeVagrantSshSmoke.ps1','RockyImagePipeline.psm1',
+        'local-services-seed-server.ps1')) {
+        $file = Join-Path (Join-Path $RunnerRoot 'scripts\windows') $name
+        Assert-Protected -Path $file -Directory $false
+        $digest = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
+        $expected = [string]$stored.runner_files.PSObject.Properties[$name].Value
+        if ($expected -notmatch '^[0-9a-f]{64}$' -or $digest -cne $expected) {
+            throw "protected shadow runner digest differs: $name"
+        }
+        $manifestText += 'scripts/windows/' + $name + [char]0 + $digest + [char]10
+    }
+    if ($Action -eq 'Reboot') {
+        $hash = [Security.Cryptography.SHA256]::Create()
+        try {
+            $actual = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($manifestText)) |
+                ForEach-Object { $_.ToString('x2') })
+        }
+        finally { $hash.Dispose() }
+        if ($actual -cne $runnerManifest) {
+            throw 'protected shadow runner differs from reviewed PR manifest'
+        }
+    }
 }
 function Assert-PublishedHead {
     foreach ($tool in @('/usr/bin/git',$g)) {
@@ -10599,10 +10856,15 @@ if (-not [IO.Directory]::Exists($base)) {
 Assert-Protected -Path $base -Directory $true
 $shadow = Join-Path $base ($campaign + '-' + $sha)
 if ($action -in @('Prepare','SelfTest')) {
+    Assert-CurrentAuthority
     $bootstrap = Join-Path $base ('bootstrap-' + $sha + '-' + $token)
     [void][IO.Directory]::CreateDirectory($bootstrap,(New-ProtectedAcl -Directory $true))
     Assert-Protected -Path $bootstrap -Directory $true
-    foreach ($name in @('LabNativeBoot.ps1','RockyImagePipeline.psm1')) {
+    $manifestText = ''
+    foreach ($name in @(
+        'LabNativeBoot.ps1','LabNetworkSeed.ps1','LabNetworkSmoke.ps1',
+        'LabSshIdentity.ps1','NativeVagrantSshSmoke.ps1','RockyImagePipeline.psm1',
+        'local-services-seed-server.ps1')) {
         $source = Join-Path (Join-Path $repoWindows 'scripts\windows') $name
         $target = Join-Path $bootstrap $name
         $bytes = [IO.File]::ReadAllBytes($source)
@@ -10616,8 +10878,20 @@ if ($action -in @('Prepare','SelfTest')) {
             (Get-GitBlobSha1 -Bytes ([IO.File]::ReadAllBytes($target))) -ne $object) {
             throw "copied script differs from Git: $name"
         }
+        $digest = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant()
+        $manifestText += $relative + [char]0 + $digest + [char]10
+    }
+    $hash = [Security.Cryptography.SHA256]::Create()
+    try {
+        $actualManifest = -join ($hash.ComputeHash([Text.Encoding]::UTF8.GetBytes($manifestText)) |
+            ForEach-Object { $_.ToString('x2') })
+    }
+    finally { $hash.Dispose() }
+    if ($actualManifest -cne $runnerManifest) {
+        throw 'protected runner SHA-256 manifest differs'
     }
     Assert-PublishedHead
+    Assert-CurrentAuthority
     $runner = Join-Path $bootstrap 'LabNativeBoot.ps1'
     & $runner -Action SelfTest
     if (-not $?) { throw 'Protected elevated native boot SelfTest failed' }
@@ -10627,6 +10901,7 @@ if ($action -in @('Prepare','SelfTest')) {
 }
 else {
     Assert-Protected -Path $shadow -Directory $true
+    if ($action -eq 'Reboot') { Assert-CurrentAuthority }
     $runnerRoot = Join-Path $shadow ('runner-' + $sha)
     Assert-Protected -Path $runnerRoot -Directory $true
     $runnerScripts = Join-Path $runnerRoot 'scripts'
@@ -10637,6 +10912,8 @@ else {
     $module = Join-Path $runnerScripts 'RockyImagePipeline.psm1'
     Assert-Protected -Path $runner -Directory $false
     Assert-Protected -Path $module -Directory $false
+    Assert-ShadowRunnerBytes -RunnerRoot $runnerRoot -Action $action
+    if ($action -eq 'Reboot') { Assert-CurrentAuthority }
     & $runner -Action $action -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl
 }
 """
@@ -10653,7 +10930,7 @@ def _native_boot_elevation_command(powershell: Path, bootstrap: str) -> list[str
     return command
 
 
-def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
+def _native_boot_shadow_state(campaign_id: str, action: str) -> dict:
     """Locate the one protected prepared state without consulting a later Git HEAD."""
     matches = list(NATIVE_SHADOW_BASE.glob(f"{campaign_id}-" + "[0-9a-f]" * 40))
     if len(matches) != 1:
@@ -10680,19 +10957,27 @@ def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
         or state["vm_id"].casefold() != state["expected_vm_id"].casefold()
         or (action == "Reboot" and state.get("phase") != "PREPARED")):
         raise ValueError("native boot protected state identity or phase differs")
-    return source_sha
+    return state
+
+
+def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
+    return str(_native_boot_shadow_state(campaign_id, action)["source_sha"])
 
 
 def _native_uac_worktree_matches(binding) -> tuple[bool, str]:
-    """Keep the same local commit and branch throughout native preparation."""
+    """Keep the complete reviewed tree and local identity exact at each boundary."""
     try:
+        from repository_delivery import _native_child_environment, _native_verify_base_tree
+
+        _native_verify_base_tree(
+            ROOT, binding.head_sha, environment=_native_child_environment())
         if git("status", "--porcelain", "--untracked-files=all").strip():
             return False, "native UAC exact-SHA worktree became dirty"
         if git("rev-parse", "HEAD").strip() != binding.head_sha:
             return False, "native UAC HEAD_CHANGED during preparation"
         if git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != binding.head_branch:
             return False, "native UAC branch changed during preparation"
-    except RuntimeError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         return False, f"native UAC local Git identity is unavailable: {exc}"
     return True, "native UAC local Git identity remains exact"
 
@@ -10708,7 +10993,7 @@ def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
 
     def git_read(*args: str, binary: bool = False):
         result = subprocess.run(
-            ["git", "-C", str(root), *args], capture_output=True,
+            [*_NATIVE_UAC_GIT, "-C", str(root), *args], capture_output=True,
             text=not binary, check=False, timeout=30)
         if result.returncode:
             raise RuntimeError("native UAC exact-base Git verification failed")
@@ -10718,7 +11003,8 @@ def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
         or git_read("rev-parse", "HEAD") != binding.base_sha
         or git_read("status", "--porcelain=v1", "--untracked-files=all")):
         raise ValueError("native UAC trusted checkout is not clean at the bound base SHA")
-    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py"):
+    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py",
+                     "scripts/performance_audit.py"):
         source = root / relative
         if (source.is_symlink() or not source.is_file()
             or source.resolve(strict=True) != source
@@ -10726,12 +11012,44 @@ def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
             raise ValueError(f"native UAC trusted controller source is unsafe: {relative}")
         if source.read_bytes() != git_read("show", f"{binding.base_sha}:{relative}", binary=True):
             raise ValueError(f"native UAC trusted controller differs from Git: {relative}")
-    return root / "scripts/repoctl.py"
+    from repository_delivery import _native_child_environment, _native_verify_controller
+
+    verified_sha, verified_wrapper, verified_controller = _native_verify_controller(
+        root, environment=_native_child_environment())
+    if (verified_sha != binding.base_sha
+        or verified_wrapper != root / "scripts/repository_delivery.py"
+        or verified_controller != root / "scripts/repoctl.py"):
+        raise ValueError("native UAC exact-base tree verification changed")
+    return verified_controller
 
 
-def _native_uac_qualification_matches(binding, trusted_root: str) -> tuple[bool, str]:
-    """Require current exact-SHA proof from the validated exact-base controller."""
+def _native_uac_qualification_witness(binding, evidence: Path, audit: Path) -> str:
+    """Bind exact-base qualification results to the bytes actually checked."""
+    digests: list[str] = []
+    for path in (evidence, audit):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("native UAC qualification artifact is unsafe")
+        digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    payload = (b"native-uac-qualification-v1\0"
+               + binding.base_sha.encode("ascii") + b"\0"
+               + binding.head_sha.encode("ascii") + b"\0"
+               + digests[0].encode("ascii") + b"\0" + digests[1].encode("ascii"))
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _native_uac_qualification_matches(binding, trusted_root: str,
+                                      expected_witness: str | None = None) -> tuple[bool, str]:
+    """Reject local JSON unless it matches a fresh base-controller execution."""
     try:
+        witness = expected_witness
+        if witness is None:
+            fresh = _NATIVE_UAC_FRESH_QUALIFICATION.get()
+            if (not isinstance(fresh, tuple) or len(fresh) != 3
+                or fresh[:2] != (binding.base_sha, binding.head_sha)):
+                return False, "native UAC fresh exact-base qualification witness is absent"
+            witness = fresh[2]
+        if not isinstance(witness, str) or re.fullmatch(r"[0-9a-f]{64}", witness) is None:
+            return False, "native UAC qualification witness is malformed"
         controller = _native_uac_trusted_controller(binding, trusted_root)
         token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
         try:
@@ -10741,45 +11059,136 @@ def _native_uac_qualification_matches(binding, trusted_root: str) -> tuple[bool,
             _NATIVE_UAC_CONTROLLER_PATH.reset(token)
         if evidence is None or audit is None:
             return False, "native UAC exact-SHA qualification PASS evidence is absent or invalid"
+        if _native_uac_qualification_witness(binding, evidence, audit) != witness:
+            return False, "native UAC qualification artifacts differ from the fresh witness"
         if _native_uac_trusted_controller(binding, trusted_root) != controller:
             return False, "native UAC exact-base controller changed during qualification verification"
     except Exception as exc:
         return False, f"native UAC exact-SHA qualification is unavailable: {exc}"
-    return True, "native UAC exact-SHA qualification remains PASS"
+    return True, "native UAC fresh exact-base qualification remains PASS"
+
+
+def _native_uac_fresh_qualification(context: dict[str, object], campaign_id: str,
+                                    expected_vm_id: str, action: str) -> str:
+    """Execute every authoritative gate and audit before the native runtime lock."""
+    from exact_pr_binding import resolve_exact_open_pr
+
+    base_root = str(context["trusted_root"])
+    source_sha = str(context["head_sha"])
+    branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+    pinned_gh = _native_uac_pinned_gh(base_root)
+    binding = resolve_exact_open_pr(
+        _NATIVE_UAC_REPOSITORY, source_sha, branch, "main", gh=pinned_gh[0])
+    _require_trusted_pr_execution(
+        pr_number=binding.pr_number, base_sha=binding.base_sha,
+        head_sha=binding.head_sha)
+    _native_uac_runner_manifest(binding)
+    stable, reason = _native_uac_worktree_matches(binding)
+    if not stable:
+        raise RuntimeError(reason)
+    if action == "Reboot":
+        state = _native_boot_shadow_state(campaign_id, action)
+        if state["source_sha"] != source_sha or state["expected_vm_id"] != expected_vm_id:
+            raise RuntimeError("native UAC protected state changed before qualification")
+    authorized, reason = _native_uac_review_gate(
+        pinned_gh[0], binding, campaign_id, expected_vm_id)
+    if not authorized:
+        raise RuntimeError(reason)
+
+    controller = _native_uac_trusted_controller(binding, base_root)
+    evidence_path = CONTEXT / "evidence" / f"{source_sha}.json"
+    token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
+    try:
+        audit_path = _qualification_audit_path(source_sha)
+        for artifact in (evidence_path, audit_path):
+            if (artifact.is_symlink() or CONTEXT.is_symlink()
+                or artifact.parent.is_symlink()
+                or not artifact.resolve().is_relative_to(ROOT.resolve())):
+                raise RuntimeError("native UAC qualification artifact path is unsafe")
+            artifact.unlink(missing_ok=True)
+        previous_force = os.environ.get("ECOMMERCE_FORCE_FULL_QUALIFICATION")
+        os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
+        try:
+            verified = verify_change(binding.base_sha, binding.head_sha, profile="full")
+        finally:
+            if previous_force is None:
+                os.environ.pop("ECOMMERCE_FORCE_FULL_QUALIFICATION", None)
+            else:
+                os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = previous_force
+        if verified:
+            raise RuntimeError("native UAC fresh full qualification failed")
+        evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
+        if evidence is None:
+            raise RuntimeError("native UAC fresh exact-SHA evidence is invalid")
+        audit_script = Path(base_root) / "scripts/performance_audit.py"
+        result = run(
+            [sys.executable, "-I", str(audit_script), "--evidence", str(evidence),
+             "--output", str(audit_path)], check=False)
+        if result.returncode:
+            raise RuntimeError("native UAC fresh base-owned performance audit failed")
+        audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
+        if audit is None:
+            raise RuntimeError("native UAC fresh performance audit is invalid")
+        witness = _native_uac_qualification_witness(binding, evidence, audit)
+    finally:
+        _NATIVE_UAC_CONTROLLER_PATH.reset(token)
+    stable, reason = _native_uac_worktree_matches(binding)
+    if not stable or _native_uac_trusted_controller(binding, base_root) != controller:
+        raise RuntimeError(f"native UAC checkout changed during fresh qualification: {reason}")
+    return witness
 
 
 def lab_network_native_boot(action: str, campaign_id: str,
                             expected_vm_id: str = "", trusted_root: str = "") -> int:
-    """Manage the retained campaign's one-shot native Windows boot."""
+    """Run native actions only under a freshly checked exact-base controller."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         return fail("unsupported native network-smoke boot action")
+    try:
+        context = _native_uac_trusted_context(action)
+    except (OSError, RuntimeError, ValueError) as exc:
+        return fail(str(exc))
+    if not _NATIVE_UAC_RUNTIME_LOCK_HELD.get():
+        return fail("native UAC requires the trusted runtime lock")
     if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
         return fail("native network-smoke boot requires an exact CAMPAIGN_ID")
     if action in {"Prepare", "SelfTest"} and re.fullmatch(
         r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id or ""
     ) is None:
         return fail("native network-smoke elevated Prepare/SelfTest requires --expected-vm-id UUID")
+    base_root = str(context["trusted_root"])
+    if trusted_root and Path(trusted_root).resolve() != Path(base_root):
+        return fail("native UAC trusted root differs from the exact-base controller")
     source_sha = ""
     binding = None
     pinned_gh = None
-    if action in {"Prepare", "SelfTest"}:
+    runner_digests = None
+    if action in {"Prepare", "SelfTest", "Reboot"}:
         try:
             from exact_pr_binding import resolve_exact_open_pr
 
-            if git("status", "--porcelain", "--untracked-files=all").strip():
-                return fail("native network-smoke boot requires a clean exact-SHA worktree")
-            pinned_gh = _native_uac_pinned_gh()
+            if action == "Reboot":
+                state = _native_boot_shadow_state(campaign_id, action)
+                source_sha = str(state["source_sha"])
+                expected_vm_id = str(state["expected_vm_id"])
+            else:
+                source_sha = str(context["head_sha"])
+            if source_sha != context["head_sha"]:
+                return fail("native UAC protected state differs from the reviewed PR head")
+            pinned_gh = _native_uac_pinned_gh(base_root)
             gh = pinned_gh[0]
-            source_sha = git("rev-parse", "HEAD").strip()
             branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
             binding = resolve_exact_open_pr(
                 _NATIVE_UAC_REPOSITORY, source_sha, branch, "main", gh=gh)
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            runner_digests = _native_uac_runner_manifest(binding)
         except Exception as exc:
-            return fail(f"native UAC exact open PR cannot be resolved: {exc}")
+            return fail(f"native UAC exact open PR or reviewed runner cannot be resolved: {exc}")
         stable, reason = _native_uac_worktree_matches(binding)
         if not stable:
             return fail(reason)
-        qualified, reason = _native_uac_qualification_matches(binding, trusted_root)
+        qualified, reason = _native_uac_qualification_matches(binding, base_root)
         if not qualified:
             return fail(reason)
         review_ready, review_reason = _native_uac_review_gate(
@@ -10790,6 +11199,15 @@ def lab_network_native_boot(action: str, campaign_id: str,
     if action == "Prepare":
         if lab_network_native_prepare(campaign_id):
             return 2
+        try:
+            _native_uac_trusted_context(action)
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            if _native_uac_runner_manifest(binding) != runner_digests:
+                return fail("native UAC reviewed runner changed after staging")
+        except Exception as exc:
+            return fail(f"native UAC context changed after staging: {exc}")
         stable, reason = _native_uac_worktree_matches(binding)
         if not stable:
             return fail(reason)
@@ -10809,24 +11227,39 @@ def lab_network_native_boot(action: str, campaign_id: str,
     except RuntimeError as exc:
         return fail(f"native network-smoke boot repository path is unavailable: {exc}")
     try:
-        if action not in {"Prepare", "SelfTest"}:
+        if action == "Recover":
             source_sha = _native_boot_shadow_source_sha(campaign_id, action)
         bootstrap = _native_bootstrap_script(
             action, campaign_id, source_sha,
-            distribution, repo_windows, expected_vm_id, binding, pinned_gh)
+            distribution, repo_windows, expected_vm_id, binding, pinned_gh,
+            runner_digests=runner_digests, trusted_root=base_root,
+            qualification_witness=(
+                _NATIVE_UAC_FRESH_QUALIFICATION.get() or (None, None, ""))[2])
         command = _native_boot_elevation_command(powershell, bootstrap)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc))
-    if action in {"Prepare", "SelfTest"}:
+    try:
+        final_context = _native_uac_trusted_context(action)
+        if final_context != context:
+            return fail("native UAC trusted controller context changed before elevation")
+        if action in {"Prepare", "SelfTest", "Reboot"}:
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            if _native_uac_runner_manifest(binding) != runner_digests:
+                return fail("native UAC reviewed runner changed before elevation")
+    except Exception as exc:
+        return fail(f"native UAC trusted context changed before elevation: {exc}")
+    if action in {"Prepare", "SelfTest", "Reboot"}:
         stable, reason = _native_uac_worktree_matches(binding)
         if not stable:
             return fail(reason)
         try:
-            if _native_uac_pinned_gh() != pinned_gh:
+            if _native_uac_pinned_gh(base_root) != pinned_gh:
                 return fail("native UAC managed gh changed before elevation")
         except ValueError as exc:
             return fail(str(exc))
-        qualified, reason = _native_uac_qualification_matches(binding, trusted_root)
+        qualified, reason = _native_uac_qualification_matches(binding, base_root)
         if not qualified:
             return fail(reason)
         review_ready, review_reason = _native_uac_review_gate(
@@ -10837,29 +11270,142 @@ def lab_network_native_boot(action: str, campaign_id: str,
                env=_windows_powershell_environment(), check=False).returncode
 
 
+def lab_network_native_boot_authority_check(campaign_id: str, expected_vm_id: str,
+                                             qualification_witness: str) -> int:
+    """Recheck review authority after UAC without elevation or a nested lock."""
+    if not sys.flags.isolated:
+        return fail("native post-UAC authority check requires Python isolated mode")
+    if (re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None
+        or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+                        expected_vm_id or "") is None
+        or re.fullmatch(r"[0-9a-f]{64}", qualification_witness or "") is None):
+        return fail("native post-UAC authority arguments are invalid")
+    try:
+        context = _native_uac_trusted_context("Prepare")
+        from exact_pr_binding import resolve_exact_open_pr
+
+        base_root = str(context["trusted_root"])
+        pinned_gh = _native_uac_pinned_gh(base_root)
+        branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+        binding = resolve_exact_open_pr(
+            _NATIVE_UAC_REPOSITORY, str(context["head_sha"]), branch,
+            "main", gh=pinned_gh[0])
+        for _boundary in ("initial", "final"):
+            current = _native_uac_trusted_context("Prepare")
+            if current != context:
+                raise RuntimeError("native post-UAC exact-base context changed")
+            _require_trusted_pr_execution(
+                pr_number=binding.pr_number, base_sha=binding.base_sha,
+                head_sha=binding.head_sha)
+            _native_uac_runner_manifest(binding)
+            stable, reason = _native_uac_worktree_matches(binding)
+            if not stable:
+                raise RuntimeError(reason)
+            if _native_uac_pinned_gh(base_root) != pinned_gh:
+                raise RuntimeError("native post-UAC managed gh changed")
+            qualified, reason = _native_uac_qualification_matches(
+                binding, base_root, expected_witness=qualification_witness)
+            if not qualified:
+                raise RuntimeError(reason)
+            reviewed, reason = _native_uac_review_gate(
+                pinned_gh[0], binding, campaign_id, expected_vm_id)
+            if not reviewed:
+                raise RuntimeError(reason)
+    except Exception as exc:
+        return fail(f"native post-UAC authority revoked or unavailable: {exc}")
+    print(f"PASS native post-UAC authority PR #{binding.pr_number} exact SHA {binding.head_sha}")
+    return 0
+
+
+def _native_uac_runtime_directory() -> None:
+    """Prevent caller-controlled XDG/HOME values from selecting another lock."""
+    current_uid = os.getuid()
+    runtime_value = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime_value:
+        canonical = Path(f"/run/user/{current_uid}")
+        directory = Path(runtime_value)
+        if (runtime_value != str(canonical) or directory.is_symlink()
+            or not directory.is_dir() or directory.resolve(strict=True) != canonical
+            or directory.stat().st_uid != current_uid
+            or directory.stat().st_mode & 0o777 != 0o700):
+            raise RuntimeError("native UAC runtime directory differs from the host-user lock")
+    else:
+        canonical_home = Path(pwd.getpwuid(current_uid).pw_dir).resolve(strict=True)
+        if Path.home().resolve(strict=True) != canonical_home:
+            raise RuntimeError("native UAC fallback home differs from the user account")
+
+
 def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
                                          expected_vm_id: str = "",
                                          trusted_root: str = "") -> int:
-    """Serialize BCD and retained VirtualBox state checks with the runtime lock."""
+    """Run native UAC inside the base-owned exclusive runtime lock."""
+    actions = {
+        "lab-network-native-boot-prepare": "Prepare",
+        "lab-network-native-boot-reboot": "Reboot",
+        "lab-network-native-boot-recover": "Recover",
+        "lab-network-native-boot-self-test": "SelfTest",
+    }
+    action = actions.get(command)
+    if action is None:
+        return fail("unsupported native runtime action")
+    try:
+        context = _native_uac_trusted_context(action)
+        _native_uac_runtime_directory()
+    except (OSError, RuntimeError, ValueError) as exc:
+        return fail(str(exc))
+    if (os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1"
+        or _NATIVE_UAC_RUNTIME_LOCK_HELD.get()):
+        return fail("native UAC caller cannot bypass the runtime lock")
+    if action == "Reboot":
+        try:
+            state = _native_boot_shadow_state(campaign_id, action)
+            expected_vm_id = str(state["expected_vm_id"])
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            return fail(f"native UAC protected reboot state is unavailable: {exc}")
+    fresh_witness = None
+    if action != "Recover":
+        try:
+            fresh_witness = _native_uac_fresh_qualification(
+                context, campaign_id, expected_vm_id, action)
+        except Exception as exc:
+            return fail(f"native UAC fresh exact-base qualification failed: {exc}")
     records: list[dict] = []
 
     def execute(runtime_env: dict[str, str]) -> int:
-        child = [command, "--campaign-id", campaign_id]
-        if command == "lab-network-native-boot-prepare":
-            child.extend(["--expected-vm-id", expected_vm_id,
-                          "--trusted-root", trusted_root])
-        result = run(_controller_command(*child),
-                     check=False, env=runtime_env)
-        records.append({"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL",
-                        "exit_code": result.returncode})
-        return result.returncode
+        if (runtime_env.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1"
+            or not runtime_env.get("ECOMMERCE_RUNTIME_RUN_ID")):
+            return fail("native UAC runtime lock was not acquired")
+        held = _NATIVE_UAC_RUNTIME_LOCK_HELD.set(True)
+        try:
+            result = lab_network_native_boot(
+                action, campaign_id, expected_vm_id, trusted_root)
+        finally:
+            _NATIVE_UAC_RUNTIME_LOCK_HELD.reset(held)
+        records.append({"gate": command, "status": "PASS" if result == 0 else "FAIL",
+                        "exit_code": result})
+        return result
 
-    return _execute_with_runtime(
-        [], execute, workflow=f"network-smoke:{command}", head="WORKTREE",
-        environment=os.environ.copy(),
-        workflow_capabilities=["local-virtualization-serialization"],
-        records=records,
-    )
+    token = _NATIVE_UAC_CONTROLLER_PATH.set(
+        str(Path(context["trusted_root"]) / "scripts/repoctl.py"))
+    witness_token = _NATIVE_UAC_FRESH_QUALIFICATION.set(
+        (context["base_sha"], context.get("head_sha"), fresh_witness)
+        if fresh_witness else None)
+    try:
+        policy = qualification_execution_policy()
+        capability = (policy.get("runtime_orchestration", {})
+                      .get("capabilities", {})
+                      .get("local-virtualization-serialization", {}))
+        if not isinstance(capability, dict) or capability.get("global_lock") is not True:
+            return fail("native UAC exact-base policy lacks the exclusive runtime lock")
+        return _execute_with_runtime(
+            [], execute, workflow=f"network-smoke:{command}", head="WORKTREE",
+            environment=os.environ.copy(),
+            workflow_capabilities=["local-virtualization-serialization"],
+            records=records,
+        )
+    finally:
+        _NATIVE_UAC_FRESH_QUALIFICATION.reset(witness_token)
+        _NATIVE_UAC_CONTROLLER_PATH.reset(token)
 
 
 def _native_network_status_snapshot(campaign_id: str, shadow_root: Path) -> tuple[dict, dict, Path, bool] | None:
@@ -14231,8 +14777,8 @@ def main() -> int:
             return image_phase_with_runtime(args.cmd, offline=getattr(args, "offline", False))
         if args.cmd in {
             "lab-network-native-boot-prepare", "lab-network-native-boot-reboot",
-            "lab-network-native-boot-recover",
-        } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
+            "lab-network-native-boot-recover", "lab-network-native-boot-self-test",
+        }:
             return lab_network_native_boot_with_runtime(
                 args.cmd, args.campaign_id, getattr(args, "expected_vm_id", ""),
                 getattr(args, "trusted_root", ""))
@@ -14523,5 +15069,17 @@ def main() -> int:
     return 2
 
 
+def _native_uac_authority_cli(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="lab-network-native-boot-authority-check")
+    parser.add_argument("--campaign-id", required=True)
+    parser.add_argument("--expected-vm-id", required=True)
+    parser.add_argument("--qualification-sha256", required=True)
+    args = parser.parse_args(argv)
+    return lab_network_native_boot_authority_check(
+        args.campaign_id, args.expected_vm_id, args.qualification_sha256)
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["lab-network-native-boot-authority-check"]:
+        raise SystemExit(_native_uac_authority_cli(sys.argv[2:]))
     raise SystemExit(main())

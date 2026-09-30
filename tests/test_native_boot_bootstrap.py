@@ -1,7 +1,9 @@
 """Read-only checks for the native smoke UAC bootstrap boundary."""
 
 import base64
+import gzip
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -31,11 +33,13 @@ class NativeBootBootstrapTests(unittest.TestCase):
         binding = exact_pr_binding.ExactPRBinding(
             "dst-red-Wire/ecommerce-1", 170, "main", BASE_SHA,
             "fix/vm-lifecycle-runtime-proof", SHA)
+        reviewed = action != "Recover"
         return repoctl._native_bootstrap_script(
             action, CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
-            VM_ID if action in {"Prepare", "SelfTest"} else "",
-            binding if action in {"Prepare", "SelfTest"} else None,
-            GH_PIN if action in {"Prepare", "SelfTest"} else None)
+            VM_ID if reviewed else "", binding if reviewed else None,
+            GH_PIN if reviewed else None,
+            runner_digests={name: "f" * 64 for name in repoctl._NATIVE_UAC_RUNNER_NAMES},
+            trusted_root="/home/dev/ecommerce-1", qualification_witness="d" * 64)
 
     def test_credential_boundary_and_command_length(self):
         source = self._source()
@@ -43,13 +47,22 @@ class NativeBootBootstrapTests(unittest.TestCase):
             Path("powershell.exe"), source)
         self.assertEqual(command[-2], "-EncodedCommand")
         self.assertLess(len(" ".join(command)), 32767)
-        self.assertEqual(
-            base64.b64decode(command[-1]).decode("utf-16-le"), source)
+        loader = base64.b64decode(command[-1]).decode("utf-16-le")
+        self.assertIn("[ScriptBlock]::Create", loader)
+        packed = re.search(r"FromBase64String\('([^']+)'\)", loader)
+        self.assertIsNotNone(packed)
+        self.assertEqual(gzip.decompress(base64.b64decode(packed.group(1))).decode("utf-8"),
+                         source)
         self.assertIn("Start-Process -FilePath $powershell -Verb RunAs", source)
         self.assertIn("exit $child.ExitCode", source)
         self.assertIn("[IO.File]::Create($target,4096", source)
         self.assertIn("Get-GitBlobSha1", source)
         self.assertIn("Assert-PublishedHead", source)
+        self.assertIn("Get-FileHash -LiteralPath $target -Algorithm SHA256", source)
+        for name in repoctl._NATIVE_UAC_RUNNER_NAMES:
+            self.assertIn(f"'{name}'", source)
+        self.assertLess(source.index("protected runner SHA-256 manifest differs"),
+                        source.index("& $runner -Action SelfTest"))
         self.assertIn("$prNumber = '170'", source)
         self.assertIn("$prBaseSha = '" + BASE_SHA + "'", source)
         self.assertIn("$pr.head.ref -cne $prBranch", source)
@@ -68,8 +81,13 @@ class NativeBootBootstrapTests(unittest.TestCase):
         self.assertIn("-PrBaseSha $prBaseSha", source)
         self.assertLess(source.index("Get-GitBlobSha1 -Bytes"),
                         source.index("& $runner -Action Prepare"))
-        self.assertLess(source.index("Assert-PublishedHead\n$runner"),
+        self.assertLess(source.index("Assert-PublishedHead\nAssert-CurrentAuthority\n$runner"),
                         source.index("& $runner -Action Prepare"))
+        reviewed = source.split("if ($action -in @('Prepare','SelfTest')) {", 1)[1]
+        self.assertLess(reviewed.index("Assert-CurrentAuthority\n$bootstrap"),
+                        reviewed.index("[IO.File]::ReadAllBytes($source)"))
+        self.assertIn("'--qualification-sha256',$qualificationWitness", source)
+        self.assertIn("'--action','Verify'", source)
         self.assertLess(source.index("& $runner -Action SelfTest"),
                         source.index("& $runner -Action Prepare"))
         self.assertIn("-ExpectedVmId $expectedVmId", source)
@@ -82,7 +100,14 @@ class NativeBootBootstrapTests(unittest.TestCase):
                 self.assertIn("Assert-Protected -Path $runner -Directory $false", branch)
                 self.assertIn("& $runner -Action $action", branch)
                 self.assertNotIn("Assert-PublishedHead", branch)
-                self.assertNotIn("Invoke-WslBounded", branch)
+                if action == "Reboot":
+                    self.assertEqual(branch.count("Assert-CurrentAuthority"), 2)
+                    self.assertLess(branch.rindex("Assert-CurrentAuthority"),
+                                    branch.index("& $runner -Action $action"))
+                else:
+                    self.assertIn("if ($action -eq 'Reboot') { Assert-CurrentAuthority }", branch)
+                self.assertLess(branch.index("Assert-ShadowRunnerBytes -RunnerRoot"),
+                                branch.index("& $runner -Action $action"))
 
     def test_self_test_uses_attested_uac_bootstrap(self):
         source = self._source("SelfTest")
@@ -134,6 +159,16 @@ class NativeBootBootstrapTests(unittest.TestCase):
                         input=self._source(action), text=True, capture_output=True,
                         timeout=30)
                     self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_encoded_loader_runs_only_its_embedded_source(self):
+        exe = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        if not Path(exe).exists():
+            self.skipTest("Windows PowerShell is unavailable")
+        payload = "[Console]::WriteLine('NATIVE-BOOT-LOADER-PASS')"
+        command = repoctl._native_boot_elevation_command(Path(exe), payload)
+        result = subprocess.run(command, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NATIVE-BOOT-LOADER-PASS", result.stdout)
 
     def test_program_files_parent_check_accepts_the_real_host_read_only(self):
         source = self._source()

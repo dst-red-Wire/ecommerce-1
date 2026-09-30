@@ -212,18 +212,16 @@ lab-network-native-prepare: ## Stage exact-head Windows runner for a native-boot
 	@$(PYTHON) scripts/repoctl.py lab-network-native-prepare --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-native-boot-prepare: ## Prepare the retained campaign's guarded one-shot native Windows entry; no reboot
-	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-prepare --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)" --trusted-root "$(TRUSTED_ROOT)"
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
 
 lab-network-native-boot-reboot: ## Explicitly start the one-shot native boot for the retained campaign
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-reboot --campaign-id "$(CAMPAIGN_ID)"
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
 
 lab-network-native-boot-recover: ## Restore normal boot and remove the owned network-smoke entry
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-recover --campaign-id "$(CAMPAIGN_ID)"
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
 
 lab-network-native-boot-self-test: ## Check network native-boot BCD parsing and state guards without mutation
-	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-self-test --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)" --trusted-root "$(TRUSTED_ROOT)"
+	@echo "BLOCKED: invoke trusted-native-uac from the exact-base checkout; see docs/engineering/ROCKY_BOX_REUSE.md" >&2; exit 1
 
 lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
 	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"

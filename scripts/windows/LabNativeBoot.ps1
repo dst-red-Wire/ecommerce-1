@@ -1111,6 +1111,14 @@ function Initialize-NativeShadow {
     }
     [void](Assert-RegularLabPath -Path $parent -Directory $true)
     Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $parent) -Directory $true -Path $parent
+    $bootstrapRoot = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd([char]92)
+    $bootstrapName = Split-Path -Leaf $bootstrapRoot
+    if ((Split-Path -Parent $bootstrapRoot) -ine $parent -or
+        $bootstrapName -notmatch ('^bootstrap-' + [regex]::Escape($Sha) + '-[0-9a-f]{32}$')) {
+        throw 'Native shadow runner source is outside the exact protected bootstrap'
+    }
+    [void](Assert-RegularLabPath -Path $bootstrapRoot -Directory $true)
+    Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $bootstrapRoot) -Directory $true -Path $bootstrapRoot
     Set-NativeShadowContext -Id $Id -Sha $Sha
     New-ShadowDirectory -Path $script:SmokeRoot
     $script:PrepareShadowCreated = $true
@@ -1127,7 +1135,15 @@ function Initialize-NativeShadow {
     $originalRunner = Join-Path $originalSmokeRoot "runner-$Sha"
     Copy-PinnedSourceFile -Source (Join-Path $originalRunner 'runner.json') -Destination (Join-Path $runner 'runner.json')
     foreach ($name in $RunnerNames) {
-        Copy-PinnedSourceFile -Source (Join-Path $originalRunner "scripts\windows\$name") -Destination (Join-Path $runner "scripts\windows\$name")
+        $bootstrapSource = Join-Path $bootstrapRoot $name
+        $shadowRunner = Join-Path $runner "scripts\windows\$name"
+        [void](Assert-RegularLabPath -Path $bootstrapSource -Directory $false)
+        Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $bootstrapSource) -Directory $false -Path $bootstrapSource
+        $bootstrapDigest = Get-FileSha256 -Path $bootstrapSource
+        Copy-PinnedSourceFile -Source $bootstrapSource -Destination $shadowRunner -AllowedRoot $bootstrapRoot
+        if ((Get-FileSha256 -Path $shadowRunner) -cne $bootstrapDigest) {
+            throw "Native shadow runner differs from the base-verified protected bootstrap: $name"
+        }
     }
     $originalStage = Join-Path $originalSmokeRoot $Id
     Copy-PinnedSourceFile -Source (Join-Path $originalStage 'SHA256SUMS') -Destination (Join-Path $stage 'SHA256SUMS')

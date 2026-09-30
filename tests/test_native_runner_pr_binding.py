@@ -33,6 +33,25 @@ def ps_run(source: str) -> subprocess.CompletedProcess[str]:
 
 
 class NativeRunnerPrBindingTests(unittest.TestCase):
+    def test_durable_shadow_uses_base_verified_bootstrap_scripts(self) -> None:
+        initialize = function_source("Initialize-NativeShadow", "Assert-NativeTaskBinding")
+        copy = (
+            "Copy-PinnedSourceFile -Source $bootstrapSource "
+            "-Destination $shadowRunner -AllowedRoot $bootstrapRoot"
+        )
+        self.assertIn(copy, initialize)
+        self.assertIn("Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $bootstrapSource)", initialize)
+        self.assertIn("(Get-FileSha256 -Path $shadowRunner) -cne $bootstrapDigest", initialize)
+        self.assertNotIn(
+            r'Copy-PinnedSourceFile -Source (Join-Path $originalRunner "scripts\windows\$name")',
+            initialize,
+        )
+        self.assertLess(initialize.index(copy), initialize.index("Assert-ShadowGitObjects -Id $Id -Sha $Sha"))
+        self.assertLess(
+            initialize.index("Assert-ShadowGitObjects -Id $Id -Sha $Sha"),
+            initialize.index(". (Join-Path $runner"),
+        )
+
     def test_runner_parses_in_windows_powershell(self) -> None:
         parser = (
             "$tokens=$null;$errors=$null;"
