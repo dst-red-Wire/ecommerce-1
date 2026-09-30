@@ -20,6 +20,34 @@ CONTROLLER_PATH = "scripts/merge_risk.py"
 MAX_CHANGED_FILES = 10_000
 MAX_CHANGED_CONTENT_BYTES = 16 * 1024 * 1024
 
+RISK_CLASSES = ("LOW_RISK", "SENSITIVE", "PRIVILEGED", "PRODUCTION")
+RISK_REQUIREMENTS = {
+    "LOW_RISK": {
+        "owner_authorization": "not-required-by-policy",
+        "review_depth": "standard",
+        "runtime_evidence": "contract-driven",
+        "recovery": "mutation-class-driven",
+    },
+    "SENSITIVE": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "enhanced",
+        "runtime_evidence": "contract-driven",
+        "recovery": "mutation-class-driven",
+    },
+    "PRIVILEGED": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "privileged",
+        "runtime_evidence": "host-runtime-before-mutation",
+        "recovery": "capture-restore-verify",
+    },
+    "PRODUCTION": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "production",
+        "runtime_evidence": "production-runtime-before-mutation",
+        "recovery": "capture-restore-verify",
+    },
+}
+
 MERGE_RISK_CAPABILITIES = (
     "governance",
     "delivery-authority",
@@ -98,8 +126,11 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         "git_error",
         "classifications",
         "required_inputs",
+        "class_requirements",
         "low_risk",
         "sensitive",
+        "privileged",
+        "production",
     }:
         return False
     if any(
@@ -117,7 +148,8 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
             policy.get("unknown_or_ambiguous") != "sensitive",
             policy.get("partial_analysis") != "sensitive",
             policy.get("git_error") != "sensitive",
-            policy.get("classifications") != ["LOW_RISK", "SENSITIVE"],
+            policy.get("classifications") != list(RISK_CLASSES),
+            policy.get("class_requirements") != RISK_REQUIREMENTS,
             policy.get("required_inputs")
             != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
         )
@@ -241,11 +273,91 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
                 re.compile(pattern)
         except re.error:
             return False
+    tier_anchors = {
+        "privileged": {
+            "host-mutation": {
+                "scripts/windows/**",
+                "config/contracts/workstation-policy.yaml",
+            },
+            "credential-identity": {"scripts/windows/LabSshIdentity.ps1"},
+        },
+        "production": {
+            "production-inventory": {"config/infrastructure/prod-inventory.yaml"},
+            "production-operations": {"platform/fleet/environments/prod*/**"},
+        },
+    }
+    for tier_name, anchors in tier_anchors.items():
+        tier = policy.get(tier_name)
+        if not isinstance(tier, dict) or set(tier) != {
+            "authorization",
+            "merge_mode",
+            "capabilities",
+        }:
+            return False
+        if (
+            tier.get("authorization") != "explicit-repository-owner"
+            or tier.get("merge_mode") != "OWNER_GATED"
+        ):
+            return False
+        rules = tier.get("capabilities")
+        if not isinstance(rules, dict) or set(rules) != set(anchors):
+            return False
+        for capability, rule in rules.items():
+            if not isinstance(rule, dict) or set(rule) - {
+                "paths",
+                "content_paths",
+                "content_patterns",
+            }:
+                return False
+            paths = rule.get("paths", [])
+            content_paths = rule.get("content_paths", [])
+            content_patterns = rule.get("content_patterns", [])
+            if any(
+                not isinstance(values, list)
+                or len(values) != len(set(values))
+                or any(not isinstance(value, str) or not value for value in values)
+                for values in (paths, content_paths, content_patterns)
+            ):
+                return False
+            if not paths and not content_patterns:
+                return False
+            if content_patterns and not content_paths:
+                return False
+            if not anchors[capability].issubset(paths):
+                return False
+            try:
+                for pattern in content_patterns:
+                    re.compile(pattern)
+            except re.error:
+                return False
     return True
 
 
 def _path_matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
+
+
+def _matched_capabilities(
+    capabilities: dict,
+    changed_files: list[str],
+    file_changes: dict[str, str],
+) -> set[str]:
+    matched: set[str] = set()
+    for capability, rule in capabilities.items():
+        if any(_path_matches(path, rule.get("paths", [])) for path in changed_files):
+            matched.add(capability)
+        candidates = [
+            path
+            for path in changed_files
+            if _path_matches(path, rule.get("content_paths", []))
+        ]
+        if candidates and any(
+            re.search(pattern, file_changes[path], flags=re.IGNORECASE | re.MULTILINE)
+            for pattern in rule.get("content_patterns", [])
+            for path in candidates
+        ):
+            matched.add(capability)
+    return matched
 
 
 def _result(
@@ -261,6 +373,7 @@ def _result(
 ) -> dict:
     return {
         "classification": classification,
+        "requirements": dict(RISK_REQUIREMENTS[classification]),
         "authority": "repository-policy",
         "controller_source": "exact-pr-base-sha",
         "controller_path": CONTROLLER_PATH,
@@ -469,33 +582,25 @@ def evaluate_merge_risk(
             changed_files=changed_files if isinstance(changed_files, list) else [],
             reason="partial-or-ambiguous-diff",
         )
-    capabilities = policy["sensitive"]["capabilities"]
-    matched: set[str] = set()
-    for capability, rule in capabilities.items():
-        if any(_path_matches(path, rule.get("paths", [])) for path in changed_files):
-            matched.add(capability)
-        candidates = [
-            path
-            for path in changed_files
-            if _path_matches(path, rule.get("content_paths", []))
-        ]
-        if candidates and any(
-            re.search(pattern, file_changes[path], flags=re.IGNORECASE | re.MULTILINE)
-            for pattern in rule.get("content_patterns", [])
-            for path in candidates
-        ):
-            matched.add(capability)
-    if matched:
-        return _result(
-            "SENSITIVE",
-            base_sha=base_sha,
-            head_sha=head_sha,
-            pr_number=pr_number,
-            changed_files=changed_files,
-            reasons=sorted(matched),
-            matched_capabilities=sorted(matched),
-            analysis_complete=True,
+    for classification, tier_name in (
+        ("PRODUCTION", "production"),
+        ("PRIVILEGED", "privileged"),
+        ("SENSITIVE", "sensitive"),
+    ):
+        matched = _matched_capabilities(
+            policy[tier_name]["capabilities"], changed_files, file_changes
         )
+        if matched:
+            return _result(
+                classification,
+                base_sha=base_sha,
+                head_sha=head_sha,
+                pr_number=pr_number,
+                changed_files=changed_files,
+                reasons=sorted(matched),
+                matched_capabilities=sorted(matched),
+                analysis_complete=True,
+            )
     unclassified = [
         path
         for path in changed_files

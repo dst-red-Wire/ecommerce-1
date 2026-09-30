@@ -27,6 +27,12 @@ domains:
     machine_contract: execution_properties_policy
   roadmap:
     machine_contract: roadmap_policy
+  issue_lifecycle:
+    machine_contract: issue_lifecycle_policy
+  work_package:
+    machine_contract: work_package_policy
+  evidence_bundle:
+    machine_contract: ci_evidence
   engineering_metrics:
     machine_contract: engineering_metrics_policy
   platform_orchestration:

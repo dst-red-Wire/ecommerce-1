@@ -1,0 +1,110 @@
+id: m7-verified-delivery-chain
+milestone: M7
+tracker_issue: 20
+work_item_issue: 170
+objective: Establish an exact-SHA, evidence-backed, fail-closed delivery chain from work item to verified merge.
+scope:
+  allowed_paths:
+  - architecture.lock.yaml
+  - config/contracts/ci-evidence.yaml
+  - config/contracts/execution-properties-policy.yaml
+  - config/contracts/issue-lifecycle-policy.yaml
+  - config/contracts/qualification-execution-policy.yaml
+  - config/contracts/repository-authority-model.yaml
+  - config/contracts/review-policy.yaml
+  - config/contracts/roadmap-policy.yaml
+  - config/contracts/work-package-policy.yaml
+  - config/work-packages/M7/**
+  - docs/engineering/verified-delivery-chain.md
+  - scripts/architecture_authority.py
+  - scripts/delivery_preflight.py
+  - scripts/evidence_bundle.py
+  - scripts/issue_lifecycle.py
+  - scripts/merge_risk.py
+  - scripts/milestone_plan.py
+  - scripts/post_merge_verify.py
+  - scripts/repoctl.py
+  - scripts/roadmap_sync.py
+  - scripts/runtime_orchestration.py
+  - scripts/runtime_authority.py
+  - scripts/issue_completion.py
+  - scripts/work_package.py
+  - tests/test_delivery_preflight.py
+  - tests/test_chatgpt_review_authority.py
+  - tests/test_canonical_publication.py
+  - tests/test_delivery_supersession.py
+  - tests/test_evidence_bundle.py
+  - tests/test_execution_properties.py
+  - tests/test_issue_lifecycle.py
+  - tests/test_merge_risk.py
+  - tests/test_milestone_plan.py
+  - tests/test_post_merge_verify.py
+  - tests/test_pr_loop.py
+  - tests/test_roadmap_sync.py
+  - tests/test_runtime_orchestration.py
+  - tests/test_runtime_authority.py
+  - tests/test_issue_completion.py
+  - tests/test_verified_delivery_cli.py
+  - tests/test_verified_pr_integration.py
+  - tests/test_work_package.py
+  forbidden_paths: []
+dependencies: []
+acceptance:
+  contracts:
+  - architecture.lock.yaml
+  - config/contracts/ci-evidence.yaml
+  - config/contracts/execution-properties-policy.yaml
+  - config/contracts/issue-lifecycle-policy.yaml
+  - config/contracts/qualification-execution-policy.yaml
+  - config/contracts/repository-authority-model.yaml
+  - config/contracts/review-policy.yaml
+  - config/contracts/roadmap-policy.yaml
+  - config/contracts/work-package-policy.yaml
+  qualification_gates:
+  - governance
+  - contracts
+  - automation
+  - security
+  - system
+  runtime_evidence: []
+  tests:
+  - tests/test_work_package.py
+  - tests/test_chatgpt_review_authority.py
+  - tests/test_canonical_publication.py
+  - tests/test_delivery_preflight.py
+  - tests/test_evidence_bundle.py
+  - tests/test_merge_risk.py
+  - tests/test_post_merge_verify.py
+  - tests/test_roadmap_sync.py
+  - tests/test_issue_lifecycle.py
+  - tests/test_milestone_plan.py
+  - tests/test_pr_loop.py
+  - tests/test_runtime_orchestration.py
+  - tests/test_execution_properties.py
+  - tests/test_delivery_supersession.py
+  - tests/test_verified_delivery_cli.py
+  - tests/test_verified_pr_integration.py
+  - tests/test_runtime_authority.py
+  - tests/test_issue_completion.py
+  qce_capabilities:
+  - exact-sha-qualification
+execution:
+  preflight_required: true
+  runtime_required: false
+  recovery_required: false
+  required_capabilities:
+  - toolchain-pinned
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+- Work package scope and issue relation bind the exact PR head and acceptance plan.
+- Preflight, qualification and content-addressed evidence bundle match one base, head, tree and toolchain.
+- Independent ChatGPT CODE and SECURITY reviews pass at the exact head with no blocking findings.
+- Risk, owner authorization and merge requirements pass before finish-pr.
+- Signed merge, intended tree, clean worktree and roadmap are verified after merge before issue closure.

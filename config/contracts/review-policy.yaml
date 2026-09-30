@@ -271,13 +271,34 @@ repository_delivery:
       unknown_or_ambiguous: sensitive
       partial_analysis: sensitive
       git_error: sensitive
-      classifications: [LOW_RISK, SENSITIVE]
+      classifications: [LOW_RISK, SENSITIVE, PRIVILEGED, PRODUCTION]
       required_inputs:
         - pr
         - base_sha
         - head_sha
         - changed_files
         - resolved_capabilities
+      class_requirements:
+        LOW_RISK:
+          owner_authorization: not-required-by-policy
+          review_depth: standard
+          runtime_evidence: contract-driven
+          recovery: mutation-class-driven
+        SENSITIVE:
+          owner_authorization: explicit-repository-owner
+          review_depth: enhanced
+          runtime_evidence: contract-driven
+          recovery: mutation-class-driven
+        PRIVILEGED:
+          owner_authorization: explicit-repository-owner
+          review_depth: privileged
+          runtime_evidence: host-runtime-before-mutation
+          recovery: capture-restore-verify
+        PRODUCTION:
+          owner_authorization: explicit-repository-owner
+          review_depth: production
+          runtime_evidence: production-runtime-before-mutation
+          recovery: capture-restore-verify
       low_risk:
         authorization: not-required-by-policy
         merge_mode: AUTO
@@ -429,6 +450,45 @@ repository_delivery:
             content_paths: [scripts/**, platform/**, config/**, Makefile]
             content_patterns:
               - '\b(?:publish|promotion|release.?authority|artifact.?publication|harbor)\b'
+      privileged:
+        authorization: explicit-repository-owner
+        merge_mode: OWNER_GATED
+        capabilities:
+          host-mutation:
+            paths:
+              - scripts/windows/**
+              - scripts/native_controller_bootstrap.py
+              - scripts/rke2_virtualbox_backend.py
+              - config/contracts/workstation-policy.yaml
+              - config/contracts/vm-lifecycle-policy.yaml
+            content_paths: [scripts/**, platform/ansible/**, config/contracts/**]
+            content_patterns:
+              - '\b(?:bcdedit|bcdboot|virtualbox|vboxmanage|uac|runas|scheduledtask|SYSTEM)\b'
+              - '\b(?:netsh|set-netipaddress|new-netfirewallrule|wslconfig)\b'
+          credential-identity:
+            paths:
+              - scripts/windows/LabSshIdentity.ps1
+              - config/contracts/secret-delivery-policy.yaml
+            content_paths: [scripts/**, platform/ansible/**, config/contracts/**]
+            content_patterns:
+              - '\b(?:private[_ -]?key|ssh[_ -]?key\w*|ssh[_ -]?identity|credential\w*|secret[_ -]?material|openbao[_ -]?token)\b'
+      production:
+        authorization: explicit-repository-owner
+        merge_mode: OWNER_GATED
+        capabilities:
+          production-inventory:
+            paths:
+              - config/infrastructure/prod-inventory.yaml
+              - platform/terraform/environments/prod*/**
+              - platform/ansible/inventories/prod*/**
+          production-operations:
+            paths:
+              - platform/fleet/environments/prod*/**
+              - platform/tekton/pipelines/prod-*.yaml
+            content_paths: [scripts/**, platform/**, config/infrastructure/**, config/contracts/progressive-delivery-policy.yaml]
+            content_patterns:
+              - '\b(?:prod-a|prod-b|production|prod)\b[^\n]{0,120}\b(?:apply|deploy|rollout|promot\w*|destroy|credential\w*)\b'
+              - '\b(?:apply|deploy|rollout|promot\w*|destroy|credential\w*)\b[^\n]{0,120}\b(?:prod-a|prod-b|production|prod)\b'
     merge_delegation:
       state: MERGE_READY
       command: finish-pr
@@ -527,3 +587,21 @@ repository_delivery:
       sync_on_drift: required
       delivery: qualified-pull-request
       direct_default_branch_write: forbidden
+    verification:
+      required_after_finish_pr: true
+      output: .context/evidence/post-merge/<merge_sha>.json
+      github_merged_state_alone: insufficient
+      required_checks:
+        - github-pr-merged-exact-head
+        - merge-commit-known
+        - merge-commit-signed
+        - signature-verified
+        - main-contains-merge
+        - qualified-head-tree
+        - intended-merged-tree
+        - no-unexpected-mutation
+        - remote-branch-deleted
+        - local-branch-deleted
+        - clean-worktree
+        - roadmap-sync
+      work_item_close_requires_pass: true

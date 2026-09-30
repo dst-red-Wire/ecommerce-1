@@ -65,7 +65,10 @@ def policy() -> dict[str, Any]:
         or derivation.get("manual_status_override") != "forbidden"
         or derivation.get("qualification_base_ref") != "origin/main"
         or set(derivation.get("statuses", {}))
-        != {"NOT_STARTED", "CONTRACTED", "PARTIAL", "IMPLEMENTED", "PROVEN", "BLOCKED"}
+        != {
+            "NOT_STARTED", "CONTRACTED", "PARTIAL", "IMPLEMENTED",
+            "QUALIFIED", "RUNTIME_PROVEN", "DEPLOYED", "PROVEN", "BLOCKED",
+        }
         or derivation.get("dependency_terminal_statuses") != ["DONE", "PROVEN"]
     ):
         raise RuntimeError("roadmap status derivation contract is invalid")
@@ -138,12 +141,11 @@ def policy() -> dict[str, Any]:
             base_requirement_fields = {
                 "implementation_paths", "qualification_gates", "qce_capabilities", "runtime_evidence"
             }
+            optional_requirement_fields = {"resolved_capabilities", "post_merge_evidence"}
             if (
                 not isinstance(requirements, dict)
                 or not base_requirement_fields.issubset(requirements)
-                or set(requirements) - base_requirement_fields != (
-                    {"resolved_capabilities"} if "resolved_capabilities" in requirements else set()
-                )
+                or set(requirements) - base_requirement_fields - optional_requirement_fields
             ):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements are invalid")
             paths = requirements["implementation_paths"]
@@ -151,7 +153,8 @@ def policy() -> dict[str, Any]:
             capabilities = requirements["qce_capabilities"]
             runtime = requirements["runtime_evidence"]
             resolved = requirements.get("resolved_capabilities", [])
-            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime, resolved)):
+            post_merge = requirements.get("post_merge_evidence", [])
+            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime, resolved, post_merge)):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements must be lists")
             for requirement in resolved:
                 if not isinstance(requirement, dict) or set(requirement) != {"tool", "capability", "scope", "status"}:
@@ -177,7 +180,14 @@ def policy() -> dict[str, Any]:
             if set(capabilities) - qce_capabilities:
                 raise RuntimeError(f"roadmap milestone {milestone_id} references unknown QCE capabilities")
             for evidence in runtime:
-                if not isinstance(evidence, dict) or set(evidence) != {"path", "environments"}:
+                if (
+                    not isinstance(evidence, dict)
+                    or not {"path", "environments"}.issubset(evidence)
+                    or set(evidence) - {"path", "environments", "proof_type"}
+                    or evidence.get("proof_type", "runtime") not in {
+                        "runtime", "lab-readiness", "persistent-deployment"
+                    }
+                ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} runtime evidence is invalid")
                 evidence_path = Path(str(evidence["path"]))
                 environments = evidence["environments"]
@@ -191,12 +201,45 @@ def policy() -> dict[str, Any]:
                     or not all(isinstance(environment, str) and environment for environment in environments)
                 ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} runtime evidence is unsafe")
+                if evidence.get("proof_type") == "lab-readiness" and (
+                    milestone_id != "M2.5" or environments != ["lab"]
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} lab readiness is invalid")
+                if (
+                    evidence.get("proof_type") == "persistent-deployment"
+                    and environments != ["management"]
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} deployment must target management")
+            for reference in post_merge:
+                if not isinstance(reference, str):
+                    raise ValueError(f"roadmap milestone {milestone_id} post-merge evidence is invalid")
+                reference_path = Path(reference)
+                if (
+                    reference_path.is_absolute()
+                    or reference_path.parts[:3] != (".context", "evidence", "post-merge")
+                    or len(reference_path.parts) != 4
+                    or not re.fullmatch(r"[0-9a-f]{40}\.json", reference_path.name)
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} post-merge evidence is unsafe")
             if milestone_id in {"M2.5", "M3", "M4", "M5", "M6", "M7", "M8", "M9"} and not runtime:
                 raise RuntimeError(f"roadmap milestone {milestone_id} requires runtime evidence")
-            if milestone_id == "M2.5" and runtime != [{
-                "path": m25_runtime_evidence.OUTPUT.as_posix(), "environments": ["lab"]
-            }]:
-                raise RuntimeError("M2.5 requires the canonical lab runtime evidence")
+            if milestone_id == "M2.5":
+                expected = [
+                    {
+                        "path": m25_runtime_evidence.OUTPUT.as_posix(),
+                        "environments": ["lab"],
+                        "proof_type": "lab-readiness",
+                    },
+                    {
+                        "path": ".context/evidence/roadmap/M2.5-persistent-mgmt.json",
+                        "environments": ["management"],
+                        "proof_type": "persistent-deployment",
+                    },
+                ]
+                if runtime != expected:
+                    raise RuntimeError(
+                        "M2.5 requires canonical lab and persistent deployment evidence"
+                    )
         elif milestone_id != "M0" or item.get("fixed_status") != "DONE":
             raise RuntimeError("only completed architecture sync may use a fixed roadmap status")
     return value
@@ -343,6 +386,12 @@ def _runtime_evidence_result(
         return False, f"runtime evidence has wrong SHA or tree: {relative}"
     if evidence.get("environment") not in declaration["environments"]:
         return False, f"runtime evidence has wrong environment: {relative}"
+    if declaration.get("proof_type") == "persistent-deployment" and (
+        evidence.get("deployment_state") != "DEPLOYED"
+        or evidence.get("deployment_persistence") != "persistent"
+        or evidence.get("deployment_verified") is not True
+    ):
+        return False, f"persistent deployment was not verified: {relative}"
     identity = evidence.get("runtime_identity")
     if not isinstance(identity, dict) or any(
         not isinstance(identity.get(field), str) or not identity[field]
@@ -359,14 +408,45 @@ def _runtime_evidence_result(
     age = now.timestamp() - float(created)
     if age < 0 or age > maximum_age:
         return False, f"runtime evidence is stale or future-dated: {relative}"
-    if milestone_id == "M2.5":
+    if milestone_id == "M2.5" and declaration.get("proof_type") != "persistent-deployment":
         try:
             m25_runtime_evidence.validate(root, evidence, head, tree)
         except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
             return False, f"M2.5 runtime sources are invalid: {exc}"
-        if evidence.get("deployment_state") != contract["m25_deployment_state"]:
+        if declaration.get("proof_type") == "lab-readiness":
+            if evidence.get("deployment_state") != "NOT_DEPLOYED":
+                return False, "M2.5 lab evidence must remain NOT_DEPLOYED"
+        elif evidence.get("deployment_state") != contract["m25_deployment_state"]:
             return False, "M2.5 lab readiness does not prove persistent MGMT deployment"
     return True, relative
+
+
+def _post_merge_evidence_result(root: Path, reference: str) -> tuple[bool, str]:
+    """Consume a post-merge verifier result without treating the issue as proof."""
+    path = root / reference
+    if not path.is_file() or path.is_symlink():
+        return False, f"post-merge evidence missing or unsafe: {reference}"
+    try:
+        evidence = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False, f"post-merge evidence malformed: {reference}"
+    if not isinstance(evidence, dict) or any(
+        not isinstance(evidence.get(field), str)
+        or re.fullmatch(r"[0-9a-f]{40}", evidence[field]) is None
+        for field in ("base_sha", "head_sha", "merge_sha", "merge_tree_sha")
+    ):
+        return False, f"post-merge evidence identity is invalid: {reference}"
+    if (
+        evidence["merge_sha"] != Path(reference).stem
+        or evidence.get("status") != "PASS"
+        or evidence.get("signature_verified") is not True
+        or evidence.get("main_contains_change") is not True
+        or evidence.get("qualified_tree_matches") is not True
+        or evidence.get("clean_worktree") is not True
+        or evidence.get("roadmap_sync") != "PASS"
+    ):
+        return False, f"post-merge verification is not PASS: {reference}"
+    return True, reference
 
 
 def _qce_capability_statuses(payload: dict[str, Any] | None) -> dict[str, str]:
@@ -445,7 +525,18 @@ def derive_projection(
         state = states.get(tracker)
         if not isinstance(state, dict):
             raise RuntimeError(f"roadmap tracker state missing for #{tracker}")
-        requirements = milestone["requirements"]
+        requirements = milestone.get("requirements")
+        if not isinstance(requirements, dict):
+            results.append({
+                "milestone": milestone_id,
+                "status": "NOT_STARTED",
+                "requirements": [f"tracker:#{tracker}", "contract"],
+                "evidence": [],
+                "missing_evidence": ["contract"],
+                "blockers": [],
+            })
+            status_index[milestone_id] = "NOT_STARTED"
+            continue
         evidence: list[str] = []
         missing: list[str] = []
         blockers: list[str] = []
@@ -513,9 +604,10 @@ def derive_projection(
                 missing.append(f"capability:{tool_name}.{capability_name}:{scope}:{expected}")
 
         runtime_declarations = requirements["runtime_evidence"]
-        requirement_names.extend(f"runtime:{item['path']}" for item in runtime_declarations)
-        runtime_valid = True
+        runtime_results: list[tuple[str, bool]] = []
         for declaration in runtime_declarations:
+            proof_type = str(declaration.get("proof_type", "runtime"))
+            requirement_names.append(f"{proof_type}:{declaration['path']}")
             valid, detail = _runtime_evidence_result(
                 root,
                 declaration,
@@ -526,24 +618,61 @@ def derive_projection(
                 int(derivation["evidence_max_age_seconds"]),
                 now,
             )
-            runtime_valid = runtime_valid and valid
+            runtime_results.append((proof_type, valid))
             (evidence if valid else missing).append(detail)
 
-        implementation_complete = tracker_complete and len(present_paths) == len(paths)
+        post_merge_declarations = requirements.get("post_merge_evidence", [])
+        post_merge_results: list[bool] = []
+        for reference in post_merge_declarations:
+            requirement_names.append(f"post-merge:{reference}")
+            valid, detail = _post_merge_evidence_result(root, reference)
+            post_merge_results.append(valid)
+            (evidence if valid else missing).append(detail)
+        post_merge_complete = all(post_merge_results)
+        implementation_complete = bool(paths) and len(present_paths) == len(paths)
+        qualification_complete = bool(gates) and all(
+            gate_statuses.get(gate) == "PASS" for gate in gates
+        )
+        runtime_kinds = {"runtime", "lab-readiness"}
+        runtime_required = any(kind in runtime_kinds for kind, _ in runtime_results)
+        runtime_complete = all(
+            valid for kind, valid in runtime_results if kind in runtime_kinds
+        )
+        deployment_required = any(
+            kind == "persistent-deployment" for kind, _ in runtime_results
+        )
+        deployment_complete = all(
+            valid for kind, valid in runtime_results if kind == "persistent-deployment"
+        )
         proof_complete = (
-            implementation_complete
-            and all(gate_statuses.get(gate) == "PASS" for gate in gates)
+            tracker_complete
+            and implementation_complete
+            and qualification_complete
             and all(qce_statuses.get(capability) == "PROVEN" for capability in capabilities)
             and resolved_complete
-            and runtime_valid
+            and runtime_complete
+            and deployment_complete
+            and post_merge_complete
         )
         if blockers:
             status = "BLOCKED"
         elif proof_complete:
             status = "PROVEN"
+        elif (
+            implementation_complete and qualification_complete and deployment_required
+            and deployment_complete and runtime_complete
+        ):
+            status = "DEPLOYED"
+        elif (
+            implementation_complete and qualification_complete and runtime_required
+            and runtime_complete
+        ):
+            status = "RUNTIME_PROVEN"
+        elif implementation_complete and qualification_complete:
+            status = "QUALIFIED"
         elif implementation_complete:
             status = "IMPLEMENTED"
-        elif tracker_complete or present_paths or evidence:
+        elif present_paths or any(gate_statuses.get(gate) == "PASS" for gate in gates):
             status = "PARTIAL"
         else:
             status = "CONTRACTED"

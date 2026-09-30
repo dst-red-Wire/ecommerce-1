@@ -51,6 +51,31 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertEqual("BLOCKED", statuses["M4"])
         self.assertEqual("BLOCKED", statuses["M5"])
 
+    def test_closed_tracker_alone_is_not_technical_progress(self):
+        policy = self._runtime_policy()
+        with tempfile.TemporaryDirectory() as directory:
+            projection = ROADMAP.derive_projection(
+                policy,
+                {99: {"state": "closed", "state_reason": "completed", "title": "M4"}},
+                root=Path(directory),
+                head="a" * 40,
+                tree="b" * 40,
+            )
+        self.assertEqual("CONTRACTED", projection["milestones"][0]["status"])
+        self.assertIn("implementation:impl", projection["milestones"][0]["missing_evidence"])
+
+    def test_missing_contract_is_not_started(self):
+        policy = self._runtime_policy()
+        del policy["milestones"][0]["requirements"]
+        projection = ROADMAP.derive_projection(
+            policy,
+            {99: {"state": "closed", "state_reason": "completed", "title": "M4"}},
+            head="a" * 40,
+            tree="b" * 40,
+        )
+        self.assertEqual("NOT_STARTED", projection["milestones"][0]["status"])
+        self.assertEqual(["contract"], projection["milestones"][0]["missing_evidence"])
+
     def test_completed_tracker_does_not_bypass_unmet_dependencies(self):
         policy = ROADMAP.policy()
         states = {}
@@ -178,10 +203,10 @@ class RoadmapSyncTests(unittest.TestCase):
         now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
         for mutation, expected in (
             ({}, "PROVEN"),
-            ({"created_at_epoch": (now - timedelta(days=2)).timestamp()}, "IMPLEMENTED"),
-            ({"created_at_epoch": float("nan")}, "IMPLEMENTED"),
-            ({"head_sha": "c" * 40}, "IMPLEMENTED"),
-            ({"environment": "prod-a"}, "IMPLEMENTED"),
+            ({"created_at_epoch": (now - timedelta(days=2)).timestamp()}, "QUALIFIED"),
+            ({"created_at_epoch": float("nan")}, "QUALIFIED"),
+            ({"head_sha": "c" * 40}, "QUALIFIED"),
+            ({"environment": "prod-a"}, "QUALIFIED"),
         ):
             with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -227,8 +252,141 @@ class RoadmapSyncTests(unittest.TestCase):
                     head="a" * 40,
                     tree="b" * 40,
                 )
-                self.assertEqual("IMPLEMENTED", projection["milestones"][0]["status"])
+                self.assertEqual("QUALIFIED", projection["milestones"][0]["status"])
                 self.assertNotEqual("PROVEN", projection["milestones"][0]["status"])
+
+    def test_m2_5_lab_proof_and_closed_tracker_do_not_prove_deployment(self):
+        policy = self._runtime_policy("M2.5")
+        declaration = policy["milestones"][0]["requirements"]["runtime_evidence"][0]
+        declaration["environments"] = ["management"]
+        declaration["proof_type"] = "persistent-deployment"
+        head, tree = "a" * 40, "b" * 40
+        now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "impl").mkdir()
+            evidence_path = root / declaration["path"]
+            evidence_path.parent.mkdir(parents=True)
+            payload = {
+                "schema_version": 1,
+                "status": "PASS",
+                "exact_commit_evidence": True,
+                "runtime_execution": True,
+                "head_sha": head,
+                "head_tree_sha": tree,
+                "created_at_epoch": now.timestamp(),
+                "milestone": "M2.5",
+                "environment": "lab",
+                "runtime_identity": {"kind": "rke2-cluster", "id": "lab-01"},
+                "outcome": "PASS",
+                "deployment_state": "NOT_DEPLOYED",
+                "deployment_persistence": "ephemeral",
+                "deployment_verified": False,
+            }
+
+            def status(tracker_state: str) -> str:
+                evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+                projection = ROADMAP.derive_projection(
+                    policy,
+                    {99: {"state": tracker_state, "state_reason": "completed", "title": "M2.5"}},
+                    root=root,
+                    qualification_gates={"governance": "PASS"},
+                    head=head,
+                    tree=tree,
+                    now=now,
+                )
+                return projection["milestones"][0]["status"]
+
+            self.assertEqual("QUALIFIED", status("closed"))
+            payload["environment"] = "management"
+            payload["deployment_verified"] = True
+            self.assertEqual("QUALIFIED", status("closed"))
+            payload["deployment_state"] = "DEPLOYED"
+            self.assertEqual("QUALIFIED", status("closed"))
+            payload["deployment_persistence"] = "persistent"
+            self.assertEqual("DEPLOYED", status("open"))
+            self.assertEqual("PROVEN", status("closed"))
+
+    def test_runtime_and_post_merge_proofs_advance_separate_statuses(self):
+        policy = self._runtime_policy()
+        merge_sha = "c" * 40
+        reference = f".context/evidence/post-merge/{merge_sha}.json"
+        policy["milestones"][0]["requirements"]["post_merge_evidence"] = [reference]
+        head, tree = "a" * 40, "b" * 40
+        now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "impl").mkdir()
+            runtime_path = root / ".context/evidence/roadmap/M4.json"
+            runtime_path.parent.mkdir(parents=True)
+            runtime_path.write_text(json.dumps({
+                "schema_version": 1, "status": "PASS",
+                "exact_commit_evidence": True, "runtime_execution": True,
+                "head_sha": head, "head_tree_sha": tree,
+                "created_at_epoch": now.timestamp(), "milestone": "M4",
+                "environment": "preprod",
+                "runtime_identity": {"kind": "rke2-cluster", "id": "preprod-01"},
+                "outcome": "PASS",
+            }), encoding="utf-8")
+
+            def status(tracker_state: str) -> str:
+                projection = ROADMAP.derive_projection(
+                    policy,
+                    {99: {"state": tracker_state, "state_reason": "completed", "title": "M4"}},
+                    root=root,
+                    qualification_gates={"governance": "PASS"},
+                    head=head,
+                    tree=tree,
+                    now=now,
+                )
+                return projection["milestones"][0]["status"]
+
+            self.assertEqual("RUNTIME_PROVEN", status("closed"))
+            post_merge_path = root / reference
+            post_merge_path.parent.mkdir(parents=True)
+            proof = {
+                "status": "PASS", "base_sha": "d" * 40, "head_sha": head,
+                "merge_sha": merge_sha, "merge_tree_sha": tree,
+                "signature_verified": True, "main_contains_change": True,
+                "qualified_tree_matches": True, "clean_worktree": True,
+                "roadmap_sync": "PASS",
+            }
+            post_merge_path.write_text(json.dumps(proof), encoding="utf-8")
+            self.assertEqual("RUNTIME_PROVEN", status("open"))
+            self.assertEqual("PROVEN", status("closed"))
+            proof["signature_verified"] = False
+            post_merge_path.write_text(json.dumps(proof), encoding="utf-8")
+            self.assertEqual("RUNTIME_PROVEN", status("closed"))
+
+    def test_policy_requires_persistent_mgmt_proof(self):
+        policy = ROADMAP.policy()
+        milestone = next(item for item in policy["milestones"] if item["id"] == "M2.5")
+        self.assertEqual(32, milestone["tracker"])
+        self.assertEqual(
+            ["lab-readiness", "persistent-deployment"],
+            [
+                declaration["proof_type"]
+                for declaration in milestone["requirements"]["runtime_evidence"]
+            ],
+        )
+        broken = json.loads(json.dumps(policy))
+        requirement = next(
+            item for item in broken["milestones"] if item["id"] == "M2.5"
+        )["requirements"]
+        requirement["runtime_evidence"] = requirement["runtime_evidence"][:1]
+        with (
+            mock.patch.object(
+                ROADMAP,
+                "load_yaml",
+                side_effect=[
+                    {"machine_contracts": {"roadmap_policy": "config/contracts/roadmap-policy.yaml"}},
+                    broken,
+                    ROADMAP.load_yaml("config/contracts/qualification-execution-policy.yaml"),
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "M2.5 requires canonical lab and persistent"),
+        ):
+            ROADMAP.policy()
 
     def test_blocked_qce_capability_blocks_mapped_milestone(self):
         policy = self._runtime_policy()
@@ -400,7 +558,7 @@ class RoadmapSyncTests(unittest.TestCase):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
         self.assertIn("_roadmap_followup_after_merge()", finish)
-        self.assertIn("automatic roadmap synchronization failed", finish)
+        self.assertIn("post-merge cleanup or roadmap verification is incomplete", finish)
 
         followup = source[source.index("def _roadmap_followup_after_merge(") : source.index("def git_sync(")]
         self.assertIn("roadmap_check(quiet=True)", followup)

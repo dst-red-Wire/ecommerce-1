@@ -997,6 +997,7 @@ class RuntimeExecutor:
             "restore_actions": [],
             "final_state": {},
             "restore_verified": False,
+            "recovery": {"capture": "NOT_RUN", "restore": "NOT_RUN", "restore_verification": "NOT_RUN"},
             "stale_runs_detected": [],
             "status": "RUNNING",
             "started_at": _utc_now(),
@@ -1018,6 +1019,9 @@ class RuntimeExecutor:
         preflight_results: dict[str, dict] = {}
         exit_code = 1
         restore_failures: list[str] = []
+        restore_action_failures: list[str] = []
+        restore_verification_failures: list[str] = []
+        phase = "capture"
         previous_sigterm = None
 
         def terminate(_signum: int, _frame: object) -> None:
@@ -1035,6 +1039,8 @@ class RuntimeExecutor:
                         payload["initial_state"][capability.spec.name] = (
                             self._filter_state(capability, state)
                         )
+                    payload["recovery"]["capture"] = "PASS"
+                    phase = "preflight"
                     _atomic_json(evidence_path, payload)
 
                     # This complete loop is deliberately separate from prepare.
@@ -1046,6 +1052,7 @@ class RuntimeExecutor:
                         payload["preflight"][capability.spec.name] = result
                     _atomic_json(evidence_path, payload)
 
+                    phase = "prepare"
                     for capability in plan:
                         if (
                             preflight_results[capability.spec.name].get(
@@ -1083,12 +1090,15 @@ class RuntimeExecutor:
                         self.driver.verify(capability, state)
                     _atomic_json(evidence_path, payload)
 
+                    phase = "execute"
                     environment["ECOMMERCE_RUNTIME_ORCHESTRATED"] = "1"
                     environment["ECOMMERCE_RUNTIME_RUN_ID"] = run_id
                     exit_code = execute_gates(environment)
                     payload["gate_results"] = gate_results() if gate_results else []
                     payload["status"] = "PASS" if exit_code == 0 else "FAIL"
                 except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- transaction boundary must compensate arbitrary gate failures
+                    if phase == "capture":
+                        payload["recovery"]["capture"] = "FAIL"
                     if isinstance(exc, RuntimeBlocked):
                         payload["status"] = "BLOCKED_RUNTIME"
                         exit_code = 2
@@ -1116,9 +1126,12 @@ class RuntimeExecutor:
                                 {"capability": capability.spec.name, **action}
                             )
                         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- attempt every compensation
-                            restore_failures.append(
+                            restore_action_failures.append(
                                 f"{capability.spec.name}: restore: {exc}"
                             )
+                    payload["recovery"]["restore"] = (
+                        "FAIL" if restore_action_failures else "PASS"
+                    )
                     for capability in reversed(plan):
                         if capability.spec.name not in initial:
                             continue
@@ -1130,9 +1143,13 @@ class RuntimeExecutor:
                                 self._filter_state(capability, result)
                             )
                         except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 -- collect every restore verification failure
-                            restore_failures.append(
+                            restore_verification_failures.append(
                                 f"{capability.spec.name}: verify_restore: {exc}"
                             )
+                    payload["recovery"]["restore_verification"] = (
+                        "FAIL" if restore_verification_failures else "PASS"
+                    )
+                    restore_failures = restore_action_failures + restore_verification_failures
                     payload["restore_verified"] = not restore_failures
                     if restore_failures:
                         payload["status"] = "FAIL_RESTORE"

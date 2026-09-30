@@ -27,7 +27,10 @@ status_derivation:
     NOT_STARTED: no-valid-contract-or-implementation
     CONTRACTED: architecture-and-acceptance-defined
     PARTIAL: some-required-implementation-or-evidence-present
-    IMPLEMENTED: required-implementation-exists-without-complete-proof
+    IMPLEMENTED: required-implementation-paths-exist
+    QUALIFIED: required-exact-sha-qualification-gates-pass
+    RUNTIME_PROVEN: required-runtime-execution-evidence-valid
+    DEPLOYED: required-persistent-deployment-evidence-valid
     PROVEN: all-required-exact-and-runtime-evidence-valid
     BLOCKED: explicit-condition-or-required-dependency-blocked
   runtime_evidence_contract:
@@ -247,6 +250,10 @@ milestones:
       runtime_evidence:
         - path: .context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json
           environments: [lab]
+          proof_type: lab-readiness
+        - path: .context/evidence/roadmap/M2.5-persistent-mgmt.json
+          environments: [management]
+          proof_type: persistent-deployment
 
   - id: M3
     name: PREPROD Infrastructure
