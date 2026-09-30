@@ -48,11 +48,10 @@ captured or the workflow explicitly authorizes cleanup. The Windows native
 cycle writes an early progress record and a fail-closed provisional result before
 unregistering its running task, so an interrupted attempt remains diagnosable.
 
-For M2.5 transfer diagnostics, the WSL controller gets pinned `iperf3` through
-the `developer_toolchain` Ansible role (`m25_transfer_diagnostics` tag). The
-disposable Rocky VM gets `iperf3` and `fio` only through the
-`platform/ansible/tests/mgmt_offline_vm/main.yml` `diagnostics` action. That
-action requires four pinned RPMs in the ignored
+The disposable Rocky VM receives `iperf3` and `fio` for M2.5 transfer
+diagnostics through the `diagnostics` action in
+`platform/ansible/tests/mgmt_offline_vm/main.yml`. That action requires four
+pinned RPMs in the ignored
 `.context/m2.5/diagnostics/rpms/` cache, verifies their source and guest SHA256
 and Rocky signatures, and installs them with every remote repository disabled.
 The cache can be populated from the pinned Rocky 10.2 image using:

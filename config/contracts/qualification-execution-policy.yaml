@@ -349,20 +349,27 @@ runtime_orchestration:
         verify_restore: none
       evidence_fields: [available_count]
     windows-host-cpu-capacity:
-      handler: windows-host-cpu
+      handler: command
       requires: [wsl-windows-interop]
       mutation_class: none
       timeout_seconds: 10
       privilege: none
       global_lock: false
+      parameters:
+        command:
+          - /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe
+          - -NoProfile
+          - -NonInteractive
+          - -Command
+          - 'if ([Environment]::ProcessorCount -ge 4) { exit 0 } else { exit 1 }'
       operations:
-        detector: powershell-processor-count
-        preflight: minimum-cpu-count
+        detector: powershell-processor-count-check
+        preflight: minimum-four-cpus
         prepare: none
         verify: none
         restore: none
         verify_restore: none
-      evidence_fields: [available_count, readable]
+      evidence_fields: [satisfied, command, exit_code, output_matches]
     disk-capacity:
       handler: disk
       requires: []
@@ -1093,9 +1100,6 @@ workflows:
           minimum_mib:
             context: vm_memory
       - name: windows-host-cpu-capacity
-        parameters:
-          minimum_count:
-            context: vm_cpus
       - name: vagrant-runtime
         parameters:
           expected_stdout:

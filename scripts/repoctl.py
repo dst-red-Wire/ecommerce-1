@@ -11406,7 +11406,6 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         return isinstance(payload, dict) and payload.get("git_sha") == head_sha
 
     require("ansible-playbook")
-    require("iperf3")
     command = [
         "ansible-playbook",
         "-i",
@@ -11655,6 +11654,8 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     inventory = payload.get("inventory", {})
     safety = payload.get("safety", {})
     if (
@@ -11664,6 +11665,7 @@ def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
         or payload.get("evidence_status") != "PASS"
         or not isinstance(inventory, dict)
         or inventory.get("failed_gates") != 0
+        or not isinstance(safety, dict)
         or safety.get("content_cache_authorizes_pass_reuse") is not False
         or safety.get("verdict_reuse_policy") != "exact-direct-parent-only"
     ):
@@ -11756,8 +11758,12 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     repetitions = int(qualification_workflow("performance_campaign")["repetitions"])
     expected_tree = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    budgets = payload.get("budgets")
+    safety = payload.get("safety")
     if (
         payload.get("schema_version") != 1
         or payload.get("status") != "PASS"
@@ -11765,11 +11771,13 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
         or payload.get("head_tree_sha") != expected_tree
         or payload.get("qualification_identity") != qualification_identity()
         or payload.get("repetitions") != repetitions
-        or not isinstance(payload.get("budgets"), dict)
-        or not payload["budgets"]
-        or any(item.get("status") != "PASS" for item in payload["budgets"].values())
-        or payload.get("safety", {}).get("native_dependency_caches_preserved") is not True
-        or payload.get("safety", {}).get("product_runtime_tests_remain_fresh") is not True
+        or not isinstance(budgets, dict)
+        or not budgets
+        or any(not isinstance(item, dict) or item.get("status") != "PASS"
+               for item in budgets.values())
+        or not isinstance(safety, dict)
+        or safety.get("native_dependency_caches_preserved") is not True
+        or safety.get("product_runtime_tests_remain_fresh") is not True
     ):
         return None
     return path

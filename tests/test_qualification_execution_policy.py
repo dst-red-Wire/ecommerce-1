@@ -718,6 +718,41 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
         self.assertEqual(1, command.count("--output"))
         self.assertEqual(str(audit_path), command[command.index("--output") + 1])
 
+    def test_performance_audit_validator_rejects_malformed_json_shapes(self):
+        head = "a" * 40
+        base = "b" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "audit.json"
+            payload = {
+                "schema_version": 1,
+                "head_sha": head,
+                "base_sha": base,
+                "evidence_status": "PASS",
+                "inventory": {"failed_gates": 0},
+                "safety": {
+                    "content_cache_authorizes_pass_reuse": False,
+                    "verdict_reuse_policy": "exact-direct-parent-only",
+                },
+            }
+
+            def fake_git(*args, check=True):
+                if args == ("rev-parse", "origin/main"):
+                    return base + "\n"
+                raise AssertionError(args)
+
+            with (
+                mock.patch.object(MOD, "_qualification_audit_path", return_value=audit_path),
+                mock.patch.object(MOD, "git", side_effect=fake_git),
+            ):
+                audit_path.write_text(json.dumps(payload), encoding="utf-8")
+                self.assertEqual(audit_path, MOD._valid_performance_audit("origin/main", head))
+                for malformed in ([], dict(payload, safety=None), dict(payload, safety=[])):
+                    with self.subTest(malformed=malformed):
+                        audit_path.write_text(json.dumps(malformed), encoding="utf-8")
+                        self.assertIsNone(MOD._valid_performance_audit("origin/main", head))
+                audit_path.write_text("{", encoding="utf-8")
+                self.assertIsNone(MOD._valid_performance_audit("origin/main", head))
+
     def test_chatgpt_review_readiness_uses_latest_exact_sha_verdict_per_kind(self):
         head = "a" * 40
         policy = {
@@ -2009,6 +2044,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 mock.patch.object(MOD, "qualification_identity", return_value="identity"),
             ):
                 self.assertEqual(proof, MOD._valid_performance_campaign(head))
+                for malformed in (
+                    [], dict(payload, budgets={"warm": None}),
+                    dict(payload, safety=None), dict(payload, safety=[]),
+                ):
+                    with self.subTest(malformed=malformed):
+                        proof.write_text(json.dumps(malformed), encoding="utf-8")
+                        self.assertIsNone(MOD._valid_performance_campaign(head))
                 payload["budgets"]["warm"]["status"] = "FAIL"
                 proof.write_text(json.dumps(payload), encoding="utf-8")
                 self.assertIsNone(MOD._valid_performance_campaign(head))

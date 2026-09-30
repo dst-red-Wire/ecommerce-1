@@ -343,18 +343,6 @@
       "requirement": "required-static"
     },
     {
-      "name": "iperf3",
-      "requires": [],
-      "provision_requires": ["ansible-playbook"],
-      "command": "iperf3",
-      "version_args": ["--version"],
-      "version_key": "IPERF3_VERSION",
-      "checksum_key": "IPERF3_SHA256_LINUX_AMD64",
-      "provision": {"type": "ansible", "tags": "m25_transfer_diagnostics"},
-      "classification": "managed",
-      "requirement": "optional-runtime"
-    },
-    {
       "name": "gh",
       "requires": [],
       "provision_requires": [
@@ -851,7 +839,6 @@
     "ast-grep": "ansible",
     "oras": "ansible",
     "rsync": "ansible",
-    "iperf3": "ansible",
     "gh": "ansible",
     "bazel": "ansible",
     "nx": "ansible",
@@ -1004,7 +991,6 @@
     ],
     "qualification-tools": [
       "python3",
-      "iperf3",
       "conftest",
       "opa",
       "k6",

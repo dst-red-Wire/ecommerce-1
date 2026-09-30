@@ -225,7 +225,6 @@ class RuntimePlanner:
         "wsl-interop",
         "memory",
         "cpu",
-        "windows-host-cpu",
         "disk",
         "kubernetes-context",
     }
@@ -593,23 +592,6 @@ class BuiltinCapabilityDriver:
             }
         if handler == "cpu":
             return {"available_count": os.cpu_count() or 0}
-        if handler == "windows-host-cpu":
-            result = self._run(
-                [
-                    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-Command",
-                    "[Environment]::ProcessorCount",
-                ],
-                timeout=capability.spec.timeout_seconds,
-            )
-            output = result.stdout.strip()
-            readable = result.returncode == 0 and re.fullmatch(r"[1-9][0-9]{0,3}", output) is not None
-            return {
-                "available_count": int(output) if readable else 0,
-                "readable": readable,
-            }
         if handler == "disk":
             path = str(capability.parameters.get("path", "."))
             try:
@@ -687,10 +669,8 @@ class BuiltinCapabilityDriver:
                 raise RuntimeBlocked(
                     f"memory-capacity: required={required}MiB available={initial_state.get('available_mib', 0)}MiB"
                 )
-        elif handler in {"cpu", "windows-host-cpu"}:
+        elif handler == "cpu":
             required = self._int_parameter(capability, "minimum_count")
-            if handler == "windows-host-cpu" and initial_state.get("readable") is not True:
-                raise RuntimeBlocked("windows-host-cpu-capacity: Windows processor count is unreadable or invalid")
             if int(initial_state.get("available_count", 0)) < required:
                 raise RuntimeBlocked(
                     f"{capability.spec.name}: required={required} available={initial_state.get('available_count', 0)}"

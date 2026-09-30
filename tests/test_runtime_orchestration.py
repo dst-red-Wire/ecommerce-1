@@ -64,29 +64,38 @@ class WindowsInteropOutputTests(unittest.TestCase):
         self.assertEqual("\ufffd", result.stdout)
 
     def test_windows_host_cpu_capacity_uses_windows_probe(self):
-        item = planned("windows-host-cpu-capacity", "windows-host-cpu")
-        item = PlannedCapability(item.spec, {"minimum_count": 4})
+        qualification = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        contract = yaml.safe_load((ROOT / "platform/ansible/tests/mgmt_offline_vm/contract.yml").read_text())
+        required_cpus = contract["mgmt_local_vm_contract"]["resources"]["rke2_server"]["cpus"]
+        item = RuntimePlanner(qualification["runtime_orchestration"]).resolve(
+            [CapabilityRequest("windows-host-cpu-capacity")]
+        )[-1]
+        command = item.parameters["command"]
+        self.assertEqual("command", item.spec.handler)
+        self.assertEqual("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", command[0])
+        self.assertEqual("-NonInteractive", command[2])
+        self.assertEqual(
+            f"if ([Environment]::ProcessorCount -ge {required_cpus}) {{ exit 0 }} else {{ exit 1 }}",
+            command[-1],
+        )
         driver = BuiltinCapabilityDriver()
-        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess([], 0, "8\r\n", "")) as probe:
+        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess(command, 0, "", "")) as probe:
             state = driver.capture(item)
-        self.assertEqual({"available_count": 8, "readable": True}, state)
-        self.assertEqual("[Environment]::ProcessorCount", probe.call_args.args[0][-1])
+        self.assertEqual(command, probe.call_args.args[0])
+        self.assertTrue(state["satisfied"])
         self.assertEqual("PASS", driver.preflight(item, state)["status"])
-        with self.assertRaisesRegex(RuntimeBlocked, "required=4 available=2"):
-            driver.preflight(item, {"available_count": 2, "readable": True})
 
-    def test_windows_host_cpu_probe_fails_closed_on_invalid_output(self):
-        item = planned("windows-host-cpu-capacity", "windows-host-cpu")
-        item = PlannedCapability(item.spec, {"minimum_count": 4})
+    def test_windows_host_cpu_probe_fails_closed_when_powershell_rejects_host(self):
+        qualification = yaml.safe_load((ROOT / "config/contracts/qualification-execution-policy.yaml").read_text())
+        item = RuntimePlanner(qualification["runtime_orchestration"]).resolve(
+            [CapabilityRequest("windows-host-cpu-capacity")]
+        )[-1]
         driver = BuiltinCapabilityDriver()
-        for result in (subprocess.CompletedProcess([], 0, "eight", ""),
-                       subprocess.CompletedProcess([], 0, "8\n9", ""),
-                       subprocess.CompletedProcess([], 1, "8", "failed")):
-            with self.subTest(output=result.stdout), mock.patch.object(driver, "_run", return_value=result):
-                state = driver.capture(item)
-                self.assertFalse(state["readable"])
-                with self.assertRaises(RuntimeBlocked):
-                    driver.preflight(item, state)
+        with mock.patch.object(driver, "_run", return_value=subprocess.CompletedProcess([], 1, "", "insufficient CPUs")):
+            state = driver.capture(item)
+        self.assertFalse(state["satisfied"])
+        with self.assertRaisesRegex(RuntimeBlocked, "windows-host-cpu-capacity"):
+            driver.preflight(item, state)
 
     def test_linux_cpu_capacity_still_uses_local_cpu_count(self):
         item = planned("cpu-capacity", "cpu")

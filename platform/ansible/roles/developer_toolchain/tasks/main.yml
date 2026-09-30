@@ -47,7 +47,7 @@
   become: true
   tags: [toolchain, go, cgo, node]
 
-- name: Install pinned transport and diagnostic prerequisites
+- name: Install pinned artifact transport prerequisite
   ansible.builtin.import_tasks: transport_tools.yml
 
 - name: Detect ansible-lint pipx prerequisite
