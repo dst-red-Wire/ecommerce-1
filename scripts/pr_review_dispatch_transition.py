@@ -116,6 +116,7 @@ def _trusted_transition(
     result = subprocess.run(
         command,
         cwd=target_root,
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
         check=False,
