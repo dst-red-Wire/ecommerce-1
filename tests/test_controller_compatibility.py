@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import time
@@ -204,29 +207,77 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
 
 
 class TrustedQualificationBoundaryTests(unittest.TestCase):
-    def test_trusted_toolchain_root_cannot_be_redirected_by_head(self):
-        with (
-            mock.patch.dict(
-                repoctl.os.environ,
-                {
-                    "REPOCTL_TRUSTED_CONTROLLER": str(Path(repoctl.__file__).resolve()),
-                    "REPOCTL_TRUSTED_POLICY_ROOT": str(repoctl.SCRIPT_DIR.parent),
-                },
-            ),
-            mock.patch.object(repoctl, "ROOT", Path("/untrusted/head")),
-        ):
-            self.assertEqual(
-                repoctl.SCRIPT_DIR.parent, repoctl._toolchain_policy_root()
+    def test_imported_head_module_reads_only_verified_base_toolchain(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work = Path(temp_dir)
+            base = work / "base"
+            head = work / "head"
+            (base / "scripts").mkdir(parents=True)
+            (head / "scripts").mkdir(parents=True)
+            controller = base / "scripts/repoctl.py"
+            wrapper = base / "scripts/repository_delivery.py"
+            controller.write_text("base controller\n", encoding="utf-8")
+            wrapper.write_text("base wrapper\n", encoding="utf-8")
+            copied_head_module = head / "scripts/repoctl.py"
+            copied_head_module.write_text("imported head module\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(base)], check=True)
+            subprocess.run(["git", "-C", str(base), "add", "."], check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(base),
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit",
+                    "-qm",
+                    "base",
+                ],
+                check=True,
             )
-        with mock.patch.dict(
-            repoctl.os.environ,
-            {
-                "REPOCTL_TRUSTED_CONTROLLER": "/untrusted/head/scripts/repoctl.py",
-                "REPOCTL_TRUSTED_POLICY_ROOT": "/untrusted/head",
-            },
-        ):
-            with self.assertRaises(RuntimeError):
-                repoctl._toolchain_policy_root()
+            base_sha = subprocess.check_output(
+                ["git", "-C", str(base), "rev-parse", "HEAD"], text=True
+            ).strip()
+            inherited = {
+                "REPOCTL_TRUSTED_WRAPPER": str(wrapper),
+                "REPOCTL_TRUSTED_CONTROLLER": str(controller),
+                "REPOCTL_TRUSTED_POLICY_ROOT": str(base),
+                "REPOCTL_TRUSTED_BASE_SHA": base_sha,
+                "REPOCTL_TRUSTED_TARGET_ROOT": str(head),
+                "REPOCTL_TRUSTED_HEAD_SHA": "b" * 40,
+                "REPOCTL_TRUSTED_PR_NUMBER": "172",
+            }
+            with (
+                mock.patch.dict(repoctl.os.environ, inherited),
+                mock.patch.object(repoctl, "ROOT", head),
+                mock.patch.object(repoctl, "__file__", str(copied_head_module)),
+                mock.patch.object(repoctl, "SCRIPT_DIR", copied_head_module.parent),
+                mock.patch.object(repoctl, "_TRUSTED_PR_EXECUTION_CONTEXT", None),
+            ):
+                self.assertEqual(base, repoctl._toolchain_policy_root())
+                with self.assertRaisesRegex(
+                    RuntimeError, "not executing the exact-base trusted controller"
+                ):
+                    repoctl._trusted_pr_execution_context(required=True)
+                with mock.patch.dict(
+                    repoctl.os.environ,
+                    {"REPOCTL_TRUSTED_BASE_SHA": "c" * 40},
+                ):
+                    with self.assertRaises(RuntimeError):
+                        repoctl._toolchain_policy_root()
+                with mock.patch.dict(
+                    repoctl.os.environ,
+                    {"REPOCTL_TRUSTED_CONTROLLER": str(copied_head_module)},
+                ):
+                    with self.assertRaises(RuntimeError):
+                        repoctl._toolchain_policy_root()
+                controller.write_text("modified base controller\n", encoding="utf-8")
+                with self.assertRaises(RuntimeError):
+                    repoctl._toolchain_policy_root()
 
     def test_head_only_handler_command_is_rejected_without_execution(self):
         policy = yaml.safe_load(
@@ -393,6 +444,92 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
             )
         self.assertEqual("FAIL", result["status"])
         self.assertIn("too many envelopes", result["reason"])
+
+    def test_invalid_head_archive_reports_controlled_json_state(self):
+        head_sha = "b" * 40
+        base_sha = "a" * 40
+        repository = "dst-red-Wire/ecommerce-1"
+        trusted = {
+            "trusted_root": ROOT,
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "pr_number": 172,
+        }
+        initial = {
+            "number": 172,
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "head_branch": "feature",
+            "base": "main",
+            "draft": False,
+            "merged": False,
+            "merge_commit_sha": "",
+        }
+        output = io.StringIO()
+        with (
+            mock.patch.object(
+                repoctl, "_require_trusted_pr_execution", return_value=trusted
+            ),
+            mock.patch.object(
+                repoctl, "_trusted_pr_execution_context", return_value=trusted
+            ),
+            mock.patch.object(repoctl.shutil, "which", return_value="/usr/bin/gh"),
+            mock.patch.object(
+                repoctl,
+                "repository_delivery_policy",
+                return_value={"pr_loop": {"state_persistence": "forbidden"}},
+            ),
+            mock.patch.object(
+                repoctl,
+                "_github_repository_identity",
+                return_value=("owner", repository),
+            ),
+            mock.patch.object(repoctl, "run", return_value=mock.Mock(returncode=0)),
+            mock.patch.object(repoctl, "_pr_loop_current_base", return_value=initial),
+            mock.patch.object(repoctl, "_pr_loop_open_pr_errors", return_value=[]),
+            mock.patch.object(repoctl, "_pr_loop_checkout_errors", return_value=[]),
+            mock.patch.object(
+                repoctl,
+                "_pr_loop_qualification",
+                return_value={"status": "MISSING", "head_sha": head_sha},
+            ),
+            mock.patch.object(
+                repoctl,
+                "pull_request_authority_evidence",
+                return_value=(
+                    {
+                        "code": {"status": "MISSING", "head_sha": head_sha},
+                        "security": {"status": "MISSING", "head_sha": head_sha},
+                    },
+                    {"status": "MISSING", "head_sha": head_sha},
+                ),
+            ),
+            mock.patch.object(
+                repoctl,
+                "derive_pr_loop_state",
+                return_value=("QUALIFICATION_REQUIRED", "QUALIFICATION"),
+            ),
+            mock.patch.object(
+                repoctl,
+                "_qualification_audit_path",
+                return_value=ROOT / ".context/performance" / (head_sha + ".json"),
+            ),
+            mock.patch.object(
+                compatibility,
+                "archive_head_artifacts",
+                side_effect=compatibility.CompatibilityError("invalid head archive"),
+            ) as archive,
+            contextlib.redirect_stdout(output),
+        ):
+            exit_code = repoctl._pr_loop_impl_locked(
+                172, dry_run=False, json_output=True
+            )
+        self.assertEqual(1, exit_code)
+        result = json.loads(output.getvalue())
+        self.assertEqual("BLOCKED", result["state"], result)
+        self.assertEqual("FIX_QUALIFICATION_ARCHIVE", result["next_action"], result)
+        self.assertIn("invalid head archive", result["blockers"], result)
+        archive.assert_called_once()
 
     def test_non_object_raw_proof_is_rejected_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -119,19 +119,46 @@ ROOT = Path(subprocess.check_output(
 
 
 def _toolchain_policy_root() -> Path:
-    # The trusted wrapper starts this exact-base file with the PR checkout as cwd.
+    # A HEAD module imported by a base-run test may read the base toolchain
+    # policy. Only _trusted_pr_execution_context grants transition authority.
     if _NATIVE_UAC_MODE:
         return SCRIPT_DIR.parent
     controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "").strip()
     policy_root = os.environ.get("REPOCTL_TRUSTED_POLICY_ROOT", "").strip()
     if controller or policy_root:
+        base_sha = os.environ.get("REPOCTL_TRUSTED_BASE_SHA", "").strip()
         if (
             not controller or not policy_root
-            or Path(controller).resolve() != Path(__file__).resolve()
-            or Path(policy_root).resolve() != SCRIPT_DIR.parent
+            or not Path(controller).is_absolute()
+            or not Path(policy_root).is_absolute()
+            or re.fullmatch(r"[0-9a-f]{40}", base_sha) is None
         ):
             raise RuntimeError("trusted qualification toolchain root is inconsistent")
-        return SCRIPT_DIR.parent
+        try:
+            trusted_root = Path(policy_root).resolve(strict=True)
+            trusted_controller = Path(controller).resolve(strict=True)
+            if (
+                trusted_controller != trusted_root / "scripts/repoctl.py"
+                or not trusted_controller.is_file()
+            ):
+                raise RuntimeError("trusted qualification toolchain root is inconsistent")
+            git_command = [*_NATIVE_UAC_GIT, "-C", str(trusted_root)]
+            for arguments, expected in (
+                (["rev-parse", "--show-toplevel"], str(trusted_root)),
+                (["rev-parse", "HEAD"], base_sha),
+                (["status", "--porcelain", "--untracked-files=all"], ""),
+            ):
+                completed = subprocess.run(
+                    [*git_command, *arguments],
+                    text=True, capture_output=True, check=False, timeout=10,
+                )
+                if completed.returncode or completed.stdout.strip() != expected:
+                    raise RuntimeError("trusted qualification toolchain root is inconsistent")
+        except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(
+                "trusted qualification toolchain root is inconsistent"
+            ) from exc
+        return trusted_root
     return ROOT
 
 
@@ -14185,7 +14212,10 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                     audit_path=_qualification_audit_path(initial_head_sha),
                     clear_originals=True,
                 )
-            except (OSError, ValueError) as exc:
+            except (
+                OSError, ValueError,
+                qualification_compatibility.CompatibilityError,
+            ) as exc:
                 result["state"] = "BLOCKED"
                 result["next_action"] = "FIX_QUALIFICATION_ARCHIVE"
                 result["blockers"].append(str(exc))
