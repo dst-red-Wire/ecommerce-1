@@ -9,7 +9,15 @@ param(
     [string]$WslDistribution = 'Ubuntu-24.04',
     [string]$WslRepoRoot = '/home/dev/ecommerce-1',
     [string]$ExpectedVmId = '',
-    [string]$ExpectedOwnerSid = ''
+    [string]$ExpectedOwnerSid = '',
+    [int]$PrNumber = 0,
+    [string]$PrRepository = '',
+    [string]$PrBase = '',
+    [string]$PrBaseSha = '',
+    [string]$PrBranch = '',
+    [string]$PinnedGhPath = '',
+    [string]$PinnedGhVersion = '',
+    [string]$PinnedGhSha256 = ''
 )
 
 Set-StrictMode -Version Latest
@@ -238,23 +246,58 @@ function Assert-NoImageCycle {
 function Assert-WslHead {
     param([string]$Expected)
     if ($Expected -notmatch '^[0-9a-f]{40}$' -or $WslDistribution -notmatch '^[A-Za-z0-9._-]+$' -or
-        $WslRepoRoot -notmatch '^/[A-Za-z0-9._/-]+$' -or $WslRepoRoot.Contains('..')) {
-        throw 'Exact SHA or WSL repository binding is invalid'
+        $WslRepoRoot -notmatch '^/[A-Za-z0-9._/-]+$' -or $WslRepoRoot.Contains('..') -or
+        $PrNumber -lt 1 -or $PrRepository -cne 'dst-red-Wire/ecommerce-1' -or
+        $PrBase -cne 'main' -or $PrBaseSha -notmatch '^[0-9a-f]{40}$' -or
+        $PrBranch -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $PrBranch.Contains('..') -or
+        $PinnedGhVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or
+        $PinnedGhSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $PinnedGhPath -notmatch '^/[A-Za-z0-9._/-]+$' -or $PinnedGhPath.Contains('..') -or
+        $PinnedGhPath -notmatch ('/tools/gh-' + [regex]::Escape($PinnedGhVersion) + '/bin/gh$')) {
+        throw 'Exact SHA, PR, managed gh or WSL binding is invalid'
     }
     $wsl = Join-Path $env:SystemRoot 'System32\wsl.exe'
+    $ghHash = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/sha256sum',$PinnedGhPath) -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $ghHash -Operation 'managed GitHub CLI SHA256'
+    $hashMatch = [regex]::Match($ghHash.StdOut.Trim(), '^([0-9a-f]{64})  /\S+$')
+    if (-not $hashMatch.Success -or $hashMatch.Groups[1].Value -cne $PinnedGhSha256) {
+        throw 'Managed GitHub CLI bytes differ from pinned archive'
+    }
+    $ghVersion = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--',$PinnedGhPath,'--version') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $ghVersion -Operation 'managed GitHub CLI version'
+    $versionLine = ($ghVersion.StdOut -split "[`r`n]")[0]
+    $versionMatch = [regex]::Match($versionLine, '^gh version ([0-9]+\.[0-9]+\.[0-9]+)(?:\s|$)')
+    if (-not $versionMatch.Success -or $versionMatch.Groups[1].Value -cne $PinnedGhVersion) {
+        throw 'Managed GitHub CLI version differs from pin'
+    }
     $head = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/git','rev-parse','HEAD') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
     Assert-ProcessSuccess -Result $head -Operation 'exact WSL repository HEAD'
     if ($head.StdOut.Trim() -ne $Expected) { throw 'Local WSL Git HEAD differs from the exact runner source SHA' }
     $status = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/git','status','--porcelain=v1','--untracked-files=all') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
     Assert-ProcessSuccess -Result $status -Operation 'exact WSL worktree status'
     if (-not [string]::IsNullOrWhiteSpace($status.StdOut)) { throw 'Exact-SHA native boot requires a clean WSL worktree' }
-    $branch = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/git','branch','--show-current') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
+    $branch = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/git','symbolic-ref','--quiet','--short','HEAD') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
     Assert-ProcessSuccess -Result $branch -Operation 'exact WSL branch'
-    $branchName = $branch.StdOut.Trim()
-    if ($branchName -notmatch '^[A-Za-z0-9][A-Za-z0-9/_-]*$') { throw 'Exact-SHA native boot requires a named branch' }
-    $published = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/gh','pr','view',$branchName,'--repo','dst-red-Wire/ecommerce-1','--json','headRefOid','-q','.headRefOid') -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
-    Assert-ProcessSuccess -Result $published -Operation 'published PR head'
-    if ($published.StdOut.Trim() -ne $Expected) { throw 'Published PR HEAD differs from the exact runner source SHA' }
+    if ($branch.StdOut.Trim() -cne $PrBranch) { throw 'Local WSL branch differs from exact PR binding' }
+    $prEndpoint = "repos/$PrRepository/pulls/$PrNumber"
+    $published = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--',$PinnedGhPath,'api',$prEndpoint) -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $published -Operation 'exact published PR'
+    $pr = ConvertFrom-Json -InputObject $published.StdOut -ErrorAction Stop
+    if ([string]$pr.number -cne [string]$PrNumber -or $pr.state -cne 'open' -or
+        $pr.draft -ne $false -or $null -ne $pr.merged_at -or
+        $pr.head.ref -cne $PrBranch -or $pr.head.sha -cne $Expected -or
+        $pr.head.repo.full_name -cne $PrRepository -or
+        $pr.base.ref -cne $PrBase -or $pr.base.sha -cne $PrBaseSha -or
+        $pr.base.repo.full_name -cne $PrRepository) {
+        throw 'Exact PR number, HEAD, base or repository changed during native preparation'
+    }
+    $baseEndpoint = "repos/$PrRepository/branches/$PrBase"
+    $currentBase = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--',$PinnedGhPath,'api',$baseEndpoint) -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $currentBase -Operation 'exact PR base'
+    $base = ConvertFrom-Json -InputObject $currentBase.StdOut -ErrorAction Stop
+    if ($base.name -cne $PrBase -or $base.commit.sha -cne $PrBaseSha) {
+        throw 'PR base moved during native preparation'
+    }
     $tree = Invoke-BoundedProcess -FilePath $wsl -Arguments @('-d',$WslDistribution,'--cd',$WslRepoRoot,'--','/usr/bin/git','rev-parse','HEAD^{tree}') -TimeoutSeconds 45 -WorkingDirectory $env:SystemRoot
     Assert-ProcessSuccess -Result $tree -Operation 'exact WSL repository tree'
     return $tree.StdOut.Trim()
@@ -471,6 +514,27 @@ function Assert-StateBinding {
         $State.bcd_backup_sha256 -notmatch '^[0-9a-f]{64}$') {
         throw 'Persistent owned native boot state is invalid'
     }
+}
+
+function Import-ProtectedPrBinding {
+    param($State)
+    $required = @(
+        'pr_number','pr_repository','pr_base','pr_base_sha','pr_branch',
+        'pinned_gh_path','pinned_gh_version','pinned_gh_sha256'
+    )
+    foreach ($name in $required) {
+        if ($State.PSObject.Properties.Name -notcontains $name) {
+            throw "Prepared native PR binding is incomplete: $name"
+        }
+    }
+    $script:PrNumber = [int]$State.pr_number
+    $script:PrRepository = [string]$State.pr_repository
+    $script:PrBase = [string]$State.pr_base
+    $script:PrBaseSha = [string]$State.pr_base_sha
+    $script:PrBranch = [string]$State.pr_branch
+    $script:PinnedGhPath = [string]$State.pinned_gh_path
+    $script:PinnedGhVersion = [string]$State.pinned_gh_version
+    $script:PinnedGhSha256 = [string]$State.pinned_gh_sha256
 }
 
 function Assert-OwnedBcdEntry {
@@ -1701,6 +1765,10 @@ function Invoke-Prepare {
         $state = [ordered]@{
             schema=1; mode='NETWORK_SMOKE_NATIVE'; phase='PREPARED'
             campaign_id=$Id; source_sha=$Sha; shadow_root=$script:SmokeRoot; source_tree_sha=$campaign.source_tree_sha
+            pr_number=$PrNumber; pr_repository=$PrRepository; pr_base=$PrBase
+            pr_base_sha=$PrBaseSha; pr_branch=$PrBranch
+            pinned_gh_path=$PinnedGhPath; pinned_gh_version=$PinnedGhVersion
+            pinned_gh_sha256=$PinnedGhSha256
             owner_sid=$ownerSid; s4u_probe_sha256=$probeDigest; normal_boot_id=$boot.current
             native_boot_id=$nativeId; entry_name=$EntryName; vm_name=$campaign.vm_name
             vm_id=$campaign.vm_id; expected_vm_id=$ExpectedVmId; box_sha256=$campaign.box_sha256
@@ -1747,6 +1815,10 @@ function Invoke-Prepare {
                     schema=1; mode='NETWORK_SMOKE_NATIVE'; phase='FAILED'; campaign_id=$Id; source_sha=$Sha
                     shadow_root=$script:SmokeRoot
                     source_tree_sha=$campaign.source_tree_sha; owner_sid=$ownerSid; s4u_probe_sha256=$probeDigest
+                    pr_number=$PrNumber; pr_repository=$PrRepository; pr_base=$PrBase
+                    pr_base_sha=$PrBaseSha; pr_branch=$PrBranch
+                    pinned_gh_path=$PinnedGhPath; pinned_gh_version=$PinnedGhVersion
+                    pinned_gh_sha256=$PinnedGhSha256
                     normal_boot_id=$boot.current; native_boot_id=$nativeId; entry_name=$EntryName
                     vm_name=$campaign.vm_name; vm_id=$campaign.vm_id; expected_vm_id=$ExpectedVmId
                     box_sha256=$campaign.box_sha256
@@ -1773,6 +1845,7 @@ function Invoke-Reboot {
     if ($state.campaign_id -ne $Id -or $state.source_sha -ne $Sha -or [int]$state.boot_attempts -ne 0) {
         throw 'Native smoke reboot differs from prepared exact campaign or was already attempted'
     }
+    Import-ProtectedPrBinding -State $state
     Assert-NoImageCycle
     $campaign = Assert-ExistingCampaign -Id $Id -Sha $Sha
     Assert-ProtectedNativeInputs -Id $Id

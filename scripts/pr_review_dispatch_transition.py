@@ -11,7 +11,6 @@ import argparse
 import hashlib
 import json
 import re
-import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -32,6 +31,7 @@ if __package__:
         resolve_exact_open_pr,
         revalidate_exact_open_pr,
     )
+    from .managed_gh import resolve_managed_gh
 else:
     from chatgpt_review_dispatcher import (
         ReviewDispatchError,
@@ -46,6 +46,7 @@ else:
         resolve_exact_open_pr,
         revalidate_exact_open_pr,
     )
+    from managed_gh import resolve_managed_gh
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -74,6 +75,14 @@ _ENRICHED_KEYS = frozenset(
 
 class ReviewTransitionError(RuntimeError):
     """The trusted output or exact PR binding is unavailable or contradictory."""
+
+
+def _managed_gh() -> str:
+    try:
+        binary, _, _ = resolve_managed_gh(ROOT)
+    except ValueError as exc:
+        raise ReviewTransitionError(str(exc)) from exc
+    return binary
 
 
 def _git(root: Path, *args: str) -> str:
@@ -243,9 +252,7 @@ def dispatch_controller_result(
         raise ReviewTransitionError(
             "local checkout differs from trusted review identity"
         )
-    gh = shutil.which("gh") or shutil.which("gh.exe")
-    if not gh:
-        raise ReviewTransitionError("GitHub CLI is unavailable for exact PR resolution")
+    gh = _managed_gh()
     if binding is None:
         binding = resolver(
             CANONICAL_REPOSITORY,
@@ -332,9 +339,7 @@ def _preflight_owner_markers(target_root: Path, pr_number: int) -> ExactPRBindin
         raise ReviewTransitionError("target PR checkout must remain clean")
     source_sha = _git(target_root, "rev-parse", "HEAD")
     branch = _git(target_root, "branch", "--show-current")
-    gh = shutil.which("gh") or shutil.which("gh.exe")
-    if not gh:
-        raise ReviewTransitionError("GitHub CLI is unavailable for exact PR resolution")
+    gh = _managed_gh()
     binding = resolve_exact_open_pr(
         CANONICAL_REPOSITORY, source_sha, branch, "main", gh=gh
     )
@@ -478,9 +483,7 @@ def review_dispatch_status(
         )
     source_sha = _git(target_root, "rev-parse", "HEAD")
     branch = _git(target_root, "branch", "--show-current")
-    gh = shutil.which("gh") or shutil.which("gh.exe")
-    if not gh:
-        raise ReviewTransitionError("GitHub CLI is unavailable for exact PR resolution")
+    gh = _managed_gh()
     binding = resolve_exact_open_pr(
         CANONICAL_REPOSITORY, source_sha, branch, "main", gh=gh
     )

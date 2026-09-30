@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import tarfile
 from dataclasses import replace
 import io
 import json
@@ -15,6 +17,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import exact_pr_binding
+import managed_gh
 import repoctl
 
 
@@ -26,6 +29,11 @@ VM_ID = "e80d60f3-a12e-4734-a654-0cd24dce0fa1"
 OWNER = "dst-red-Wire"
 REPOSITORY = "dst-red-Wire/ecommerce-1"
 TRUSTED_ROOT = "/tmp/exact-base-test"
+PINNED_GH = (
+    "/home/dev/.local/share/ecommerce-1/tools/gh-2.101.0/bin/gh",
+    "2.101.0",
+    "e" * 64,
+)
 
 
 def marker(kind: str, *, sha: str = SHA, status: str = "PASS",
@@ -72,7 +80,7 @@ class NativeUacReviewGateTests(unittest.TestCase):
             return self.comments
 
         def revalidate(binding, *, gh: str):
-            self.assertEqual(gh, "/usr/bin/gh")
+            self.assertEqual(gh, PINNED_GH[0])
             if binding != self.remote_binding:
                 raise exact_pr_binding.ExactPRBindingChanged("PR_CHANGED")
             return binding
@@ -82,7 +90,7 @@ class NativeUacReviewGateTests(unittest.TestCase):
               mock.patch.object(repoctl, "_native_uac_paginated_comments",
                                 side_effect=issue_comments_only)):
             return repoctl._native_uac_review_gate(
-                "/usr/bin/gh", self.binding, CAMPAIGN, VM_ID)
+                PINNED_GH[0], self.binding, CAMPAIGN, VM_ID)
 
     def test_pr_169_and_170_pass_with_their_own_sha_and_owner_markers(self) -> None:
         self.assertTrue(self.gate()[0])
@@ -106,7 +114,7 @@ class NativeUacReviewGateTests(unittest.TestCase):
         with mock.patch.object(exact_pr_binding, "revalidate_exact_open_pr",
                                side_effect=RuntimeError("offline")):
             self.assertFalse(repoctl._native_uac_review_gate(
-                "/usr/bin/gh", self.binding, CAMPAIGN, VM_ID)[0])
+                PINNED_GH[0], self.binding, CAMPAIGN, VM_ID)[0])
 
     def test_missing_blocked_wrong_sha_or_ambiguous_marker_fails_closed(self) -> None:
         for body in (
@@ -134,6 +142,13 @@ class NativeUacReviewGateTests(unittest.TestCase):
             f"NATIVE-UAC-V1 PR=169 SHA={SHA} CAMPAIGN={CAMPAIGN} VM={VM_ID} "
             "CODE=101 SECURITY=105 APPROVED", 6))
         self.assertTrue(self.gate()[0])
+
+    def test_security_review_before_latest_code_fails_closed(self) -> None:
+        self.security["created_at"] = self.code["created_at"]
+        self.security["updated_at"] = self.security["created_at"]
+        self.code["id"] = 104
+        self.owner["body"] = self.owner["body"].replace("CODE=101", "CODE=104")
+        self.assertIn("SECURITY review must follow", self.gate()[1])
 
     def test_only_immutable_owner_comments_have_authority(self) -> None:
         self.code["user"]["login"] = "other-user"
@@ -175,12 +190,13 @@ class NativeUacReviewGateTests(unittest.TestCase):
         response = subprocess.CompletedProcess([], 0, json.dumps([one]) + "\n" + json.dumps([two]), "")
         endpoint = f"repos/{REPOSITORY}/issues/169/comments?per_page=100"
         with mock.patch.object(repoctl, "run", return_value=response) as run:
-            self.assertEqual(repoctl._native_uac_paginated_comments("/usr/bin/gh", endpoint),
+            self.assertEqual(repoctl._native_uac_paginated_comments(PINNED_GH[0], endpoint),
                              [one, two])
-        self.assertEqual(run.call_args.args[0], ["/usr/bin/gh", "api", "--paginate", endpoint])
-        with mock.patch.object(repoctl, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")):
-            with self.assertRaises(RuntimeError):
-                repoctl._native_uac_paginated_comments("gh", endpoint)
+        self.assertEqual(run.call_args.args[0], [PINNED_GH[0], "api", "--paginate", endpoint])
+        with (mock.patch.object(
+                  repoctl, "run", return_value=subprocess.CompletedProcess([], 0, "{}", "")),
+              self.assertRaises(RuntimeError)):
+            repoctl._native_uac_paginated_comments("gh", endpoint)
 
     def _boot_context(self, *, head_reads: list[str] | None = None,
                       gate_results: list[tuple[bool, str]] | None = None):
@@ -198,6 +214,8 @@ class NativeUacReviewGateTests(unittest.TestCase):
         results = iter(gate_results or [(True, "clean")] * 3)
         stack = contextlib.ExitStack()
         stack.enter_context(mock.patch.object(repoctl, "git", side_effect=git_value))
+        stack.enter_context(mock.patch.object(
+            repoctl, "_native_uac_pinned_gh", return_value=PINNED_GH))
         stack.enter_context(mock.patch.object(repoctl.os.path, "isfile", return_value=True))
         stack.enter_context(mock.patch.object(repoctl.os, "access", return_value=True))
         stack.enter_context(mock.patch.object(Path, "is_file", return_value=True))
@@ -314,7 +332,8 @@ class NativeUacReviewGateTests(unittest.TestCase):
         self.assertEqual(gate.call_count, 3)
         self.assertTrue(all(call.args[1] is self.binding for call in gate.call_args_list))
         prepare.assert_called_once_with(CAMPAIGN)
-        self.assertIs(bootstrap.call_args.args[-1], self.binding)
+        self.assertIs(bootstrap.call_args.args[-2], self.binding)
+        self.assertEqual(bootstrap.call_args.args[-1], PINNED_GH)
         run.assert_called_once()
 
     def test_head_change_after_staging_or_before_uac_denies_elevation(self) -> None:
@@ -354,6 +373,98 @@ class NativeUacReviewGateTests(unittest.TestCase):
             text=True, capture_output=True, timeout=20)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("--expected-vm-id", result.stderr)
+
+
+class ManagedGhPinTests(unittest.TestCase):
+    def fixture(self, root: Path) -> tuple[Path, Path, Path]:
+        repository = root / "repository"
+        lock_path = repository / "config/contracts/toolchain-lock.json"
+        lock_path.parent.mkdir(parents=True)
+        tool_home = root / "tool-home"
+        version = "2.101.0"
+        binary = tool_home / f"share/ecommerce-1/tools/gh-{version}/bin/gh"
+        binary.parent.mkdir(parents=True)
+        binary.write_bytes(b"verified fixture GitHub CLI binary")
+        binary.chmod(0o755)
+        link = tool_home / "bin/gh"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(binary)
+        archive = tool_home / f"cache/gh-{version}-linux-amd64.tar.gz"
+        archive.parent.mkdir(parents=True)
+        with tarfile.open(archive, "w:gz") as package:
+            member = tarfile.TarInfo(f"gh_{version}_linux_amd64/bin/gh")
+            content = binary.read_bytes()
+            member.size = len(content)
+            member.mode = 0o755
+            package.addfile(member, io.BytesIO(content))
+        lock = {
+            "versions": {
+                "GH_VERSION": version,
+                "GH_SHA256_LINUX_AMD64_TARGZ": hashlib.sha256(
+                    archive.read_bytes()).hexdigest(),
+            },
+            "tool_lifecycle": {"active": {"gh": {
+                "version_ref": "GH_VERSION",
+                "checksum_ref": "GH_SHA256_LINUX_AMD64_TARGZ",
+                "provision": {"type": "ansible", "tags": "gh"},
+            }}},
+            "capability_policy": {"managed_install_root": {
+                "environment": "ECOMMERCE_TOOL_HOME",
+                "fallback": "~/.local",
+                "bin_subdirectory": "bin",
+                "share_subdirectory": "share/ecommerce-1",
+                "cache_subdirectory": "cache",
+                "fallback_cache_root": "~/.cache/ecommerce-1",
+            }},
+        }
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        return repository, tool_home, binary
+
+    @staticmethod
+    def fake_run(argv, **_kwargs):
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(
+                argv, 0, "gh version 2.101.0 (fixture)\\n", "")
+        if argv[1:] == ["api", "--help"]:
+            return subprocess.CompletedProcess(
+                argv, 0, "Flags: --paginate --slurp\\n", "")
+        raise AssertionError(argv)
+
+    def test_pinned_binary_is_resolved_from_verified_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, tool_home, binary = self.fixture(Path(temporary))
+            with (
+                mock.patch.dict(managed_gh.os.environ,
+                                {"ECOMMERCE_TOOL_HOME": str(tool_home)}),
+                mock.patch.object(managed_gh.subprocess, "run",
+                                  side_effect=self.fake_run),
+            ):
+                resolved = managed_gh.resolve_managed_gh(repository)
+        self.assertEqual(str(binary), resolved[0])
+        self.assertEqual("2.101.0", resolved[1])
+        self.assertEqual(hashlib.sha256(
+            b"verified fixture GitHub CLI binary").hexdigest(), resolved[2])
+
+    def test_missing_or_wrong_version_or_modified_binary_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, tool_home, binary = self.fixture(Path(temporary))
+            with mock.patch.dict(managed_gh.os.environ,
+                                 {"ECOMMERCE_TOOL_HOME": str(tool_home)}):
+                with (mock.patch.object(
+                          managed_gh.subprocess, "run",
+                          side_effect=lambda argv, **_kw: subprocess.CompletedProcess(
+                              argv, 0,
+                              "gh version 2.45.0 (fixture)\\n"
+                              if argv[1:] == ["--version"]
+                              else "Flags: --paginate --slurp\\n", "")),
+                      self.assertRaisesRegex(ValueError, "version")):
+                    managed_gh.resolve_managed_gh(repository)
+                binary.write_bytes(b"tampered gh")
+                with self.assertRaisesRegex(ValueError, "differs"):
+                    managed_gh.resolve_managed_gh(repository)
+                binary.unlink()
+                with self.assertRaises(ValueError):
+                    managed_gh.resolve_managed_gh(repository)
 
 
 if __name__ == "__main__":

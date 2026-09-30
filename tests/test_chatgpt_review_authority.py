@@ -59,6 +59,8 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
                         {
                             "id": index + 1,
                             "created_at": f"2026-09-21T08:{index:02d}:00Z",
+                            "updated_at": f"2026-09-21T08:{index:02d}:00Z",
+                            "author_association": "OWNER",
                             "body": body,
                             "user": {"login": author},
                         }
@@ -107,7 +109,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
     def test_rejects_blocking_chatgpt_finding(self):
         ready, reason = self.run_with_comments(
             [
-                self.marker("code", status="BLOCKED", blockers=1),
+                self.marker("code", status="FAIL", blockers=1),
                 self.marker("security"),
             ]
         )
@@ -116,7 +118,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
 
     def test_latest_exact_sha_marker_supersedes_earlier_same_kind_verdict(self):
         pass_code = self.marker("code")
-        blocked_code = self.marker("code", status="BLOCKED", blockers=1)
+        blocked_code = self.marker("code", status="FAIL", blockers=1)
         security = self.marker("security")
 
         ready, reason = self.run_with_comments([pass_code, blocked_code, security])
@@ -143,6 +145,8 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
                         {
                             "id": 1,
                             "created_at": "2026-09-21T08:00:00Z",
+                            "updated_at": "2026-09-21T08:00:00Z",
+                            "author_association": "OWNER",
                             "body": self.marker("code"),
                             "user": {"login": "dst-red-Wire"},
                         }
@@ -151,12 +155,16 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
                         {
                             "id": 2,
                             "created_at": "2026-09-21T08:01:00Z",
-                            "body": self.marker("code", status="BLOCKED", blockers=1),
+                            "updated_at": "2026-09-21T08:01:00Z",
+                            "author_association": "OWNER",
+                            "body": self.marker("code", status="FAIL", blockers=1),
                             "user": {"login": "dst-red-Wire"},
                         },
                         {
                             "id": 3,
                             "created_at": "2026-09-21T08:02:00Z",
+                            "updated_at": "2026-09-21T08:02:00Z",
+                            "author_association": "OWNER",
                             "body": self.marker("security"),
                             "user": {"login": "dst-red-Wire"},
                         },
@@ -206,7 +214,15 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
             )
         ready, reason = self.run_with_comments(payloads)
         self.assertFalse(ready)
-        self.assertIn("blocking_findings=False", reason)
+        self.assertIn("invalid proof fields", reason)
+
+    def test_malformed_repository_owner_json_fails_closed(self):
+        response = subprocess.CompletedProcess(
+            [], 0, json.dumps({"owner": [], "nameWithOwner": "dst-red-Wire/ecommerce-1"}), "")
+        with mock.patch.object(REPOCTL, "run", return_value=response):
+            ready, reason = REPOCTL.chatgpt_review_readiness("gh", 126, self.HEAD)
+        self.assertFalse(ready)
+        self.assertIn("identity payload is invalid", reason)
 
     def test_finish_pr_source_enforces_chatgpt_review_gate(self):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")

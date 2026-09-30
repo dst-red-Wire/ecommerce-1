@@ -1,6 +1,8 @@
 """The PR-head adapter can request review but cannot create review authority."""
 
 import hashlib
+import os
+import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
 
@@ -58,6 +60,14 @@ def controller(kind="CODE", *, pr=169, head=HEAD, base=BASE):
 class PRReviewDispatchTransitionTest(TestCase):
     def setUp(self):
         self.binding = ExactPRBinding(REPOSITORY, 169, "main", BASE, BRANCH, HEAD)
+        self.gh_path = "/managed/gh"
+        gh_patch = mock.patch.object(
+            transition,
+            "resolve_managed_gh",
+            return_value=(self.gh_path, "2.101.0", "c" * 64),
+        )
+        self.managed_gh = gh_patch.start()
+        self.addCleanup(gh_patch.stop)
 
     def local_git(self):
         return mock.patch.object(transition, "_git", side_effect=["", HEAD, BRANCH])
@@ -71,12 +81,13 @@ class PRReviewDispatchTransitionTest(TestCase):
             "verdict_authority": False,
         }
         dispatch = mock.Mock(return_value=record)
+        resolver = mock.Mock(return_value=self.binding)
         with self.local_git():
             result = transition.dispatch_controller_result(
                 controller(),
                 pr_number=169,
                 target_root=Path("/repo"),
-                resolver=lambda *args, **kwargs: self.binding,
+                resolver=resolver,
                 dispatcher=dispatch,
                 marker_lookup=lambda *_: None,
             )
@@ -87,6 +98,10 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual(self.binding.base_sha, request["base_sha"])
         self.assertEqual(self.binding.repository, request["repository"])
         self.assertEqual(self.binding.head_branch, request["head_branch"])
+        self.managed_gh.assert_called_once_with(transition.ROOT)
+        resolver.assert_called_once_with(
+            REPOSITORY, HEAD, BRANCH, "main", BASE, gh=self.gh_path
+        )
 
     def test_security_cannot_dispatch_without_exact_code_pass(self):
         with (
@@ -253,7 +268,6 @@ class PRReviewDispatchTransitionTest(TestCase):
         status = {"state": "REQUESTED", "verdict_authority": False}
         with (
             mock.patch.object(transition, "_git", side_effect=[HEAD, BRANCH]),
-            mock.patch.object(transition.shutil, "which", return_value="/gh"),
             mock.patch.object(
                 transition, "resolve_exact_open_pr", return_value=self.binding
             ) as resolver,
@@ -263,13 +277,15 @@ class PRReviewDispatchTransitionTest(TestCase):
         ):
             result = transition.review_dispatch_status(Path("/repo"), 169, "CODE")
         self.assertEqual(status, result)
-        resolver.assert_called_once_with(REPOSITORY, HEAD, BRANCH, "main", gh="/gh")
-        reader.assert_called_once_with(self.binding, "CODE", gh="/gh")
+        resolver.assert_called_once_with(
+            REPOSITORY, HEAD, BRANCH, "main", gh=self.gh_path
+        )
+        reader.assert_called_once_with(self.binding, "CODE", gh=self.gh_path)
+        self.managed_gh.assert_called_once_with(transition.ROOT)
 
     def test_status_rejects_a_different_pr(self):
         with (
             mock.patch.object(transition, "_git", side_effect=[HEAD, BRANCH]),
-            mock.patch.object(transition.shutil, "which", return_value="/gh"),
             mock.patch.object(
                 transition, "resolve_exact_open_pr", return_value=self.binding
             ),
@@ -282,10 +298,9 @@ class PRReviewDispatchTransitionTest(TestCase):
     def test_edited_owner_marker_blocks_before_trusted_transition(self):
         with (
             mock.patch.object(transition, "_git", side_effect=["", HEAD, BRANCH]),
-            mock.patch.object(transition.shutil, "which", return_value="/gh"),
             mock.patch.object(
                 transition, "resolve_exact_open_pr", return_value=self.binding
-            ),
+            ) as resolver,
             mock.patch.object(
                 transition,
                 "github_owner_marker_lookup",
@@ -296,3 +311,32 @@ class PRReviewDispatchTransitionTest(TestCase):
         ):
             transition.transition(Path("/trusted"), Path("/target"), 169)
         trusted.assert_not_called()
+        resolver.assert_called_once_with(
+            REPOSITORY, HEAD, BRANCH, "main", gh=self.gh_path
+        )
+        self.managed_gh.assert_called_once_with(transition.ROOT)
+
+    def test_missing_or_mismatched_managed_gh_blocks_despite_path_executable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            fake_gh = Path(directory) / "gh"
+            fake_gh.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_gh.chmod(0o755)
+            for failure in (
+                "managed gh executable is absent",
+                "managed gh binary differs from pinned archive",
+            ):
+                with (
+                    self.subTest(failure=failure),
+                    mock.patch.dict(os.environ, {"PATH": directory}),
+                    mock.patch.object(transition, "_git", side_effect=[HEAD, BRANCH]),
+                    mock.patch.object(
+                        transition,
+                        "resolve_exact_open_pr",
+                    ) as resolver,
+                    self.assertRaisesRegex(
+                        transition.ReviewTransitionError, failure
+                    ),
+                ):
+                    self.managed_gh.side_effect = ValueError(failure)
+                    transition.review_dispatch_status(Path("/repo"), 169, "CODE")
+                resolver.assert_not_called()

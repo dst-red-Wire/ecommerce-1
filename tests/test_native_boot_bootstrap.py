@@ -19,6 +19,11 @@ SHA = "a" * 40
 BASE_SHA = "b" * 40
 VM_ID = "e80d60f3-a12e-4734-a654-0cd24dce0fa1"
 REPO_WINDOWS = "\\\\wsl.localhost\\Ubuntu-24.04\\home\\dev\\ecommerce-1"
+GH_PIN = (
+    "/home/dev/.local/share/ecommerce-1/tools/gh-2.101.0/bin/gh",
+    "2.101.0",
+    "e" * 64,
+)
 
 
 class NativeBootBootstrapTests(unittest.TestCase):
@@ -29,7 +34,8 @@ class NativeBootBootstrapTests(unittest.TestCase):
         return repoctl._native_bootstrap_script(
             action, CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
             VM_ID if action in {"Prepare", "SelfTest"} else "",
-            binding if action in {"Prepare", "SelfTest"} else None)
+            binding if action in {"Prepare", "SelfTest"} else None,
+            GH_PIN if action in {"Prepare", "SelfTest"} else None)
 
     def test_credential_boundary_and_command_length(self):
         source = self._source()
@@ -50,7 +56,16 @@ class NativeBootBootstrapTests(unittest.TestCase):
         self.assertIn("$pr.base.sha -cne $prBaseSha", source)
         self.assertNotIn("'pr','view'", source)
         self.assertIn("'/usr/bin/git'", source)
-        self.assertIn("'/usr/bin/gh'", source)
+        self.assertNotIn("'/usr/bin/gh'", source)
+        self.assertIn("$g = '" + GH_PIN[0] + "'", source)
+        self.assertIn("$v = '2.101.0'", source)
+        self.assertIn("$d = '" + GH_PIN[2] + "'", source)
+        self.assertIn("'/usr/bin/sha256sum',$g", source)
+        self.assertIn("-PinnedGhPath $g", source)
+        self.assertIn("-PinnedGhVersion $v", source)
+        self.assertIn("-PinnedGhSha256 $d", source)
+        self.assertIn("-PrNumber $prNumber", source)
+        self.assertIn("-PrBaseSha $prBaseSha", source)
         self.assertLess(source.index("Get-GitBlobSha1 -Bytes"),
                         source.index("& $runner -Action Prepare"))
         self.assertLess(source.index("Assert-PublishedHead\n$runner"),
@@ -87,7 +102,19 @@ class NativeBootBootstrapTests(unittest.TestCase):
             with self.subTest(binding=binding), self.assertRaises(ValueError):
                 repoctl._native_bootstrap_script(
                     "Prepare", CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
-                    VM_ID, binding)
+                    VM_ID, binding, GH_PIN)
+
+    def test_prepare_rejects_missing_or_invalid_managed_gh(self):
+        binding = exact_pr_binding.ExactPRBinding(
+            "dst-red-Wire/ecommerce-1", 170, "main", BASE_SHA,
+            "fix/vm-lifecycle-runtime-proof", SHA)
+        for pin in (None, ("/usr/bin/gh", "2.45.0", "e" * 64),
+                    (GH_PIN[0], "bad-version", GH_PIN[2]),
+                    (GH_PIN[0], GH_PIN[1], "bad-digest")):
+            with self.subTest(pin=pin), self.assertRaises(ValueError):
+                repoctl._native_bootstrap_script(
+                    "Prepare", CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
+                    VM_ID, binding, pin)
 
     def test_bootstrap_parses_in_windows_powershell(self):
         parser = (

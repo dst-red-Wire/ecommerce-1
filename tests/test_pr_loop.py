@@ -482,6 +482,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         identifier=1,
         timestamp="2026-09-27T10:00:00Z",
         updated_at=None,
+        association="OWNER",
     ):
         return {
             "id": identifier,
@@ -489,6 +490,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
             "created_at": timestamp,
             "updated_at": updated_at or timestamp,
             "user": {"login": author},
+            "author_association": association,
         }
 
     @staticmethod
@@ -523,11 +525,10 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         self.assertEqual("MISSING", evidence["code"]["status"])
         self.assertEqual("MISSING", evidence["security"]["status"])
 
-    def test_latest_exact_sha_marker_wins_and_wrong_owner_or_shape_is_ignored(self):
+    def test_latest_exact_sha_marker_wins_and_wrong_owner_is_ignored(self):
         comments = [
-            self.comment(self.marker("code", self.SHA_A, "BLOCKED", 1), identifier=1),
+            self.comment(self.marker("code", self.SHA_A, "FAIL", 1), identifier=1),
             self.comment(self.marker("code", self.SHA_A), author="attacker", identifier=2),
-            self.comment(self.marker("code", self.SHA_A, unexpected=True), identifier=3),
             self.comment(self.marker("code", self.SHA_A), identifier=4),
         ]
         with mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()):
@@ -537,7 +538,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
 
     def test_code_and_security_fail_markers_remain_blocking(self):
         comments = [
-            self.comment(self.marker("code", self.SHA_A, "BLOCKED", 2)),
+            self.comment(self.marker("code", self.SHA_A, "FAIL", 2)),
             self.comment(self.marker("security", self.SHA_A, "FAIL", 1), identifier=2),
         ]
         with mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()):
@@ -548,7 +549,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
     def test_editing_old_comment_cannot_reorder_chatgpt_verdicts(self):
         comments = [
             self.comment(
-                self.marker("code", self.SHA_A, "BLOCKED", 1),
+                self.marker("code", self.SHA_A, "FAIL", 1),
                 identifier=2,
                 timestamp="2026-09-27T10:01:00Z",
             ),
@@ -559,10 +560,46 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
                 updated_at="2026-09-27T10:02:00Z",
             ),
         ]
-        with mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()):
-            evidence = REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_A)
-        self.assertEqual("BLOCKED", evidence["code"]["status"])
-        self.assertEqual(2, evidence["code"]["comment_id"])
+        with (mock.patch.object(REPOCTL, "pull_request_review_policy",
+                                return_value=self.policy()),
+              self.assertRaisesRegex(RuntimeError, "edited")):
+            REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_A)
+
+    def test_security_review_must_follow_latest_code_review(self):
+        comments = [
+            self.comment(self.marker("security", self.SHA_A), identifier=1),
+            self.comment(self.marker("code", self.SHA_A), identifier=2,
+                         timestamp="2026-09-27T10:01:00Z"),
+        ]
+        with (mock.patch.object(REPOCTL, "pull_request_review_policy",
+                                return_value=self.policy()),
+              self.assertRaisesRegex(RuntimeError, "SECURITY review must follow")):
+            REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_A)
+        comments[0]["created_at"] = comments[1]["created_at"]
+        comments[0]["updated_at"] = comments[1]["updated_at"]
+        with (mock.patch.object(REPOCTL, "pull_request_review_policy",
+                                return_value=self.policy()),
+              self.assertRaisesRegex(RuntimeError, "SECURITY review must follow")):
+            REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_A)
+
+    def test_owner_review_marker_must_be_unique_immutable_and_valid(self):
+        valid = self.marker("code", self.SHA_A)
+        invalid = (
+            self.comment(valid, association="CONTRIBUTOR"),
+            self.comment(valid, updated_at="2026-09-27T10:01:00Z"),
+            self.comment(valid + valid),
+            self.comment("<!-- chatgpt-exact-sha-review:v1 {bad JSON} -->"),
+            self.comment(self.marker("code", self.SHA_A, unexpected=True)),
+            self.comment(self.marker("code", self.SHA_A, "FAIL", 0)),
+            self.comment(self.marker("code", self.SHA_A, ["PASS"], 0)),
+        )
+        for comment in invalid:
+            with (self.subTest(comment=comment),
+                  mock.patch.object(REPOCTL, "pull_request_review_policy",
+                                    return_value=self.policy()),
+                  self.assertRaises(RuntimeError)):
+                REPOCTL._chatgpt_review_evidence(
+                    [self.comment(valid), comment], "owner", self.SHA_A)
 
     def test_owner_authorization_requires_owner_exact_scope_and_exact_sha(self):
         command = f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}"
@@ -648,6 +685,26 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         )
         self.assertEqual("MISSING", evidence["status"])
         self.assertIn("revoked", evidence["reason"])
+
+    def test_latest_invalid_owner_authorization_revokes_earlier_approval(self):
+        approved = self.comment(
+            f"/owner-authorization approve scope=pr-161 sha={self.SHA_A}")
+        latest_command = approved["body"]
+        cases = (
+            self.comment(latest_command, identifier=2,
+                         timestamp="2026-09-27T10:01:00Z", association="CONTRIBUTOR"),
+            self.comment(latest_command, identifier=2,
+                         timestamp="2026-09-27T10:01:00Z",
+                         updated_at="2026-09-27T10:02:00Z"),
+            self.comment(latest_command + " extra", identifier=2,
+                         timestamp="2026-09-27T10:01:00Z"),
+        )
+        for latest in cases:
+            with self.subTest(latest=latest):
+                evidence = REPOCTL._owner_authorization_evidence(
+                    [approved, latest], "owner", 161, self.SHA_A)
+                self.assertEqual("MISSING", evidence["status"])
+                self.assertEqual(2, evidence["superseded_comment_id"])
 
     def test_open_pr_validation_rejects_foreign_repo_and_malformed_sha(self):
         pr = {

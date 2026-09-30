@@ -787,19 +787,19 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
         cases = (
             (
-                "blocked-then-pass",
+                "fail-then-pass",
                 [
-                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "FAIL", 1)},
                     {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
                     {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
                 ],
                 True,
             ),
             (
-                "pass-then-blocked",
+                "pass-then-fail",
                 [
                     {"user": {"login": "owner"}, "body": proof("code", "PASS", 0)},
-                    {"user": {"login": "owner"}, "body": proof("code", "BLOCKED", 1)},
+                    {"user": {"login": "owner"}, "body": proof("code", "FAIL", 1)},
                     {"user": {"login": "owner"}, "body": proof("security", "PASS", 0)},
                 ],
                 False,
@@ -813,6 +813,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                         **comment,
                         "id": index,
                         "created_at": f"2026-09-27T10:{index:02d}:00Z",
+                        "updated_at": f"2026-09-27T10:{index:02d}:00Z",
+                        "author_association": "OWNER",
                     }
                     for index, comment in enumerate(comments, start=1)
                 ]

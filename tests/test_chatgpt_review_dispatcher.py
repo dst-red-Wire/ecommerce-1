@@ -316,6 +316,81 @@ class ReviewDispatcherTests(unittest.TestCase):
             with self.assertRaises(dispatcher.ReviewDispatchError):
                 self.dispatch(request)
 
+    def test_security_marker_must_follow_code_marker_in_creation_order(self):
+        code = self.proof("CODE")
+        security = self.proof("SECURITY")
+        code["created_at"] = code["updated_at"] = "2026-09-30T12:01:00Z"
+        for created_at, comment_id in (
+            ("2026-09-30T12:00:00Z", 101),
+            ("2026-09-30T12:01:00Z", 99),
+        ):
+            with self.subTest(created_at=created_at, comment_id=comment_id):
+                security["created_at"] = security["updated_at"] = created_at
+                security["comment_id"] = comment_id
+                result = self.dispatch(
+                    self.request("SECURITY"),
+                    owner_marker_lookup=lambda _, kind: (
+                        code if kind == "code" else security
+                    ),
+                )
+                self.assertEqual("BLOCKED", result["state"])
+                self.assertEqual("SECURITY_REVIEW_PREDATES_CODE", result["reason"])
+                self.assertNotIn("owner_comment_id", result)
+
+    def test_head_change_under_lock_does_not_supersede_newer_head(self):
+        old = self.dispatch(self.request())
+        new_binding = ExactPRBinding(
+            REPOSITORY, PR, "main", BASE_SHA, "feature/reviews", NEXT_HEAD_SHA
+        )
+        new = self.dispatch(self.request(binding=new_binding), binding=new_binding)
+        calls = 0
+
+        def revalidate(binding):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return binding
+            raise ExactPRBindingChanged(
+                "HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA
+            )
+
+        stale = self.dispatch(self.request(), binding_revalidator=revalidate)
+        self.assertEqual("SUPERSEDED", stale["state"])
+        self.assertEqual(2, calls)
+        self.assertEqual(
+            "SUPERSEDED", json.loads(Path(old["outbox_path"]).read_text())["state"]
+        )
+        self.assertEqual(
+            "BLOCKED", json.loads(Path(new["outbox_path"]).read_text())["state"]
+        )
+
+    def test_head_change_after_lookup_prevents_transport_submit(self):
+        transport = FakeTransport()
+        calls = 0
+
+        def revalidate(binding):
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                return binding
+            raise ExactPRBindingChanged(
+                "HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA
+            )
+
+        result = self.dispatch(
+            self.request(),
+            transport=transport,
+            owner_marker_lookup=lambda *_: None,
+            binding_revalidator=revalidate,
+        )
+        self.assertEqual("SUPERSEDED", result["state"])
+        self.assertEqual(3, calls)
+        self.assertEqual([], transport.submissions)
+        self.assertEqual(
+            "SUPERSEDED",
+            json.loads(Path(result["outbox_path"]).read_text())["state"],
+        )
+
     def test_new_head_supersedes_old_outbox_and_stale_binding_cannot_submit(self):
         old = self.dispatch(self.request())
         new_binding = ExactPRBinding(

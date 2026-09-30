@@ -8617,15 +8617,18 @@ _CHATGPT_REVIEW_MARKER_RE = re.compile(
 
 
 def _chatgpt_review_payloads(body: str) -> list[dict]:
-    payloads: list[dict] = []
-    for raw in _CHATGPT_REVIEW_MARKER_RE.findall(body or ""):
-        try:
-            value = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(value, dict):
-            payloads.append(value)
-    return payloads
+    if "chatgpt-exact-sha-review:v1" not in body:
+        return []
+    markers = _CHATGPT_REVIEW_MARKER_RE.findall(body)
+    if len(markers) != 1 or body.count("chatgpt-exact-sha-review:v1") != 1:
+        raise RuntimeError("ChatGPT review marker is missing, malformed, or ambiguous")
+    try:
+        proof = json.loads(markers[0])
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ChatGPT review marker JSON is malformed") from exc
+    if not isinstance(proof, dict):
+        raise RuntimeError("ChatGPT review marker must be a JSON object")
+    return [proof]
 
 
 _CHATGPT_REVIEW_KEYS = {
@@ -8655,7 +8658,9 @@ def _github_repository_identity(gh: str) -> tuple[str, str]:
         payload = json.loads(response.stdout or "{}")
     except json.JSONDecodeError as exc:
         raise RuntimeError("invalid GitHub repository identity JSON") from exc
-    owner_login = str((payload.get("owner") or {}).get("login") or "")
+    if not isinstance(payload, dict) or not isinstance(payload.get("owner"), dict):
+        raise RuntimeError("GitHub repository identity payload is invalid")
+    owner_login = str(payload["owner"].get("login") or "")
     name_with_owner = str(payload.get("nameWithOwner") or "")
     if not owner_login:
         raise RuntimeError("repository owner login is missing")
@@ -8685,7 +8690,9 @@ def _github_pr_comments(gh: str, name_with_owner: str, pr_number: int) -> list[d
         raise RuntimeError("invalid GitHub PR comments JSON") from exc
     if not isinstance(pages, list) or any(not isinstance(page, list) for page in pages):
         raise RuntimeError("GitHub PR paginated comments payload is invalid")
-    comments = [comment for page in pages for comment in page if isinstance(comment, dict)]
+    if any(not isinstance(comment, dict) for page in pages for comment in page):
+        raise RuntimeError("GitHub PR comments payload contains a malformed comment")
+    comments = [comment for page in pages for comment in page]
     comments.sort(key=_immutable_comment_order_key)
     return comments
 
@@ -8715,25 +8722,46 @@ def _chatgpt_review_evidence(
     completed: dict[str, dict | None] = {
         kind: None for kind in evidence_contract["required_kinds"]
     }
+    latest_comments: dict[str, dict] = {}
     for comment in _comments_in_immutable_order(comments):
         if _comment_author_login(comment) != owner_login:
             continue
-        for proof in _chatgpt_review_payloads(str(comment.get("body") or "")):
+        body = str(comment.get("body") or "")
+        if "chatgpt-exact-sha-review:v1" not in body:
+            continue
+        if comment.get("author_association") != "OWNER":
+            raise RuntimeError("ChatGPT review marker author lacks OWNER authority")
+        if comment.get("updated_at") != comment.get("created_at"):
+            raise RuntimeError("ChatGPT review marker comment was edited")
+        for proof in _chatgpt_review_payloads(body):
             kind = str(proof.get("kind") or "")
             if (
                 set(proof) != _CHATGPT_REVIEW_KEYS
                 or proof.get("provider") != "ChatGPT"
-                or proof.get("head_sha") != head_sha
                 or kind not in completed
-                or not isinstance(proof.get("status"), str)
-                or not proof.get("status")
+                or not isinstance(proof.get("head_sha"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", proof["head_sha"]) is None
+                or type(proof.get("status")) is not str
+                or proof["status"] not in {"PASS", "FAIL"}
+                or type(proof.get("blocking_findings")) is not int
+                or not (
+                    (proof["status"] == "PASS" and proof["blocking_findings"] == 0)
+                    or (proof["status"] == "FAIL" and proof["blocking_findings"] > 0)
+                )
             ):
+                raise RuntimeError("ChatGPT review marker has invalid proof fields")
+            if proof["head_sha"] != head_sha:
                 continue
             completed[kind] = {
                 **proof,
                 "comment_id": comment.get("id"),
                 "source": "github-pr-comment",
             }
+            latest_comments[kind] = comment
+    if ("code" in latest_comments and "security" in latest_comments
+        and _immutable_comment_order_key(latest_comments["security"])
+            <= _immutable_comment_order_key(latest_comments["code"])):
+        raise RuntimeError("ChatGPT SECURITY review must follow the CODE review")
     result: dict[str, dict] = {}
     for kind, proof in completed.items():
         result[kind] = proof or {
@@ -8753,14 +8781,20 @@ def _owner_authorization_evidence(
         if _comment_author_login(comment) != owner_login:
             continue
         command = str(comment.get("body") or "").strip()
-        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
-        if match is None or match.group("scope") != scope:
+        if ("/owner-authorization" not in command
+            or re.search(r"(?<!\S)scope=" + re.escape(scope) + r"(?=\s|$)", command)
+                is None):
             continue
+        match = _OWNER_AUTHORIZATION_RE.fullmatch(command)
         latest = {
             "command": command,
-            "action": match.group("action"),
-            "sha": match.group("sha"),
+            "action": match.group("action") if match else "",
+            "sha": match.group("sha") if match else "",
             "comment_id": comment.get("id"),
+            "valid": (match is not None
+                      and match.group("scope") == scope
+                      and comment.get("author_association") == "OWNER"
+                      and comment.get("updated_at") == comment.get("created_at")),
         }
     expected_command = f"/owner-authorization approve scope={scope} sha={head_sha}"
     if latest is None:
@@ -8770,6 +8804,16 @@ def _owner_authorization_evidence(
             "head_sha": head_sha,
             "command": expected_command,
             "source": "github-pr-comment",
+        }
+    if not latest["valid"]:
+        return {
+            "status": "MISSING",
+            "scope": scope,
+            "head_sha": head_sha,
+            "command": expected_command,
+            "source": "github-pr-comment",
+            "reason": "latest owner authorization is malformed, edited, or lacks OWNER authority",
+            "superseded_comment_id": latest["comment_id"],
         }
     if latest["sha"] != head_sha:
         return {
@@ -10158,6 +10202,12 @@ def lab_network_native_prepare(campaign_id: str,
 _NATIVE_UAC_REPOSITORY = "dst-red-Wire/ecommerce-1"
 
 
+def _native_uac_pinned_gh() -> tuple[str, str, str]:
+    from managed_gh import resolve_managed_gh
+
+    return resolve_managed_gh(ROOT)
+
+
 def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
     response = run(
         [gh, "api", "--paginate", endpoint],
@@ -10244,6 +10294,8 @@ def _native_uac_review_gate(gh: str, binding, campaign_id: str,
                 return False, f"native UAC latest ChatGPT {kind} review is not clean"
         code = latest["code"][0]
         security = latest["security"][0]
+        if _immutable_comment_order_key(security) <= _immutable_comment_order_key(code):
+            return False, "native UAC SECURITY review must follow the CODE review"
         expected = (
             f"NATIVE-UAC-V1 PR={binding.pr_number} SHA={binding.head_sha} "
             f"CAMPAIGN={campaign_id} VM={expected_vm_id.lower()} "
@@ -10279,7 +10331,8 @@ def _native_boot_encoded(source: str) -> str:
 
 def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
                              distribution: str, repo_windows: str,
-                             expected_vm_id: str = "", binding=None) -> str:
+                             expected_vm_id: str = "", binding=None,
+                             pinned_gh: tuple[str, str, str] | None = None) -> str:
     """Build the only code run elevated before the protected runner is verified."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         raise ValueError("unsupported native bootstrap action")
@@ -10307,6 +10360,15 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
                 raise ValueError("native bootstrap PR binding changed during validation")
         except RuntimeError as exc:
             raise ValueError("native bootstrap PR binding is malformed") from exc
+        if (not isinstance(pinned_gh, tuple) or len(pinned_gh) != 3
+            or not all(isinstance(value, str) for value in pinned_gh)
+            or re.fullmatch(r"/[A-Za-z0-9._/-]+", pinned_gh[0]) is None
+            or ".." in Path(pinned_gh[0]).parts
+            or re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", pinned_gh[1]) is None
+            or re.fullmatch(r"[0-9a-f]{64}", pinned_gh[2]) is None
+            or not pinned_gh[0].endswith(
+                f"/tools/gh-{pinned_gh[1]}/bin/gh")):
+            raise ValueError("native bootstrap requires the verified managed gh binary")
     token = uuid.uuid4().hex
     values = {
         "@@ACTION@@": action,
@@ -10321,6 +10383,9 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
         "@@PR_BRANCH@@": binding.head_branch if binding else "",
         "@@PR_BASE@@": binding.base if binding else "",
         "@@PR_BASE_SHA@@": binding.base_sha if binding else "",
+        "@@GH_PATH@@": pinned_gh[0] if pinned_gh else "",
+        "@@GH_VERSION@@": pinned_gh[1] if pinned_gh else "",
+        "@@GH_SHA256@@": pinned_gh[2] if pinned_gh else "",
         "@@TOKEN@@": token,
     }
     script = r"""
@@ -10338,6 +10403,9 @@ $prRepository = @@PR_REPOSITORY@@
 $prBranch = @@PR_BRANCH@@
 $prBase = @@PR_BASE@@
 $prBaseSha = @@PR_BASE_SHA@@
+$g = @@GH_PATH@@
+$v = @@GH_VERSION@@
+$d = @@GH_SHA256@@
 $token = @@TOKEN@@
 $system = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $wsl = Join-Path $system 'System32\wsl.exe'
@@ -10349,7 +10417,7 @@ $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.Wind
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     $selfEncoded = [Environment]::GetCommandLineArgs()[-1]
     if ($selfEncoded -notmatch '^[A-Za-z0-9+/]+={0,2}$') {
-        throw 'Native bootstrap cannot recover its encoded command for UAC'
+        throw 'UAC command missing'
     }
     $powershell = Join-Path $system 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $child = Start-Process -FilePath $powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden -ErrorAction Stop -ArgumentList (
@@ -10357,7 +10425,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit $child.ExitCode
 }
 if ($system -ine 'C:\Windows' -or -not [IO.File]::Exists($wsl)) {
-    throw 'Native bootstrap trusted Windows system tools are unavailable'
+    throw 'Windows tools unavailable'
 }
 $env:SystemRoot = $system
 $env:PATH = (Join-Path $system 'System32') + ';' + $system
@@ -10368,7 +10436,7 @@ function Assert-Regular {
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
     if ($item.PSIsContainer -ne $Directory -or
         ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw "Native bootstrap path is absent, redirected or has the wrong type: $Path"
+        throw "unsafe path: $Path"
     }
 }
 function New-ProtectedAcl {
@@ -10398,7 +10466,7 @@ function Assert-Protected {
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $adminSid.Value -or
         -not $acl.AreAccessRulesProtected) {
-        throw "Native bootstrap protected ACL owner or inheritance differs: $Path"
+        throw "ACL owner/inheritance differs: $Path"
     }
     $expected = @{
         $adminSid.Value=[Security.AccessControl.FileSystemRights]::FullControl
@@ -10409,7 +10477,7 @@ function Assert-Protected {
     $inherit = if ($Directory) { [Security.AccessControl.InheritanceFlags]'ContainerInherit,ObjectInherit' }
                else { [Security.AccessControl.InheritanceFlags]::None }
     $rules = @($acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
-    if ($rules.Count -ne $expected.Count) { throw "Native bootstrap ACL rule set differs: $Path" }
+    if ($rules.Count -ne $expected.Count) { throw "ACL rule count differs: $Path" }
     foreach ($rule in $rules) {
         $sid = $rule.IdentityReference.Value
         if (-not $expected.ContainsKey($sid) -or
@@ -10417,7 +10485,7 @@ function Assert-Protected {
             $rule.FileSystemRights -ne $expected[$sid] -or
             $rule.InheritanceFlags -ne $inherit -or
             $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) {
-            throw "Native bootstrap ACL grants unexpected rights: $Path"
+            throw "ACL rights differ: $Path"
         }
     }
 }
@@ -10427,7 +10495,7 @@ function Assert-ProgramFiles {
         $acl = Get-Acl -LiteralPath $path -ErrorAction Stop
         $owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
         if ($owner -notin @($adminSid.Value,$systemSid.Value) -and $owner -notmatch '^S-1-5-80-') {
-            throw "Native bootstrap parent has an unprivileged owner: $path"
+            throw "unsafe parent owner: $path"
         }
         foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
             if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
@@ -10442,7 +10510,7 @@ function Assert-ProgramFiles {
                     [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles
             }
             if (($rule.FileSystemRights -band $mutate) -ne 0) {
-                throw "Native bootstrap parent grants unprivileged mutation rights: $path"
+                throw "unsafe parent rights: $path"
             }
         }
     }
@@ -10450,7 +10518,7 @@ function Assert-ProgramFiles {
 function Invoke-WslBounded {
     param([string[]]$Arguments, [int]$TimeoutSeconds)
     foreach ($argument in $Arguments) {
-        if ($argument -match '[\s"]') { throw 'Native bootstrap WSL argument is unsafe' }
+        if ($argument -match '[\s"]') { throw 'unsafe WSL argument' }
     }
     $start = New-Object Diagnostics.ProcessStartInfo
     $start.FileName = $wsl
@@ -10465,12 +10533,12 @@ function Invoke-WslBounded {
         $stderr = $process.StandardError.ReadToEndAsync()
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             $process.Kill()
-            throw 'Native bootstrap WSL verification timed out'
+            throw 'WSL timeout'
         }
         $out = $stdout.GetAwaiter().GetResult()
         $err = $stderr.GetAwaiter().GetResult()
         if ($process.ExitCode -ne 0 -or $out.Length -gt 65536 -or $err.Length -gt 65536) {
-            throw "Native bootstrap WSL verification failed: $err"
+            throw "WSL verification failed: $err"
         }
         return $out.Trim()
     }
@@ -10480,7 +10548,7 @@ function Get-GitBlobSha1 {
     param([byte[]]$Bytes)
     $utf8 = [Text.UTF8Encoding]::new($false,$true)
     $text = $utf8.GetString($Bytes).Replace(([string][char]13 + [char]10),[string][char]10)
-    if ($text.Contains([string][char]13)) { throw 'Native bootstrap script has unsupported newlines' }
+    if ($text.Contains([string][char]13)) { throw 'script newline invalid' }
     $content = $utf8.GetBytes($text)
     $prefix = [Text.Encoding]::ASCII.GetBytes('blob ' + $content.Length + [char]0)
     $blob = New-Object byte[] ($prefix.Length + $content.Length)
@@ -10491,17 +10559,21 @@ function Get-GitBlobSha1 {
     finally { $digest.Dispose() }
 }
 function Assert-PublishedHead {
-    foreach ($tool in @('/usr/bin/git','/usr/bin/gh')) {
+    foreach ($tool in @('/usr/bin/git',$g)) {
         [void](Invoke-WslBounded -Arguments @('/usr/bin/test','-x',$tool) -TimeoutSeconds 20)
     }
     $head = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse','HEAD') -TimeoutSeconds 45
-    if ($head -ne $sha) { throw 'Native bootstrap local Git HEAD differs' }
+    if ($head -ne $sha) { throw 'Git HEAD differs' }
     $dirty = Invoke-WslBounded -Arguments @('/usr/bin/git','status','--porcelain=v1','--untracked-files=all') -TimeoutSeconds 45
-    if ($dirty) { throw 'Native bootstrap exact-SHA worktree is dirty' }
+    if ($dirty) { throw 'worktree dirty' }
     $branch = Invoke-WslBounded -Arguments @('/usr/bin/git','symbolic-ref','--quiet','--short','HEAD') -TimeoutSeconds 45
-    if ($branch -cne $prBranch) { throw 'Native bootstrap local branch differs from exact PR binding' }
+    if ($branch -cne $prBranch) { throw 'branch differs' }
+    $ghDigest = Invoke-WslBounded -Arguments @('/usr/bin/sha256sum',$g) -TimeoutSeconds 45
+    if ($ghDigest -notmatch ('^' + $d + '\s')) {
+        throw 'gh checksum differs'
+    }
     $prEndpoint = 'repos/' + $prRepository + '/pulls/' + $prNumber
-    $prResult = Invoke-WslBounded -Arguments @('/usr/bin/gh','api',$prEndpoint) -TimeoutSeconds 60
+    $prResult = Invoke-WslBounded -Arguments @($g,'api',$prEndpoint) -TimeoutSeconds 60
     $pr = ConvertFrom-Json -InputObject $prResult -ErrorAction Stop
     if ([string]$pr.number -cne $prNumber -or $pr.state -cne 'open' -or
         $pr.draft -ne $false -or $null -ne $pr.merged_at -or
@@ -10509,13 +10581,13 @@ function Assert-PublishedHead {
         $pr.base.repo.full_name -cne $prRepository -or
         $pr.head.ref -cne $prBranch -or $pr.head.sha -cne $sha -or
         $pr.head.repo.full_name -cne $prRepository) {
-        throw 'Native bootstrap PR identity changed'
+        throw 'PR changed'
     }
     $baseEndpoint = 'repos/' + $prRepository + '/branches/' + $prBase
-    $baseResult = Invoke-WslBounded -Arguments @('/usr/bin/gh','api',$baseEndpoint) -TimeoutSeconds 60
+    $baseResult = Invoke-WslBounded -Arguments @($g,'api',$baseEndpoint) -TimeoutSeconds 60
     $base = ConvertFrom-Json -InputObject $baseResult -ErrorAction Stop
     if ($base.name -cne $prBase -or $base.commit.sha -cne $prBaseSha) {
-        throw 'Native bootstrap PR base changed'
+        throw 'PR base changed'
     }
 }
 
@@ -10542,7 +10614,7 @@ if ($action -in @('Prepare','SelfTest')) {
         $object = Invoke-WslBounded -Arguments @('/usr/bin/git','rev-parse',($sha + ':' + $relative)) -TimeoutSeconds 45
         if ($object -notmatch '^[0-9a-f]{40}$' -or
             (Get-GitBlobSha1 -Bytes ([IO.File]::ReadAllBytes($target))) -ne $object) {
-            throw "Native bootstrap copied script differs from Git object: $name"
+            throw "copied script differs from Git: $name"
         }
     }
     Assert-PublishedHead
@@ -10550,7 +10622,7 @@ if ($action -in @('Prepare','SelfTest')) {
     & $runner -Action SelfTest
     if (-not $?) { throw 'Protected elevated native boot SelfTest failed' }
     if ($action -eq 'Prepare') {
-        & $runner -Action Prepare -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl -ExpectedVmId $expectedVmId
+        & $runner -Action Prepare -CampaignId $campaign -SourceSha $sha -LabRoot 'C:\ecommerce-lab' -WslDistribution $distro -WslRepoRoot $repoWsl -ExpectedVmId $expectedVmId -PrNumber $prNumber -PrRepository $prRepository -PrBase $prBase -PrBaseSha $prBaseSha -PrBranch $prBranch -PinnedGhPath $g -PinnedGhVersion $v -PinnedGhSha256 $d
     }
 }
 else {
@@ -10689,15 +10761,15 @@ def lab_network_native_boot(action: str, campaign_id: str,
         return fail("native network-smoke elevated Prepare/SelfTest requires --expected-vm-id UUID")
     source_sha = ""
     binding = None
+    pinned_gh = None
     if action in {"Prepare", "SelfTest"}:
-        gh = "/usr/bin/gh"
-        if not os.path.isfile(gh) or not os.access(gh, os.X_OK):
-            return fail("native UAC requires the pinned GitHub CLI to verify independent reviews")
         try:
             from exact_pr_binding import resolve_exact_open_pr
 
             if git("status", "--porcelain", "--untracked-files=all").strip():
                 return fail("native network-smoke boot requires a clean exact-SHA worktree")
+            pinned_gh = _native_uac_pinned_gh()
+            gh = pinned_gh[0]
             source_sha = git("rev-parse", "HEAD").strip()
             branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
             binding = resolve_exact_open_pr(
@@ -10741,7 +10813,7 @@ def lab_network_native_boot(action: str, campaign_id: str,
             source_sha = _native_boot_shadow_source_sha(campaign_id, action)
         bootstrap = _native_bootstrap_script(
             action, campaign_id, source_sha,
-            distribution, repo_windows, expected_vm_id, binding)
+            distribution, repo_windows, expected_vm_id, binding, pinned_gh)
         command = _native_boot_elevation_command(powershell, bootstrap)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc))
@@ -10749,6 +10821,11 @@ def lab_network_native_boot(action: str, campaign_id: str,
         stable, reason = _native_uac_worktree_matches(binding)
         if not stable:
             return fail(reason)
+        try:
+            if _native_uac_pinned_gh() != pinned_gh:
+                return fail("native UAC managed gh changed before elevation")
+        except ValueError as exc:
+            return fail(str(exc))
         qualified, reason = _native_uac_qualification_matches(binding, trusted_root)
         if not qualified:
             return fail(reason)

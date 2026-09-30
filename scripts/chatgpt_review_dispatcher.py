@@ -391,6 +391,44 @@ def _read(path: Path, identity: str) -> dict[str, Any]:
     return value
 
 
+def _revalidated_binding(
+    binding: ExactPRBinding, revalidate: BindingRevalidator
+) -> tuple[ExactPRBinding | None, str | None]:
+    try:
+        current = revalidate(binding)
+    except ExactPRBindingChanged as exc:
+        if exc.reason == "HEAD_CHANGED" and _sha(exc.current_head_sha):
+            return None, exc.current_head_sha
+        raise ReviewDispatchError("exact PR binding changed before dispatch") from exc
+    if not isinstance(current, ExactPRBinding) or current != binding:
+        raise ReviewDispatchError("exact PR binding changed before dispatch")
+    return current, None
+
+
+def _superseded_request(
+    path: Path,
+    identity: str,
+    head_sha: str,
+    current_head_sha: str,
+    record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if record is not None:
+        record["state"] = "SUPERSEDED"
+        record["reason"] = "HEAD_CHANGED"
+        record["superseded_by_head_sha"] = current_head_sha
+        _write(path, record)
+    return {
+        "schema_version": 1,
+        "identity": identity,
+        "state": "SUPERSEDED",
+        "reason": "HEAD_CHANGED",
+        "verdict_authority": False,
+        "head_sha": head_sha,
+        "superseded_by_head_sha": current_head_sha,
+        "outbox_path": str(path) if record is not None else "",
+    }
+
+
 def _supersede_old_heads(pr_root: Path, head_sha: str) -> None:
     for head_dir in pr_root.iterdir():
         if head_dir.name == head_sha or head_dir.name.startswith("."):
@@ -596,7 +634,10 @@ def _owner_proof(
         or type(proof.get("comment_id")) is not int
         or proof["comment_id"] <= 0
         or not isinstance(proof.get("created_at"), str)
-        or not proof["created_at"]
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            proof["created_at"],
+        ) is None
         or proof.get("updated_at") != proof["created_at"]
         or proof.get("is_latest_for_kind") is not True
         or type(proof.get("blocking_findings")) is not int
@@ -733,31 +774,22 @@ def dispatch_review_request(
     revalidate = binding_revalidator or (
         lambda value: revalidate_exact_open_pr(value, gh=gh)
     )
-    try:
-        current = revalidate(binding)
-    except ExactPRBindingChanged as exc:
-        if exc.reason == "HEAD_CHANGED" and _sha(exc.current_head_sha):
-            if path.exists():
-                with _pr_lock(pr_root):
-                    record = _read(path, identity)
-                    record["state"] = "SUPERSEDED"
-                    record["reason"] = "HEAD_CHANGED"
-                    record["superseded_by_head_sha"] = exc.current_head_sha
-                    _write(path, record)
-            return {
-                "schema_version": 1,
-                "identity": identity,
-                "state": "SUPERSEDED",
-                "reason": "HEAD_CHANGED",
-                "verdict_authority": False,
-                "head_sha": request["head_sha"],
-                "superseded_by_head_sha": exc.current_head_sha,
-                "outbox_path": str(path) if path.exists() else "",
-            }
-        raise ReviewDispatchError("exact PR binding changed before dispatch") from exc
-    if not isinstance(current, ExactPRBinding) or current != binding:
-        raise ReviewDispatchError("exact PR binding changed before dispatch")
+    current, changed_head = _revalidated_binding(binding, revalidate)
+    if changed_head is not None:
+        if path.exists():
+            with _pr_lock(pr_root):
+                record = _read(path, identity)
+                return _superseded_request(
+                    path, identity, request["head_sha"], changed_head, record
+                )
+        return _superseded_request(path, identity, request["head_sha"], changed_head)
     with _pr_lock(pr_root):
+        current, changed_head = _revalidated_binding(binding, revalidate)
+        if changed_head is not None:
+            record = _read(path, identity) if path.exists() else None
+            return _superseded_request(
+                path, identity, request["head_sha"], changed_head, record
+            )
         _supersede_old_heads(pr_root, request["head_sha"])
         if path.exists():
             record = _read(path, identity)
@@ -797,11 +829,19 @@ def dispatch_review_request(
             record["code_comment_id"] = code["comment_id"]
         proof = _owner_proof(owner_marker_lookup, current, kind)
         if proof is not None:
-            checked = revalidate(binding)
-            if checked != binding:
-                raise ReviewDispatchError(
-                    "exact PR binding changed after owner marker lookup"
+            _, changed_head = _revalidated_binding(binding, revalidate)
+            if changed_head is not None:
+                return _superseded_request(
+                    path, identity, request["head_sha"], changed_head, record
                 )
+            if kind == "SECURITY" and (
+                proof["created_at"], proof["comment_id"]
+            ) <= (code["created_at"], code["comment_id"]):
+                record.pop("owner_comment_id", None)
+                record["state"] = "BLOCKED"
+                record["reason"] = "SECURITY_REVIEW_PREDATES_CODE"
+                _write(path, record)
+                return {**record, "outbox_path": str(path)}
             record["state"] = "PASS" if proof["status"] == "PASS" else "FAIL"
             record["reason"] = "OWNER_MARKER_VERIFIED"
             record["owner_comment_id"] = proof["comment_id"]
@@ -815,6 +855,12 @@ def dispatch_review_request(
             record["state"] = "BLOCKED"
             record["reason"] = policy["transport_missing_state"]
         else:
+            if not record.get("submission_id"):
+                _, changed_head = _revalidated_binding(binding, revalidate)
+                if changed_head is not None:
+                    return _superseded_request(
+                        path, identity, request["head_sha"], changed_head, record
+                    )
             try:
                 _advance_transport(request, record, transport)
             except (OSError, RuntimeError, TypeError, ValueError, KeyError):
