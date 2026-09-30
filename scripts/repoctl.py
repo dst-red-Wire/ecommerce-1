@@ -9753,6 +9753,35 @@ def _delivery_pr_work_item_marker(changed_paths: list[str]) -> str:
 def _delivery_pr_body(gh: str, base_name: str, branch: str, head: str, title: str, ev: dict) -> Path:
     changed = git("diff", "--name-only", f"origin/{base_name}...HEAD")
     marker = _delivery_pr_work_item_marker(changed.splitlines())
+    import issue_lifecycle
+
+    relation = issue_lifecycle.parse_pr_work_item_marker(marker)
+    package, package_status, _ = _delivery_package_input(
+        relation["work_package_path"],
+        issue=relation["work_item_issue"],
+        milestone=relation["milestone"],
+        changed_paths=changed.splitlines(),
+    )
+    if package_status.get("status") != "VALID":
+        raise RuntimeError("delivery PR work package is invalid")
+    owner_login, _ = _github_repository_identity(gh)
+    acceptance = package["acceptance"]
+    contracts = "\n".join(f"- {path}" for path in acceptance["contracts"])
+    tests = "\n".join(f"- {path}" for path in acceptance["tests"])
+    owner_section = (
+        "## Owner and work package\n\n"
+        f"- Owner: @{owner_login}\n"
+        f"- Work item: #{relation['work_item_issue']}\n"
+        f"- Package: {relation['work_package_path']}\n\n"
+    )
+    contracts_section = f"## Relevant contracts\n\n{contracts}\n\n"
+    tests_section = f"## Required tests\n\n{tests}\n\n"
+    rollback_section = (
+        "## Rollback\n\n"
+        "Stop PR transitions, preserve exact evidence, and submit a signed revert PR "
+        "against current main. Run preflight, qualification, and reviews for the "
+        "revert SHA before merging.\n\n"
+    )
     stat = git("diff", "--stat", f"origin/{base_name}...HEAD")
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
@@ -9781,7 +9810,7 @@ def _delivery_pr_body(gh: str, base_name: str, branch: str, head: str, title: st
         if isinstance(g, dict)
     )
     body.write_text(
-        f"## Summary\n\n{title}\n\n## Primary work item\n\n{marker}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        f"## Summary\n\n{title}\n\n## Primary work item\n\n{marker}\n\n{owner_section}{contracts_section}{tests_section}## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n{rollback_section}## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
     return body

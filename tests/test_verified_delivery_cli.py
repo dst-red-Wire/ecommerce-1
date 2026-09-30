@@ -145,6 +145,40 @@ class VerifiedDeliveryCliTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exactly one scoped work package"):
             REPOCTL._delivery_pr_work_item_marker(["services/product/main.go"])
 
+    def test_pr_body_records_owner_contracts_tests_and_rollback(self):
+        changed = "scripts/repoctl.py\ntests/test_verified_delivery_cli.py\n"
+
+        def fake_git(*args):
+            if args[:2] == ("diff", "--name-only"):
+                return changed
+            if args[:2] == ("diff", "--stat"):
+                return "2 files changed"
+            raise AssertionError(args)
+
+        evidence = {
+            "base_sha": "a" * 40,
+            "gates": [{"gate": "governance", "status": "PASS"}],
+        }
+        with (
+            mock.patch.object(REPOCTL, "git", side_effect=fake_git),
+            mock.patch.object(REPOCTL, "CONTEXT", Path(self.temporary.name)),
+            mock.patch.object(REPOCTL, "_github_repository_identity",
+                              return_value=("dst-red-Wire", "dst-red-Wire/ecommerce-1")),
+            mock.patch.object(REPOCTL, "github_exact_ci_status", return_value="PASS"),
+        ):
+            body = REPOCTL._delivery_pr_body(
+                "gh", "main", "feat/verified-delivery-chain", "b" * 40,
+                "Verified delivery chain", evidence,
+            ).read_text(encoding="utf-8")
+        self.assertIn("Owner: @dst-red-Wire", body)
+        self.assertIn("Work item: #170", body)
+        self.assertIn("## Relevant contracts", body)
+        self.assertIn("config/contracts/work-package-policy.yaml", body)
+        self.assertIn("## Required tests", body)
+        self.assertIn("tests/test_verified_delivery_cli.py", body)
+        self.assertIn("## Rollback", body)
+        self.assertIn("signed revert PR", body)
+
     def test_acceptance_failure_stops_bundle_before_runtime_and_creation(self):
         import delivery_preflight
         import evidence_bundle
