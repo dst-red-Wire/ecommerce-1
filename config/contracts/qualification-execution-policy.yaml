@@ -1284,3 +1284,10 @@ dynamic_state:
     - network-state
     - secrets-and-authentication
     - provisioning-state
+
+work_item_preflight:
+  additional_capabilities:
+    toolchain-pinned:
+      required_parameters: [sha256]
+      parameter_types:
+        sha256: sha256-digest

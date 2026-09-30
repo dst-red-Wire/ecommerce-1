@@ -212,6 +212,24 @@ repository_delivery:
         - changed_files
         - exact_head_verified
       payload_digest: sha256
+      structured_compatibility_handoff:
+        helper: scripts/pr_monitor.py#build_handoff
+        schema_version: 1
+        event: CHATGPT_REVIEW_REQUIRED
+        provider: ChatGPT
+        review_kinds: [CODE, SECURITY]
+        qualification: verified-exact-base-envelope-PASS
+        qualification_evidence_digest: sha256-prefixed
+        identity_fields: [repository, pr, base_sha, head_sha, tree_sha]
+        changed_files: sorted-unique-repository-relative
+        delta: numeric-counts-only
+        digest: sha256-canonical-json-without-digest-field
+        canonical_json: sorted-keys-compact-ascii
+        payload_budget_bytes: 8192
+        security_requires: exact-head-CODE_PASS
+        local_transport: unavailable
+        consumer: external-orchestrator
+        verdict_authority: false
       fail_if_payload_unavailable: true
       consumer: external-automatic
       invocation_binding: exact-pr-and-head-sha

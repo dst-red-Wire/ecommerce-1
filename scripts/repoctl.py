@@ -55,6 +55,8 @@ _MODERN_ENGINEERING = None
 _CVE_POLICY = None
 _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=None)
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
+_PR_LOOP_REPOSITORY = contextvars.ContextVar("pr_loop_repository", default="")
+_PR_LOOP_FRESH_WITNESS = contextvars.ContextVar("pr_loop_fresh_witness", default=None)
 _PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 _NATIVE_UAC_CONTROLLER_PATH = contextvars.ContextVar("native_uac_controller_path", default=None)
@@ -117,8 +119,20 @@ ROOT = Path(subprocess.check_output(
 
 
 def _toolchain_policy_root() -> Path:
-    # Native UAC runs the base controller with the PR checkout as cwd.
-    return SCRIPT_DIR.parent if _NATIVE_UAC_MODE else ROOT
+    # The trusted wrapper starts this exact-base file with the PR checkout as cwd.
+    if _NATIVE_UAC_MODE:
+        return SCRIPT_DIR.parent
+    controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "").strip()
+    policy_root = os.environ.get("REPOCTL_TRUSTED_POLICY_ROOT", "").strip()
+    if controller or policy_root:
+        if (
+            not controller or not policy_root
+            or Path(controller).resolve() != Path(__file__).resolve()
+            or Path(policy_root).resolve() != SCRIPT_DIR.parent
+        ):
+            raise RuntimeError("trusted qualification toolchain root is inconsistent")
+        return SCRIPT_DIR.parent
+    return ROOT
 
 
 def _raw_toolchain_lock() -> dict:
@@ -1201,6 +1215,8 @@ def _review_policy_document() -> dict:
 
 
 _QUALIFICATION_EXECUTION_POLICY: dict | None = None
+_QUALIFICATION_EXECUTION_POLICY_ROOT: Path | None = None
+_QUALIFICATION_EXECUTION_POLICY_TRUSTED = False
 _NATIVE_UAC_QUALIFICATION_POLICY: tuple[Path, dict] | None = None
 
 
@@ -1282,18 +1298,37 @@ def qualification_execution_policy() -> dict:
     """Load the single repository-wide execution/cache/parallelism contract."""
     if qualification_steps is None:
         raise RuntimeError("qualification step validator is required")
-    global _QUALIFICATION_EXECUTION_POLICY, _NATIVE_UAC_QUALIFICATION_POLICY
+    global _QUALIFICATION_EXECUTION_POLICY, _QUALIFICATION_EXECUTION_POLICY_ROOT
+    global _QUALIFICATION_EXECUTION_POLICY_TRUSTED, _NATIVE_UAC_QUALIFICATION_POLICY
     native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
-    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    trusted_context = _trusted_pr_execution_context() if not native_controller else None
+    policy_root = (
+        Path(native_controller).resolve().parents[1] if native_controller else
+        Path(trusted_context["trusted_root"]) if trusted_context else ROOT
+    )
     if (native_controller and (
         _NATIVE_UAC_QUALIFICATION_POLICY is None
         or _NATIVE_UAC_QUALIFICATION_POLICY[0] != policy_root
-    )) or (not native_controller and _QUALIFICATION_EXECUTION_POLICY is None):
+    )) or (not native_controller and (
+        _QUALIFICATION_EXECUTION_POLICY is None
+        or _QUALIFICATION_EXECUTION_POLICY_TRUSTED != (trusted_context is not None)
+        or (trusted_context is not None
+            and _QUALIFICATION_EXECUTION_POLICY_ROOT != policy_root)
+    )):
         lock = ruby_yaml(str(policy_root / "architecture.lock.yaml"))
         relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
         if not isinstance(relative, str) or not relative.strip():
             raise RuntimeError("architecture.lock.yaml must register machine_contracts.qualification_execution_policy")
-        policy = ruby_yaml(str(policy_root / relative))
+        if trusted_context:
+            if relative != "config/contracts/qualification-execution-policy.yaml":
+                raise RuntimeError("trusted qualification policy registration changed")
+            from trusted_qualification_policy import load_trusted_execution_policy
+            policy = load_trusted_execution_policy(
+                policy_root, ROOT, str(trusted_context["base_sha"]),
+                str(trusted_context["head_sha"]),
+            )
+        else:
+            policy = ruby_yaml(str(policy_root / relative))
         qualification_steps.validate_policy(policy, policy_root)
         properties_policy = ruby_yaml(str(
             policy_root / policy["step_qualification"]["properties_authority"]))
@@ -1681,6 +1716,8 @@ def qualification_execution_policy() -> dict:
             _NATIVE_UAC_QUALIFICATION_POLICY = (policy_root, policy)
         else:
             _QUALIFICATION_EXECUTION_POLICY = policy
+            _QUALIFICATION_EXECUTION_POLICY_ROOT = policy_root
+            _QUALIFICATION_EXECUTION_POLICY_TRUSTED = trusted_context is not None
     if native_controller:
         assert _NATIVE_UAC_QUALIFICATION_POLICY is not None
         return copy.deepcopy(_NATIVE_UAC_QUALIFICATION_POLICY[1])
@@ -1688,11 +1725,12 @@ def qualification_execution_policy() -> dict:
 
 
 def _execution_policy_path() -> Path:
-    lock = ruby_yaml("architecture.lock.yaml")
+    policy_root = _toolchain_policy_root()
+    lock = ruby_yaml(str(policy_root / "architecture.lock.yaml"))
     relative = lock.get("machine_contracts", {}).get("qualification_execution_policy")
     if not isinstance(relative, str) or not relative:
         raise RuntimeError("qualification execution policy is not registered")
-    return ROOT / relative
+    return policy_root / relative
 
 
 def _resolved_gate_policy(name: str) -> dict:
@@ -4769,7 +4807,7 @@ def _fresh_evidence(evidence: dict) -> bool:
 def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[tuple[str, ...], bool]]]:
     """Conservatively bind declared gates and their transitive tool providers."""
     native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
-    policy_root = Path(native_controller).resolve().parents[1] if native_controller else ROOT
+    policy_root = Path(native_controller).resolve().parents[1] if native_controller else _toolchain_policy_root()
     contract = json.loads((policy_root / "config/toolchain/capabilities.json").read_text(encoding="utf-8"))
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
@@ -4898,18 +4936,26 @@ def qualification_identity() -> str:
     return digest.hexdigest()
 
 
-def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
+def _valid_exact_evidence(
+    base_ref: str, head: str, *, evidence_path: Path | None = None,
+) -> Path | None:
     requested = git("rev-parse", head).strip()
     if requested != git("rev-parse", "HEAD").strip():
         return None
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return None
-    path = CONTEXT / "evidence" / f"{requested}.json"
+    path = evidence_path if evidence_path is not None else CONTEXT / "evidence" / f"{requested}.json"
+    if evidence_path is not None:
+        archive_root = CONTEXT / "evidence" / "controller-compatibility" / "v1" / "raw"
+        if not path.is_relative_to(archive_root) or path.is_symlink():
+            return None
     if not path.is_file():
         return None
     try:
         evidence = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(evidence, dict):
         return None
     if (
         not _supported_evidence_schema(evidence, 5)
@@ -4930,8 +4976,12 @@ def _valid_exact_evidence(base_ref: str, head: str) -> Path | None:
 def affected(base: str, head: str, *, strict_unknown: bool = False) -> list[str]:
     require("ruby")
     native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
-    script = (str(Path(native_controller).resolve().parents[1] / "scripts/ci-affected.rb")
-              if native_controller else "scripts/ci-affected.rb")
+    trusted_context = _trusted_pr_execution_context() if not native_controller else None
+    policy_root = (
+        Path(native_controller).resolve().parents[1] if native_controller else
+        Path(trusted_context["trusted_root"]) if trusted_context else ROOT
+    )
+    script = str(policy_root / "scripts/ci-affected.rb")
     command = ["ruby", script, "--base", base, "--head", head, "--format", "json"]
     if strict_unknown:
         command.append("--strict-unknown")
@@ -7792,6 +7842,32 @@ def _normalized_pr_loop_for_legacy_validation(policy: object) -> dict:
     if not isinstance(policy, dict):
         return {}
     normalized = copy.deepcopy(policy)
+    handoff = normalized.get("chatgpt_handoff")
+    expected_structured_handoff = {
+        "helper": "scripts/pr_monitor.py#build_handoff",
+        "schema_version": 1,
+        "event": "CHATGPT_REVIEW_REQUIRED",
+        "provider": "ChatGPT",
+        "review_kinds": ["CODE", "SECURITY"],
+        "qualification": "verified-exact-base-envelope-PASS",
+        "qualification_evidence_digest": "sha256-prefixed",
+        "identity_fields": ["repository", "pr", "base_sha", "head_sha", "tree_sha"],
+        "changed_files": "sorted-unique-repository-relative",
+        "delta": "numeric-counts-only",
+        "digest": "sha256-canonical-json-without-digest-field",
+        "canonical_json": "sorted-keys-compact-ascii",
+        "payload_budget_bytes": 8192,
+        "security_requires": "exact-head-CODE_PASS",
+        "local_transport": "unavailable",
+        "consumer": "external-orchestrator",
+        "verdict_authority": False,
+    }
+    if (
+        not isinstance(handoff, dict)
+        or handoff.pop("structured_compatibility_handoff", None)
+        != expected_structured_handoff
+    ):
+        return {}
     owner_boundary = normalized.get("owner_boundary")
     risk_policy = normalized.pop("risk_classification", None)
     expected_transition = [
@@ -12413,8 +12489,14 @@ def _qualification_audit_path(head_sha: str) -> Path:
     return ROOT / relative
 
 
-def _valid_performance_audit(base_ref: str, head_sha: str) -> Path | None:
-    path = _qualification_audit_path(head_sha)
+def _valid_performance_audit(
+    base_ref: str, head_sha: str, *, audit_path: Path | None = None,
+) -> Path | None:
+    path = audit_path if audit_path is not None else _qualification_audit_path(head_sha)
+    if audit_path is not None:
+        archive_root = CONTEXT / "evidence" / "controller-compatibility" / "v1" / "audit"
+        if not path.is_relative_to(archive_root) or path.is_symlink():
+            return None
     if not path.is_file():
         return None
     try:
@@ -12467,10 +12549,15 @@ def qualification_proof(base: str) -> int:
         requested_audit_path = _qualification_audit_path(head)
         if verification_ran:
             requested_audit_path.unlink(missing_ok=True)
+        trusted = _trusted_pr_execution_context()
+        audit_script = (
+            str(Path(trusted["trusted_root"]) / "scripts/performance_audit.py")
+            if trusted else "scripts/performance_audit.py"
+        )
         audit = run(
             [
                 sys.executable,
-                "scripts/performance_audit.py",
+                audit_script,
                 "--evidence",
                 str(evidence),
                 "--output",
@@ -12559,7 +12646,9 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail(f"finish-pr trusted boundary: {exc}")
     if toolchain_closure():
         return 1
-    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+    trusted = _require_trusted_pr_execution()
+    signing_script = str(Path(trusted["trusted_root"]) / "scripts/signing_rotation.py")
+    if run([sys.executable, signing_script, "rotation-check"], check=False).returncode:
         return fail("finish-pr requires the signing rotation delivery gate")
     policy = repository_delivery_policy()
     base_name = base.removeprefix("origin/")
@@ -12578,6 +12667,10 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
         return fail("GitHub CLI missing")
+    try:
+        _owner_login, name_with_owner = _github_repository_identity(gh)
+    except RuntimeError as exc:
+        return fail(f"finish-pr repository identity unavailable: {exc}")
 
     run(["git", "fetch", "origin", "--prune"])
     base_ref = f"origin/{base_name}"
@@ -12593,22 +12686,28 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     if remote_commit_provenance_check(gh, base_ref, head):
         return 1
 
-    evidence = _valid_exact_evidence(base_ref, head)
-    if evidence is None:
-        if verify_change(base_ref, head):
-            return 1
-        evidence = _valid_exact_evidence(base_ref, head)
-    if evidence is None:
-        return fail(f"finish-pr exact PASS evidence missing for {head}")
+    try:
+        _fresh_qualification_for_finish(base_ref, head, name_with_owner)
+    except (OSError, ValueError, RuntimeError) as exc:
+        return fail(f"finish-pr fresh base qualification failed: {exc}")
+    qualification = _pr_loop_qualification(
+        base_ref, head, repository=name_with_owner,
+    )
+    if qualification.get("status") != "PASS" or not qualification.get("compatibility_digest"):
+        return fail(f"finish-pr base-qualified compatibility envelope missing for {head}")
+    evidence = ROOT / qualification["evidence"]
+    audit = ROOT / qualification["performance_audit"]
+    if _valid_exact_evidence(base_ref, head, evidence_path=evidence) is None:
+        return fail(f"finish-pr archived exact PASS evidence changed for {head}")
 
     proof_workflow = qualification_workflow("qualification_proof")
     if proof_workflow.get("merge_authoritative") is not True:
         return fail("finish-pr requires qualification_proof to remain merge-authoritative")
-    if proof_workflow.get("performance_audit_runs") == 1 and _valid_performance_audit(base_ref, head) is None:
-        return fail(
-            f"finish-pr exact performance audit missing/invalid for {head}; "
-            "run make qualification-proof on the exact clean head"
-        )
+    if (
+        proof_workflow.get("performance_audit_runs") == 1
+        and _valid_performance_audit(base_ref, head, audit_path=audit) is None
+    ):
+        return fail(f"finish-pr archived exact performance audit changed for {head}")
     if proof_workflow.get("performance_campaign_required") is True:
         campaign = _valid_performance_campaign(head)
         if campaign is None:
@@ -12658,7 +12757,6 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
 
     try:
         reviews, raw_owner_authorization = pull_request_authority_evidence(gh, number, head)
-        _owner_login, name_with_owner = _github_repository_identity(gh)
         exact_pr = _github_pr_snapshot(gh, name_with_owner, number)
     except RuntimeError as exc:
         return fail(f"finish-pr cannot read PR authorities: {exc}")
@@ -12976,15 +13074,63 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
     }
 
 
-def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
+def _pr_loop_qualification(
+    base_ref: str, head_sha: str, *, repository: str | None = None,
+) -> dict:
+    trusted = _trusted_pr_execution_context()
+    if trusted is not None:
+        import qualification_compatibility
+
+        repository = repository or _PR_LOOP_REPOSITORY.get()
+        if not repository:
+            raise RuntimeError("trusted PR repository identity is unavailable")
+        base_sha = git("rev-parse", base_ref).strip()
+        tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        expected_witness = (
+            repository, int(trusted["pr_number"]), base_sha, head_sha, tree_sha,
+        )
+        witness = _PR_LOOP_FRESH_WITNESS.get()
+        if not isinstance(witness, tuple) or len(witness) != 6 or witness[:5] != expected_witness:
+            return {
+                "status": "MISSING", "source": "fresh-base-run-required",
+                "head_sha": head_sha,
+            }
+        try:
+            found = qualification_compatibility.find_envelope(
+                ROOT, repository=repository, pr_number=int(trusted["pr_number"]),
+                base_sha=base_sha, head_sha=head_sha, tree_sha=tree_sha,
+                controller_path=Path(trusted["trusted_root"]) / "scripts/repoctl.py",
+                validate_raw=lambda path: _valid_exact_evidence(
+                    base_ref, head_sha, evidence_path=path,
+                ) is not None,
+                validate_audit=lambda path: _valid_performance_audit(
+                    base_ref, head_sha, audit_path=path,
+                ) is not None,
+            )
+        except qualification_compatibility.CompatibilityError as exc:
+            return {
+                "status": "FAIL", "source": "base-controller-envelope",
+                "head_sha": head_sha, "reason": str(exc),
+            }
+        if found is None or found["envelope_sha256"] != witness[5]:
+            return {"status": "MISSING", "source": "none", "head_sha": head_sha}
+        return {
+            "status": "PASS",
+            "source": "base-controller-envelope",
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "evidence": found["raw_proof_path"],
+            "performance_audit": found["performance_audit_path"],
+            "compatibility_envelope": found["path"],
+            "compatibility_digest": found["envelope_sha256"],
+            "gate_results": found["gate_results"],
+        }
+
+    # Non-transition local qualification keeps the pre-bootstrap path.
     evidence = _valid_exact_evidence(base_ref, head_sha)
     audit = _valid_performance_audit(base_ref, head_sha) if evidence is not None else None
     if evidence is None or audit is None:
-        return {
-            "status": "MISSING",
-            "source": "none",
-            "head_sha": head_sha,
-        }
+        return {"status": "MISSING", "source": "none", "head_sha": head_sha}
     return {
         "status": "PASS",
         "source": "reused",
@@ -12993,6 +13139,66 @@ def _pr_loop_qualification(base_ref: str, head_sha: str) -> dict:
         "evidence": str(evidence.relative_to(ROOT)),
         "performance_audit": str(audit.relative_to(ROOT)),
     }
+
+
+def _create_pr_qualification_envelope(base_ref: str, head_sha: str) -> dict:
+    """Archive only a base-controller-validated exact qualification."""
+    import qualification_compatibility
+
+    trusted = _require_trusted_pr_execution(head_sha=head_sha)
+    repository = _PR_LOOP_REPOSITORY.get()
+    if not repository:
+        raise RuntimeError("trusted PR repository identity is unavailable")
+    evidence = _valid_exact_evidence(base_ref, head_sha)
+    audit = _valid_performance_audit(base_ref, head_sha) if evidence else None
+    if evidence is None or audit is None:
+        raise RuntimeError("base controller exact qualification proof or audit is invalid")
+    base_sha = git("rev-parse", base_ref).strip()
+    tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    created = qualification_compatibility.create_envelope(
+        ROOT, repository=repository, pr_number=int(trusted["pr_number"]),
+        base_sha=base_sha, head_sha=head_sha, tree_sha=tree_sha,
+        controller_path=Path(trusted["trusted_root"]) / "scripts/repoctl.py",
+        raw_proof_path=evidence, audit_path=audit,
+        validate_raw=lambda path: _valid_exact_evidence(
+            base_ref, head_sha, evidence_path=path,
+        ) is not None,
+        validate_audit=lambda path: _valid_performance_audit(
+            base_ref, head_sha, audit_path=path,
+        ) is not None,
+    )
+    _PR_LOOP_FRESH_WITNESS.set((
+        repository, int(trusted["pr_number"]), base_sha, head_sha, tree_sha,
+        created["envelope_sha256"],
+    ))
+    return created
+
+
+def _fresh_qualification_for_finish(
+    base_ref: str, head_sha: str, repository: str,
+) -> None:
+    """Never let a persisted, preseeded envelope authorize a merge."""
+    import qualification_compatibility
+
+    _require_trusted_pr_execution(head_sha=head_sha)
+    _PR_LOOP_REPOSITORY.set(repository)
+    _PR_LOOP_FRESH_WITNESS.set(None)
+    qualification_compatibility.archive_head_artifacts(
+        ROOT, head_sha=head_sha,
+        raw_proof_path=CONTEXT / "evidence" / f"{head_sha}.json",
+        audit_path=_qualification_audit_path(head_sha),
+        clear_originals=True,
+    )
+    environment = os.environ.copy()
+    environment["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
+    base_sha = git("rev-parse", base_ref).strip()
+    result = run(
+        _controller_command("qualification-proof", "--base", base_sha),
+        check=False, capture=True, env=environment,
+    )
+    if result.returncode:
+        raise RuntimeError("fresh exact-base qualification failed before finish-pr")
+    _create_pr_qualification_envelope(base_ref, head_sha)
 
 
 class PRBaseChanged(RuntimeError):
@@ -13759,6 +13965,7 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
     """Derive current PR delivery state and execute only its next authorized transition."""
     result = _pr_loop_empty_result(pr_number)
     _PR_LOOP_ACTIVE_RESULT.set(result)
+    _PR_LOOP_FRESH_WITNESS.set(None)
     if pr_number < 1:
         result["state"] = "BLOCKED"
         result["next_action"] = "USE_VALID_PR_NUMBER"
@@ -13784,6 +13991,7 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             raise RuntimeError("pr-loop state persistence must remain forbidden")
         owner_login, name_with_owner = _github_repository_identity(gh)
         del owner_login
+        _PR_LOOP_REPOSITORY.set(name_with_owner)
         if not dry_run:
             fetch = run(["git", "fetch", "origin", "--prune"], check=False, capture=json_output)
             if fetch.returncode:
@@ -13967,12 +14175,31 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             result["current_head_sha"] = before_qualification["head_sha"]
             _emit_pr_loop_result(result, json_output=json_output)
             return 1
+        if _trusted_pr_execution_context() is not None:
+            try:
+                import qualification_compatibility
+
+                qualification_compatibility.archive_head_artifacts(
+                    ROOT, head_sha=initial_head_sha,
+                    raw_proof_path=CONTEXT / "evidence" / f"{initial_head_sha}.json",
+                    audit_path=_qualification_audit_path(initial_head_sha),
+                    clear_originals=True,
+                )
+            except (OSError, ValueError) as exc:
+                result["state"] = "BLOCKED"
+                result["next_action"] = "FIX_QUALIFICATION_ARCHIVE"
+                result["blockers"].append(str(exc))
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
+        qualification_env = os.environ.copy()
+        qualification_env["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
         qualification = run(
             _controller_command(
                 "qualification-proof", "--base", before_qualification["base_sha"]
             ),
             check=False,
             capture=json_output,
+            env=qualification_env,
         )
         if qualification.returncode:
             result["qualification"] = {
@@ -13984,6 +14211,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             result["next_action"] = "FIX_QUALIFICATION"
             _emit_pr_loop_result(result, json_output=json_output)
             return 1
+        if _trusted_pr_execution_context() is not None:
+            try:
+                _create_pr_qualification_envelope(
+                    before_qualification["base_sha"], initial_head_sha
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                result["state"] = "QUALIFICATION_FAILED"
+                result["next_action"] = "FIX_QUALIFICATION"
+                result["blockers"].append(f"base qualification envelope invalid: {exc}")
+                _emit_pr_loop_result(result, json_output=json_output)
+                return 1
         result["qualification"] = _pr_loop_qualification(
             before_qualification["base_sha"], initial_head_sha
         )
@@ -14072,6 +14310,28 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                     result["security_review"],
                     review_kind,
                 )
+                structured_handoff = None
+                if _trusted_pr_execution_context() is not None:
+                    import pr_monitor
+
+                    digest = result["qualification"].get("compatibility_digest")
+                    if not isinstance(digest, str):
+                        raise RuntimeError("base-qualified envelope required before ChatGPT handoff")
+                    structured_handoff = pr_monitor.build_handoff(
+                        repository=name_with_owner, pr=result["pr"],
+                        review_kind=review_kind, base_sha=initial["base_sha"],
+                        head_sha=result["head_sha"],
+                        tree_sha=git("rev-parse", f"{result['head_sha']}^{{tree}}").strip(),
+                        changed_files=changed_paths(initial["base_sha"], result["head_sha"]),
+                        qualification_status=result["qualification"]["status"],
+                        qualification_evidence_digest=digest,
+                        previous_validated_verdict=(
+                            "CODE_PASS" if review_kind == "SECURITY" else None
+                        ),
+                        previous_head=(
+                            result["head_sha"] if review_kind == "SECURITY" else None
+                        ),
+                    )
             except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 result["state"] = "BLOCKED"
                 result["next_action"] = "FIX_CHATGPT_REVIEW_HANDOFF"
@@ -14121,6 +14381,8 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 },
                 "verdict_authority": False,
             }
+            if structured_handoff is not None:
+                result["handoff"] = structured_handoff
             result["review_dispatch"] = {
                 "status": "NOT_REQUESTED",
                 "provider": "ChatGPT",
