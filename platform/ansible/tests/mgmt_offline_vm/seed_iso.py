@@ -94,10 +94,11 @@ passwd --status packer | grep -Eq '^packer[[:space:]]+L'
 test "$(stat -c '%U:%G:%a' /home/packer/.ssh/authorized_keys)" = 'packer:packer:600'
 stage=sshd
 sshd -t
-sshd -T | grep -qx 'passwordauthentication no'
-sshd -T | grep -qx 'kbdinteractiveauthentication no'
-sshd -T | grep -qx 'permitrootlogin no'
-sshd -T | grep -qx 'authenticationmethods publickey'
+sshd_effective=$(sshd -T)
+grep -F -x 'passwordauthentication no' <<<"$sshd_effective" >/dev/null
+grep -F -x 'kbdinteractiveauthentication no' <<<"$sshd_effective" >/dev/null
+grep -F -x 'permitrootlogin no' <<<"$sshd_effective" >/dev/null
+grep -F -x 'authenticationmethods publickey' <<<"$sshd_effective" >/dev/null
 stage=nft
 nft -j list table inet ecommerce_test_offline | python3 -c 'import json,sys; rows=json.load(sys.stdin)["nftables"]; policies={{row["chain"]["name"]:row["chain"].get("policy") for row in rows if "chain" in row}}; assert policies=={{"output":"drop","forward":"drop"}}'
 stage=host_key

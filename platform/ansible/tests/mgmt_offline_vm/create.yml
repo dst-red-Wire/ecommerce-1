@@ -86,9 +86,10 @@
       SSH
       sshd -t
       systemctl reload sshd
-      sshd -T | grep -qx 'passwordauthentication no'
-      sshd -T | grep -qx 'kbdinteractiveauthentication no'
-      sshd -T | grep -qx 'permitrootlogin no'
+      sshd_effective=$(sshd -T)
+      grep -F -x 'passwordauthentication no' <<<"$sshd_effective" >/dev/null
+      grep -F -x 'kbdinteractiveauthentication no' <<<"$sshd_effective" >/dev/null
+      grep -F -x 'permitrootlogin no' <<<"$sshd_effective" >/dev/null
       cat > /etc/ecommerce-test-offline.nft <<'NFT'
       table inet ecommerce_test_offline {
        chain output { type filter hook output priority -150; policy drop;
