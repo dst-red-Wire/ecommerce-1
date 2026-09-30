@@ -475,6 +475,23 @@ graph LR
             policy.write_text(original)
             self.assertEqual([], authority.validate(root))
 
+    def test_chatgpt_dispatch_policy_cannot_grant_local_verdict_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/chatgpt-review-dispatch-policy.yaml"
+            original = policy.read_text(encoding="utf-8")
+            self.assertIn("verdict_authority: false", original)
+            policy.write_text(
+                original.replace("verdict_authority: false", "verdict_authority: true", 1),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "ChatGPT review dispatcher must preserve external verdict authority",
+                authority.validate(root),
+            )
+            policy.write_text(original, encoding="utf-8")
+            self.assertEqual([], authority.validate(root))
+
     def test_review_policy_locks_chatgpt_exact_sha_authority_and_forbids_codex(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)

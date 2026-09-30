@@ -212,7 +212,8 @@ lab-network-native-prepare: ## Stage exact-head Windows runner for a native-boot
 	@$(PYTHON) scripts/repoctl.py lab-network-native-prepare --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-native-boot-prepare: ## Prepare the retained campaign's guarded one-shot native Windows entry; no reboot
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-prepare --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)"
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-prepare --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)" --trusted-root "$(TRUSTED_ROOT)"
 
 lab-network-native-boot-reboot: ## Explicitly start the one-shot native boot for the retained campaign
 	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-reboot --campaign-id "$(CAMPAIGN_ID)"
@@ -221,7 +222,8 @@ lab-network-native-boot-recover: ## Restore normal boot and remove the owned net
 	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-recover --campaign-id "$(CAMPAIGN_ID)"
 
 lab-network-native-boot-self-test: ## Check network native-boot BCD parsing and state guards without mutation
-	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-self-test --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)"
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@$(PYTHON) scripts/repoctl.py lab-network-native-boot-self-test --campaign-id "$(CAMPAIGN_ID)" --expected-vm-id "$(EXPECTED_VM_ID)" --trusted-root "$(TRUSTED_ROOT)"
 
 lab-network-status: ## Read the latest network checkpoint and current VirtualBox VM state
 	@$(PYTHON) scripts/repoctl.py lab-network-status --campaign-id "$(CAMPAIGN_ID)"
@@ -325,9 +327,16 @@ roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from Gi
 deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, push and create/update exact-SHA GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-pr-loop: ## Run from TRUSTED_ROOT checked out cleanly at the PR BASE_SHA; PR required
+pr-loop: ## Run trusted-pr-transition from TRUSTED_ROOT at the PR BASE_SHA, then dispatch external review; PR required
 	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
-	@$(PYTHON) "$(TRUSTED_ROOT)/scripts/repository_delivery.py" trusted-pr-transition --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,)
+
+.PHONY: review-dispatch-status
+review-dispatch-status: ## Read non-authoritative ChatGPT outbox status for exact PR and KIND=CODE|SECURITY
+	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
+	@test -n "$(KIND)" || { echo "BLOCKED KIND=CODE|SECURITY is required" >&2; exit 1; }
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --target-root "$(CURDIR)" --pr "$(PR)" --status --kind "$(KIND)" --json
 
 finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
 	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2

@@ -46,7 +46,12 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
             "vm_box_sha256": "a" * 64,
             "vm_vagrant_version": "2.4.9",
         }
-        patcher = mock.patch.object(MOD, "_rke2_verified_box", return_value=box)
+        manifest = {
+            "box_sha256": box["vm_box_sha256"],
+            "inputs_digest": "b" * 64,
+            "source_sha": "f" * 40,
+        }
+        patcher = mock.patch.object(MOD, "_rke2_verified_box", return_value=(box, manifest))
         self.addCleanup(patcher.stop)
         patcher.start()
 
@@ -1095,11 +1100,13 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                 encoding="utf-8",
             )
             frozen_inputs = __import__("json").dumps(
-                {**input_values, **MOD._rke2_verified_box("c" * 40)},
+                {**input_values, **MOD._rke2_verified_box("c" * 40)[0]},
                 sort_keys=True,
                 separators=(",", ":"),
             )
             state = root / ".context" / "mgmt-offline-vm" / vm_name
+            reuse_path = root / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
+            self.assertFalse(reuse_path.exists())
             head = "c" * 40
             workflow = {
                 "entrypoint": (
@@ -1122,6 +1129,8 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
 
             server_attempts = []
             def fake_run(command, **kwargs):
+                if command[-1] == "vm_action=validate":
+                    self.assertTrue(reuse_path.is_file())
                 if command[-1] == "vm_action=create":
                     state.mkdir(parents=True, exist_ok=True)
                     (state / "preflight.json").write_text(json.dumps({
@@ -1196,6 +1205,14 @@ class QualificationExecutionPolicyTests(unittest.TestCase):
                     0,
                     MOD.rke2_local_virtualbox_qualification(".context/mgmt-vm-inputs.json"),
                 )
+                reuse = json.loads(reuse_path.read_text(encoding="utf-8"))
+                MOD.qualification_steps.validate_checkpoint(
+                    reuse, source_sha=head, input_digest="b" * 64,
+                )
+                self.assertEqual("m2.5", reuse["qualification"])
+                self.assertEqual("image", reuse["step"])
+                self.assertEqual("SKIPPED_REUSED_VERIFIED", reuse["status"])
+                self.assertEqual("a" * 64, reuse["artifact_digest"])
                 for index, step in ((11, "evidence"), (12, "final")):
                     checkpoint_path = state / "step-checkpoints" / f"{index:02d}-{step}.json"
                     checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))

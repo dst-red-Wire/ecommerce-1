@@ -10,20 +10,26 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import exact_pr_binding
 import repoctl
 
 
 CAMPAIGN = "20260929T163821Z-9da62296f3d5"
 SHA = "a" * 40
+BASE_SHA = "b" * 40
 VM_ID = "e80d60f3-a12e-4734-a654-0cd24dce0fa1"
 REPO_WINDOWS = "\\\\wsl.localhost\\Ubuntu-24.04\\home\\dev\\ecommerce-1"
 
 
 class NativeBootBootstrapTests(unittest.TestCase):
     def _source(self, action="Prepare"):
+        binding = exact_pr_binding.ExactPRBinding(
+            "dst-red-Wire/ecommerce-1", 170, "main", BASE_SHA,
+            "fix/vm-lifecycle-runtime-proof", SHA)
         return repoctl._native_bootstrap_script(
             action, CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
-            VM_ID if action == "Prepare" else "")
+            VM_ID if action in {"Prepare", "SelfTest"} else "",
+            binding if action in {"Prepare", "SelfTest"} else None)
 
     def test_credential_boundary_and_command_length(self):
         source = self._source()
@@ -38,6 +44,11 @@ class NativeBootBootstrapTests(unittest.TestCase):
         self.assertIn("[IO.File]::Create($target,4096", source)
         self.assertIn("Get-GitBlobSha1", source)
         self.assertIn("Assert-PublishedHead", source)
+        self.assertIn("$prNumber = '170'", source)
+        self.assertIn("$prBaseSha = '" + BASE_SHA + "'", source)
+        self.assertIn("$pr.head.ref -cne $prBranch", source)
+        self.assertIn("$pr.base.sha -cne $prBaseSha", source)
+        self.assertNotIn("'pr','view'", source)
         self.assertIn("'/usr/bin/git'", source)
         self.assertIn("'/usr/bin/gh'", source)
         self.assertLess(source.index("Get-GitBlobSha1 -Bytes"),
@@ -65,6 +76,18 @@ class NativeBootBootstrapTests(unittest.TestCase):
         self.assertIn("if ($action -eq 'Prepare') {", source)
         command = repoctl._native_boot_elevation_command(Path("powershell.exe"), source)
         self.assertLess(len(subprocess.list2cmdline(command)), 32767)
+
+    def test_prepare_rejects_missing_or_mismatched_binding(self):
+        for binding in (
+            None,
+            exact_pr_binding.ExactPRBinding(
+                "dst-red-Wire/ecommerce-1", 170, "main", BASE_SHA,
+                "fix/vm-lifecycle-runtime-proof", "c" * 40),
+        ):
+            with self.subTest(binding=binding), self.assertRaises(ValueError):
+                repoctl._native_bootstrap_script(
+                    "Prepare", CAMPAIGN, SHA, "Ubuntu-24.04", REPO_WINDOWS,
+                    VM_ID, binding)
 
     def test_bootstrap_parses_in_windows_powershell(self):
         parser = (

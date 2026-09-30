@@ -846,6 +846,7 @@ machine_contracts:
   resilience_governance: config/contracts/resilience-governance.yaml
   roadmap_policy: config/contracts/roadmap-policy.yaml
   review_budget: config/contracts/review-budget.json
+  chatgpt_review_dispatch_policy: config/contracts/chatgpt-review-dispatch-policy.yaml
   review_policy: config/contracts/review-policy.yaml
   repository_authority_model: config/contracts/repository-authority-model.yaml
   runtime_efficiency: config/contracts/runtime-efficiency.yaml

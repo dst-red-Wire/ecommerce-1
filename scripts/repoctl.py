@@ -55,6 +55,7 @@ _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=Non
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
 _PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
+_NATIVE_UAC_CONTROLLER_PATH = contextvars.ContextVar("native_uac_controller_path", default=None)
 
 
 def _modern_engineering_api():
@@ -5152,7 +5153,9 @@ def _reuse_gate(name: str, parent_sha: str, parent_evidence: dict, records: list
 
 
 def _controller_command(*args: str) -> list[str]:
-    controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "scripts/repoctl.py").strip() or "scripts/repoctl.py"
+    controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    if controller is None:
+        controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "scripts/repoctl.py").strip() or "scripts/repoctl.py"
     return [sys.executable, controller, *args]
 
 
@@ -9556,7 +9559,26 @@ def _canonical_rke2_vagrant_version() -> str:
     return version
 
 
-def _rke2_verified_box(source_sha: str) -> dict[str, str]:
+def _record_box_reuse_checkpoint(source_sha: str, manifest: dict) -> Path:
+    """Retain exact-head reuse provenance from an already verified box manifest."""
+    reuse = qualification_steps.checkpoint(
+        qualification="m2.5", step="image", source_sha=source_sha,
+        input_digest=manifest["inputs_digest"],
+        artifact_digest=manifest["box_sha256"],
+        status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
+        reused_from={
+            "source_sha": manifest["source_sha"],
+            "input_digest": manifest["inputs_digest"],
+            "artifact_digest": manifest["box_sha256"],
+        },
+    )
+    destination = ROOT / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(reuse, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return destination
+
+
+def _rke2_verified_box(source_sha: str) -> tuple[dict[str, str], dict]:
     import rocky_box_catalog
 
     box = rocky_box_catalog.find_matching_box(source_sha)
@@ -9572,7 +9594,7 @@ def _rke2_verified_box(source_sha: str) -> dict[str, str]:
         "vm_box_url": PureWindowsPath(windows_path).as_uri(),
         "vm_box_sha256": str(manifest["box_sha256"]),
         "vm_vagrant_version": _canonical_rke2_vagrant_version(),
-    }
+    }, manifest
 
 
 def _canonical_rke2_vagrant_ready() -> bool:
@@ -9784,20 +9806,7 @@ def rocky_box_command(action: str, *, box: str, box_sha256: str = "", keep_faile
             return fail(f"verified Rocky box is absent: {selected}")
         if action == "verify":
             manifest = rocky_box_catalog.verify(selected, source_sha)
-            reuse = qualification_steps.checkpoint(
-                qualification="m2.5", step="image", source_sha=source_sha,
-                input_digest=manifest["inputs_digest"],
-                artifact_digest=manifest["box_sha256"],
-                status="SKIPPED_REUSED_VERIFIED", started_at=datetime.now(timezone.utc),
-                reused_from={
-                    "source_sha": manifest["source_sha"],
-                    "input_digest": manifest["inputs_digest"],
-                    "artifact_digest": manifest["box_sha256"],
-                },
-            )
-            destination = ROOT / ".context/evidence/rocky-image/rocky-10.2/windows/reuse.json"
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_text(json.dumps(reuse, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            _record_box_reuse_checkpoint(source_sha, manifest)
             print(json.dumps({"box_reuse": "REUSED", "box_sha256": manifest["box_sha256"],
                               "inputs_digest": manifest["inputs_digest"]}, sort_keys=True))
         elif action == "prepare-smoke":
@@ -10147,7 +10156,6 @@ def lab_network_native_prepare(campaign_id: str,
 
 
 _NATIVE_UAC_REPOSITORY = "dst-red-Wire/ecommerce-1"
-_NATIVE_UAC_PR = 169
 
 
 def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
@@ -10179,24 +10187,28 @@ def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
     return comments
 
 
-def _native_uac_review_gate(gh: str, campaign_id: str, source_sha: str,
+def _native_uac_review_gate(gh: str, binding, campaign_id: str,
                             expected_vm_id: str) -> tuple[bool, str]:
-    """Require exact-SHA ChatGPT owner reviews before an elevated command."""
-    if (re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
-        or re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id) is None
+    """Revalidate one immutable PR and its owner evidence before elevation."""
+    if (re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None
         or re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
-                        expected_vm_id) is None):
-        return False, "native UAC exact campaign, SHA or VM identity is invalid"
+                        expected_vm_id or "") is None):
+        return False, "native UAC exact campaign or VM identity is invalid"
     try:
+        from exact_pr_binding import ExactPRBinding, revalidate_exact_open_pr
+
+        if (not isinstance(binding, ExactPRBinding)
+            or binding.repository != _NATIVE_UAC_REPOSITORY
+            or binding.base != "main"):
+            return False, "native UAC immutable PR binding is invalid"
+        if ExactPRBinding.from_dict(binding.as_dict()) != binding:
+            return False, "native UAC immutable PR binding fields are invalid"
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            return False, "native UAC PR binding changed before owner verification"
         evidence_policy = pull_request_review_policy()["ai_reviewer"]["evidence"]
-        pr = _github_pr_snapshot(gh, _NATIVE_UAC_REPOSITORY, _NATIVE_UAC_PR)
-        if (pr["number"] != _NATIVE_UAC_PR or pr["state"] != "OPEN" or pr["draft"]
-            or pr["base"] != "main" or pr["head_sha"] != source_sha
-            or pr["head_repository"].casefold() != _NATIVE_UAC_REPOSITORY.casefold()):
-            return False, "native UAC PR #169 is not open on main at the exact source SHA"
         comments = _native_uac_paginated_comments(
-            gh, f"repos/{_NATIVE_UAC_REPOSITORY}/issues/{_NATIVE_UAC_PR}/comments?per_page=100")
-        owner_login = _NATIVE_UAC_REPOSITORY.split("/", 1)[0]
+            gh, f"repos/{binding.repository}/issues/{binding.pr_number}/comments?per_page=100")
+        owner_login = binding.repository.split("/", 1)[0]
         latest: dict[str, tuple[dict, dict]] = {}
         for comment in comments:
             if _comment_author_login(comment).casefold() != owner_login.casefold():
@@ -10219,7 +10231,7 @@ def _native_uac_review_gate(gh: str, campaign_id: str, source_sha: str,
                 or type(proof.get("blocking_findings")) is not int
                 or proof["blocking_findings"] < 0):
                 return False, "native UAC ChatGPT review marker is malformed"
-            if proof["head_sha"] != source_sha:
+            if proof["head_sha"] != binding.head_sha:
                 continue
             if comment.get("updated_at") != comment.get("created_at"):
                 return False, "native UAC ChatGPT review comment was edited"
@@ -10233,30 +10245,26 @@ def _native_uac_review_gate(gh: str, campaign_id: str, source_sha: str,
         code = latest["code"][0]
         security = latest["security"][0]
         expected = (
-            f"NATIVE-UAC-V1 PR={_NATIVE_UAC_PR} SHA={source_sha} "
+            f"NATIVE-UAC-V1 PR={binding.pr_number} SHA={binding.head_sha} "
             f"CAMPAIGN={campaign_id} VM={expected_vm_id.lower()} "
             f"CODE={code['id']} SECURITY={security['id']} APPROVED"
         )
         owner_comments = [comment for comment in comments
                           if _comment_author_login(comment).casefold()
                              == owner_login.casefold()
-                          and str(comment.get("body") or "").startswith(
-                              f"NATIVE-UAC-V1 PR={_NATIVE_UAC_PR} ")]
+                          and str(comment.get("body") or "").startswith("NATIVE-UAC-V1 ")]
         if (not owner_comments
             or owner_comments[-1].get("author_association") != "OWNER"
             or owner_comments[-1].get("updated_at") != owner_comments[-1].get("created_at")
             or str(owner_comments[-1].get("body") or "") != expected):
-            return False, "native UAC exact owner authorization is absent or superseded"
+            return False, f"native UAC exact owner authorization is absent or superseded; required: {expected}"
         owner_order = _immutable_comment_order_key(owner_comments[-1])
         if (owner_order <= _immutable_comment_order_key(code)
             or owner_order <= _immutable_comment_order_key(security)):
             return False, "native UAC owner authorization predates a required ChatGPT review"
-        current_pr = _github_pr_snapshot(gh, _NATIVE_UAC_REPOSITORY, _NATIVE_UAC_PR)
-        if (current_pr["number"] != _NATIVE_UAC_PR or current_pr["state"] != "OPEN"
-            or current_pr["draft"] or current_pr["base"] != "main"
-            or current_pr["head_sha"] != source_sha):
-            return False, "native UAC PR head or base moved during review verification"
-    except (RuntimeError, KeyError, TypeError, ValueError, AttributeError, IndexError) as exc:
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            return False, "native UAC PR binding changed during owner verification"
+    except Exception as exc:
         return False, f"native UAC GitHub authority is unavailable or malformed: {exc}"
     return True, "native UAC ChatGPT CODE, SECURITY and owner authorization are clean"
 
@@ -10271,7 +10279,7 @@ def _native_boot_encoded(source: str) -> str:
 
 def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
                              distribution: str, repo_windows: str,
-                             expected_vm_id: str = "") -> str:
+                             expected_vm_id: str = "", binding=None) -> str:
     """Build the only code run elevated before the protected runner is verified."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         raise ValueError("unsupported native bootstrap action")
@@ -10282,10 +10290,23 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
     if (not repo_windows.startswith("\\\\wsl.localhost\\" + distribution + "\\")
         or re.search(r"[\r\n]", repo_windows)):
         raise ValueError("native bootstrap requires the exact WSL UNC repository")
-    if action == "Prepare" and re.fullmatch(
+    if action in {"Prepare", "SelfTest"} and re.fullmatch(
         r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", expected_vm_id
     ) is None:
-        raise ValueError("native Prepare requires an explicit VM UUID")
+        raise ValueError("native Prepare/SelfTest requires an explicit VM UUID")
+    if action in {"Prepare", "SelfTest"}:
+        from exact_pr_binding import ExactPRBinding
+
+        if (not isinstance(binding, ExactPRBinding)
+            or binding.repository != _NATIVE_UAC_REPOSITORY
+            or binding.base != "main"
+            or binding.head_sha != source_sha):
+            raise ValueError("native bootstrap requires the exact immutable PR binding")
+        try:
+            if ExactPRBinding.from_dict(binding.as_dict()) != binding:
+                raise ValueError("native bootstrap PR binding changed during validation")
+        except RuntimeError as exc:
+            raise ValueError("native bootstrap PR binding is malformed") from exc
     token = uuid.uuid4().hex
     values = {
         "@@ACTION@@": action,
@@ -10295,6 +10316,11 @@ def _native_bootstrap_script(action: str, campaign_id: str, source_sha: str,
         "@@REPO_WIN@@": repo_windows,
         "@@REPO_WSL@@": str(ROOT),
         "@@VM_ID@@": expected_vm_id,
+        "@@PR_NUMBER@@": str(binding.pr_number) if binding else "",
+        "@@PR_REPOSITORY@@": binding.repository if binding else "",
+        "@@PR_BRANCH@@": binding.head_branch if binding else "",
+        "@@PR_BASE@@": binding.base if binding else "",
+        "@@PR_BASE_SHA@@": binding.base_sha if binding else "",
         "@@TOKEN@@": token,
     }
     script = r"""
@@ -10307,6 +10333,11 @@ $distro = @@DISTRO@@
 $repoWindows = @@REPO_WIN@@
 $repoWsl = @@REPO_WSL@@
 $expectedVmId = @@VM_ID@@
+$prNumber = @@PR_NUMBER@@
+$prRepository = @@PR_REPOSITORY@@
+$prBranch = @@PR_BRANCH@@
+$prBase = @@PR_BASE@@
+$prBaseSha = @@PR_BASE_SHA@@
 $token = @@TOKEN@@
 $system = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $wsl = Join-Path $system 'System32\wsl.exe'
@@ -10467,10 +10498,25 @@ function Assert-PublishedHead {
     if ($head -ne $sha) { throw 'Native bootstrap local Git HEAD differs' }
     $dirty = Invoke-WslBounded -Arguments @('/usr/bin/git','status','--porcelain=v1','--untracked-files=all') -TimeoutSeconds 45
     if ($dirty) { throw 'Native bootstrap exact-SHA worktree is dirty' }
-    $branch = Invoke-WslBounded -Arguments @('/usr/bin/git','branch','--show-current') -TimeoutSeconds 45
-    if ($branch -notmatch '^[A-Za-z0-9][A-Za-z0-9/_-]*$') { throw 'Native bootstrap branch is invalid' }
-    $published = Invoke-WslBounded -Arguments @('/usr/bin/gh','pr','view',$branch,'--repo','dst-red-Wire/ecommerce-1','--json','headRefOid','-q','.headRefOid') -TimeoutSeconds 60
-    if ($published -ne $sha) { throw 'Native bootstrap PR HEAD differs from exact source SHA' }
+    $branch = Invoke-WslBounded -Arguments @('/usr/bin/git','symbolic-ref','--quiet','--short','HEAD') -TimeoutSeconds 45
+    if ($branch -cne $prBranch) { throw 'Native bootstrap local branch differs from exact PR binding' }
+    $prEndpoint = 'repos/' + $prRepository + '/pulls/' + $prNumber
+    $prResult = Invoke-WslBounded -Arguments @('/usr/bin/gh','api',$prEndpoint) -TimeoutSeconds 60
+    $pr = ConvertFrom-Json -InputObject $prResult -ErrorAction Stop
+    if ([string]$pr.number -cne $prNumber -or $pr.state -cne 'open' -or
+        $pr.draft -ne $false -or $null -ne $pr.merged_at -or
+        $pr.base.ref -cne $prBase -or $pr.base.sha -cne $prBaseSha -or
+        $pr.base.repo.full_name -cne $prRepository -or
+        $pr.head.ref -cne $prBranch -or $pr.head.sha -cne $sha -or
+        $pr.head.repo.full_name -cne $prRepository) {
+        throw 'Native bootstrap PR identity changed'
+    }
+    $baseEndpoint = 'repos/' + $prRepository + '/branches/' + $prBase
+    $baseResult = Invoke-WslBounded -Arguments @('/usr/bin/gh','api',$baseEndpoint) -TimeoutSeconds 60
+    $base = ConvertFrom-Json -InputObject $baseResult -ErrorAction Stop
+    if ($base.name -cne $prBase -or $base.commit.sha -cne $prBaseSha) {
+        throw 'Native bootstrap PR base changed'
+    }
 }
 
 Assert-ProgramFiles
@@ -10565,8 +10611,73 @@ def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
     return source_sha
 
 
+def _native_uac_worktree_matches(binding) -> tuple[bool, str]:
+    """Keep the same local commit and branch throughout native preparation."""
+    try:
+        if git("status", "--porcelain", "--untracked-files=all").strip():
+            return False, "native UAC exact-SHA worktree became dirty"
+        if git("rev-parse", "HEAD").strip() != binding.head_sha:
+            return False, "native UAC HEAD_CHANGED during preparation"
+        if git("symbolic-ref", "--quiet", "--short", "HEAD").strip() != binding.head_branch:
+            return False, "native UAC branch changed during preparation"
+    except RuntimeError as exc:
+        return False, f"native UAC local Git identity is unavailable: {exc}"
+    return True, "native UAC local Git identity remains exact"
+
+
+def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
+    """Verify the explicit exact-base checkout before using its controller identity."""
+    if not trusted_root or not Path(trusted_root).is_absolute():
+        raise ValueError("native UAC requires an explicit absolute TRUSTED_ROOT")
+    root = Path(trusted_root)
+    if (not root.is_dir() or root.is_symlink() or root.resolve(strict=True) != root
+        or root == ROOT.resolve()):
+        raise ValueError("native UAC trusted root is absent, redirected or the target checkout")
+
+    def git_read(*args: str, binary: bool = False):
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], capture_output=True,
+            text=not binary, check=False, timeout=30)
+        if result.returncode:
+            raise RuntimeError("native UAC exact-base Git verification failed")
+        return result.stdout if binary else result.stdout.strip()
+
+    if (git_read("rev-parse", "--show-toplevel") != str(root)
+        or git_read("rev-parse", "HEAD") != binding.base_sha
+        or git_read("status", "--porcelain=v1", "--untracked-files=all")):
+        raise ValueError("native UAC trusted checkout is not clean at the bound base SHA")
+    for relative in ("scripts/repoctl.py", "scripts/repository_delivery.py"):
+        source = root / relative
+        if (source.is_symlink() or not source.is_file()
+            or source.resolve(strict=True) != source
+            or not git_read("ls-files", "--error-unmatch", "--", relative)):
+            raise ValueError(f"native UAC trusted controller source is unsafe: {relative}")
+        if source.read_bytes() != git_read("show", f"{binding.base_sha}:{relative}", binary=True):
+            raise ValueError(f"native UAC trusted controller differs from Git: {relative}")
+    return root / "scripts/repoctl.py"
+
+
+def _native_uac_qualification_matches(binding, trusted_root: str) -> tuple[bool, str]:
+    """Require current exact-SHA proof from the validated exact-base controller."""
+    try:
+        controller = _native_uac_trusted_controller(binding, trusted_root)
+        token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
+        try:
+            evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
+            audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
+        finally:
+            _NATIVE_UAC_CONTROLLER_PATH.reset(token)
+        if evidence is None or audit is None:
+            return False, "native UAC exact-SHA qualification PASS evidence is absent or invalid"
+        if _native_uac_trusted_controller(binding, trusted_root) != controller:
+            return False, "native UAC exact-base controller changed during qualification verification"
+    except Exception as exc:
+        return False, f"native UAC exact-SHA qualification is unavailable: {exc}"
+    return True, "native UAC exact-SHA qualification remains PASS"
+
+
 def lab_network_native_boot(action: str, campaign_id: str,
-                            expected_vm_id: str = "") -> int:
+                            expected_vm_id: str = "", trusted_root: str = "") -> int:
     """Manage the retained campaign's one-shot native Windows boot."""
     if action not in {"Prepare", "Reboot", "Recover", "SelfTest"}:
         return fail("unsupported native network-smoke boot action")
@@ -10577,26 +10688,41 @@ def lab_network_native_boot(action: str, campaign_id: str,
     ) is None:
         return fail("native network-smoke elevated Prepare/SelfTest requires --expected-vm-id UUID")
     source_sha = ""
+    binding = None
     if action in {"Prepare", "SelfTest"}:
-        if git("status", "--porcelain", "--untracked-files=all").strip():
-            return fail("native network-smoke boot requires a clean exact-SHA worktree")
-        source_sha = git("rev-parse", "HEAD").strip()
         gh = "/usr/bin/gh"
         if not os.path.isfile(gh) or not os.access(gh, os.X_OK):
             return fail("native UAC requires the pinned GitHub CLI to verify independent reviews")
+        try:
+            from exact_pr_binding import resolve_exact_open_pr
+
+            if git("status", "--porcelain", "--untracked-files=all").strip():
+                return fail("native network-smoke boot requires a clean exact-SHA worktree")
+            source_sha = git("rev-parse", "HEAD").strip()
+            branch = git("symbolic-ref", "--quiet", "--short", "HEAD").strip()
+            binding = resolve_exact_open_pr(
+                _NATIVE_UAC_REPOSITORY, source_sha, branch, "main", gh=gh)
+        except Exception as exc:
+            return fail(f"native UAC exact open PR cannot be resolved: {exc}")
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
+        qualified, reason = _native_uac_qualification_matches(binding, trusted_root)
+        if not qualified:
+            return fail(reason)
         review_ready, review_reason = _native_uac_review_gate(
-            gh, campaign_id, source_sha, expected_vm_id)
+            gh, binding, campaign_id, expected_vm_id)
         if not review_ready:
             return fail(review_reason)
-        print(f"PASS native UAC exact-SHA review authority: {review_reason}")
+        print(f"PASS native UAC PR #{binding.pr_number} exact-SHA review authority: {review_reason}")
     if action == "Prepare":
         if lab_network_native_prepare(campaign_id):
             return 2
-        if (git("rev-parse", "HEAD").strip() != source_sha
-            or git("status", "--porcelain", "--untracked-files=all").strip()):
-            return fail("native UAC exact-SHA worktree changed during staging")
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
         review_ready, review_reason = _native_uac_review_gate(
-            gh, campaign_id, source_sha, expected_vm_id)
+            gh, binding, campaign_id, expected_vm_id)
         if not review_ready:
             return fail(review_reason)
     powershell = Path("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe")
@@ -10615,23 +10741,36 @@ def lab_network_native_boot(action: str, campaign_id: str,
             source_sha = _native_boot_shadow_source_sha(campaign_id, action)
         bootstrap = _native_bootstrap_script(
             action, campaign_id, source_sha,
-            distribution, repo_windows, expected_vm_id)
+            distribution, repo_windows, expected_vm_id, binding)
         command = _native_boot_elevation_command(powershell, bootstrap)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         return fail(str(exc))
+    if action in {"Prepare", "SelfTest"}:
+        stable, reason = _native_uac_worktree_matches(binding)
+        if not stable:
+            return fail(reason)
+        qualified, reason = _native_uac_qualification_matches(binding, trusted_root)
+        if not qualified:
+            return fail(reason)
+        review_ready, review_reason = _native_uac_review_gate(
+            gh, binding, campaign_id, expected_vm_id)
+        if not review_ready:
+            return fail(review_reason)
     return run(command, cwd=Path("/mnt/c/Windows"),
                env=_windows_powershell_environment(), check=False).returncode
 
 
 def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
-                                         expected_vm_id: str = "") -> int:
+                                         expected_vm_id: str = "",
+                                         trusted_root: str = "") -> int:
     """Serialize BCD and retained VirtualBox state checks with the runtime lock."""
     records: list[dict] = []
 
     def execute(runtime_env: dict[str, str]) -> int:
         child = [command, "--campaign-id", campaign_id]
         if command == "lab-network-native-boot-prepare":
-            child.extend(["--expected-vm-id", expected_vm_id])
+            child.extend(["--expected-vm-id", expected_vm_id,
+                          "--trusted-root", trusted_root])
         result = run(_controller_command(*child),
                      check=False, env=runtime_env)
         records.append({"gate": command, "status": "PASS" if result.returncode == 0 else "FAIL",
@@ -11360,7 +11499,10 @@ def rke2_local_virtualbox_qualification(inputs: str) -> int:
         )
     vm_state = ROOT / ".context" / "mgmt-offline-vm" / vm_name
     try:
-        verified_box = _rke2_verified_box(head_sha)
+        verified_box, box_manifest = _rke2_verified_box(head_sha)
+        if verified_box["vm_box_sha256"] != box_manifest["box_sha256"]:
+            raise ValueError("RKE2 box and reuse manifest digests differ")
+        _record_box_reuse_checkpoint(head_sha, box_manifest)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
         return fail(f"RKE2 local qualification requires a verified native Rocky box: {exc}")
     frozen_inputs = json.dumps(
@@ -13327,12 +13469,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 str(result["pr"]),
             ]
             result["review_request"] = {
+                "schema_version": 1,
                 "event": "CHATGPT_REVIEW_REQUIRED",
                 "state": "CHATGPT_REVIEW_REQUIRED",
                 "provider": "ChatGPT",
                 "review_kind": review_kind,
+                "repository": name_with_owner,
                 "pr": result["pr"],
+                "base": initial["base"],
+                "base_sha": initial["base_sha"],
                 "head_sha": result["head_sha"],
+                "head_branch": initial["head_branch"],
                 "handoff": handoff,
                 "handoff_bytes": len(handoff.encode()),
                 "handoff_sha256": hashlib.sha256(handoff.encode()).hexdigest(),
@@ -13349,6 +13496,16 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                     "controller_source": "exact-pr-base-sha",
                     "after_valid_marker": True,
                 },
+                "verdict_authority": False,
+            }
+            result["review_dispatch"] = {
+                "status": "NOT_REQUESTED",
+                "provider": "ChatGPT",
+                "kind": review_kind,
+                "pr": result["pr"],
+                "head_sha": result["head_sha"],
+                "handoff_sha256": result["review_request"]["handoff_sha256"],
+                "transport": "EXTERNAL_DISPATCHER",
                 "verdict_authority": False,
             }
         _emit_pr_loop_result(result, json_output=json_output)
@@ -13740,6 +13897,7 @@ def main() -> int:
         native_boot.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
         if name in {"lab-network-native-boot-prepare", "lab-network-native-boot-self-test"}:
             native_boot.add_argument("--expected-vm-id", required=True)
+            native_boot.add_argument("--trusted-root", required=True)
     lab_status = sub.add_parser("lab-network-status")
     lab_status.add_argument("--campaign-id", default=os.environ.get("CAMPAIGN_ID", ""))
     sub.add_parser("image-rocky-linux-preflight")
@@ -13999,7 +14157,8 @@ def main() -> int:
             "lab-network-native-boot-recover",
         } and os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") != "1":
             return lab_network_native_boot_with_runtime(
-                args.cmd, args.campaign_id, getattr(args, "expected_vm_id", ""))
+                args.cmd, args.campaign_id, getattr(args, "expected_vm_id", ""),
+                getattr(args, "trusted_root", ""))
         if args.cmd == "image-rocky-preflight":
             return windows_image_pipeline("preflight")
         if args.cmd == "image-rocky-build":
@@ -14052,7 +14211,8 @@ def main() -> int:
                 "lab-network-native-boot-self-test": "SelfTest",
             }[args.cmd]
             return lab_network_native_boot(
-                action, args.campaign_id, getattr(args, "expected_vm_id", ""))
+                action, args.campaign_id, getattr(args, "expected_vm_id", ""),
+                getattr(args, "trusted_root", ""))
         if args.cmd == "lab-network-status":
             return lab_network_status(args.campaign_id)
         if args.cmd == "image-rocky-linux-preflight":
