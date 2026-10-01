@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -30,6 +31,7 @@ if __package__:
     from .exact_pr_binding import (
         CANONICAL_REPOSITORY,
         ExactPRBinding,
+        ExactPRBindingChanged,
         ExactPRBindingError,
         resolve_exact_open_pr,
         revalidate_exact_open_pr,
@@ -54,6 +56,7 @@ else:
     from exact_pr_binding import (
         CANONICAL_REPOSITORY,
         ExactPRBinding,
+        ExactPRBindingChanged,
         ExactPRBindingError,
         resolve_exact_open_pr,
         revalidate_exact_open_pr,
@@ -70,6 +73,16 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_CANONICAL_ORIGINS = frozenset(
+    {
+        "https://github.com/dst-red-Wire/ecommerce-1.git",
+        "https://github.com/dst-red-Wire/ecommerce-1",
+        "git@github.com:dst-red-Wire/ecommerce-1.git",
+        "git@github.com:dst-red-Wire/ecommerce-1",
+        "ssh://git@github.com/dst-red-Wire/ecommerce-1.git",
+        "ssh://git@github.com/dst-red-Wire/ecommerce-1",
+    }
+)
 _SOURCE_REQUEST_KEYS = frozenset(
     {
         "event",
@@ -95,12 +108,35 @@ class ReviewTransitionError(RuntimeError):
     """The trusted output or exact PR binding is unavailable or contradictory."""
 
 
+class ReviewTransitionSuperseded(ReviewTransitionError):
+    """The exact GitHub PR binding changed during this transition."""
+
+
+class ReviewTransitionTransientFetch(ReviewTransitionError):
+    """The exact commit could not be fetched before controller execution."""
+
+
+class ReviewTransitionTransientGitHub(ReviewTransitionError):
+    """GitHub could not revalidate the exact PR before controller execution."""
+
+
 def _managed_gh() -> str:
     try:
         binary, _, _ = resolve_managed_gh(ROOT)
     except ValueError as exc:
         raise ReviewTransitionError(str(exc)) from exc
     return binary
+
+
+def _safe_git_env() -> dict[str, str]:
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("GIT_", "PYTHON"))
+    }
+    environment["PATH"] = os.defpath
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    return environment
 
 
 def _git(root: Path, *args: str) -> str:
@@ -111,10 +147,140 @@ def _git(root: Path, *args: str) -> str:
         text=True,
         check=False,
         timeout=30,
+        stdin=subprocess.DEVNULL,
+        env=_safe_git_env(),
     )
     if result.returncode:
         raise ReviewTransitionError("cannot verify exact local Git checkout")
     return result.stdout.strip()
+
+
+def _trusted_origin_url(trusted_root: Path) -> str:
+    try:
+        configured = _git(
+            trusted_root, "config", "--get-all", "remote.origin.url"
+        ).splitlines()
+        effective = _git(
+            trusted_root, "remote", "get-url", "--all", "origin"
+        ).splitlines()
+    except ReviewTransitionError as exc:
+        raise ReviewTransitionError("trusted exact-base origin is unavailable") from exc
+    if (
+        len(configured) != 1
+        or configured != effective
+        or configured[0] not in _CANONICAL_ORIGINS
+    ):
+        raise ReviewTransitionError(
+            "trusted exact-base origin differs from canonical GitHub repository"
+        )
+    return configured[0]
+
+
+def _trusted_checkout_snapshot(trusted_root: Path) -> tuple[str, str, str, str]:
+    return (
+        _git(trusted_root, "rev-parse", "HEAD"),
+        _git(trusted_root, "branch", "--show-current"),
+        _git(trusted_root, "status", "--porcelain", "--untracked-files=all"),
+        _git(trusted_root, "for-each-ref", "--format=%(refname) %(objectname)"),
+    )
+
+
+def _ensure_trusted_head_object(
+    trusted_root: Path, binding: ExactPRBinding, *, allow_fetch: bool
+) -> None:
+    """Import only the bound commit object; keep the trusted base checkout fixed."""
+    if (
+        binding.repository != CANONICAL_REPOSITORY
+        or binding.base != "main"
+        or _SHA.fullmatch(binding.base_sha) is None
+        or _SHA.fullmatch(binding.head_sha) is None
+    ):
+        raise ReviewTransitionError("trusted exact HEAD binding is invalid")
+    before = _trusted_checkout_snapshot(trusted_root)
+    if before[0] != binding.base_sha or before[2]:
+        raise ReviewTransitionError("trusted exact-base checkout changed")
+    origin_url = _trusted_origin_url(trusted_root)
+    gh = _managed_gh()
+
+    def revalidate() -> None:
+        try:
+            if revalidate_exact_open_pr(binding, gh=gh) != binding:
+                raise ReviewTransitionSuperseded(
+                    "trusted exact PR binding changed during HEAD import"
+                )
+        except ExactPRBindingChanged as exc:
+            raise ReviewTransitionSuperseded(
+                f"trusted exact PR binding changed during HEAD import: {exc.reason}"
+            ) from exc
+        except ExactPRBindingError as exc:
+            if str(exc).startswith("GitHub API request failed"):
+                raise ReviewTransitionTransientGitHub(
+                    "trusted exact PR revalidation is unavailable"
+                ) from exc
+            raise ReviewTransitionError(
+                "trusted exact PR revalidation contradicted the binding"
+            ) from exc
+
+    revalidate()
+    try:
+        present = _git(trusted_root, "cat-file", "-t", binding.head_sha) == "commit"
+    except ReviewTransitionError:
+        present = False
+    if not present:
+        if not allow_fetch:
+            raise ReviewTransitionError(
+                "dry-run requires the exact HEAD object already in trusted Git"
+            )
+        try:
+            fetched = subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "protocol.ext.allow=never",
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--no-recurse-submodules",
+                    origin_url,
+                    binding.head_sha,
+                ],
+                cwd=trusted_root,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
+                env=_safe_git_env(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ReviewTransitionTransientFetch(
+                "trusted exact HEAD fetch failed"
+            ) from exc
+        if fetched.returncode:
+            raise ReviewTransitionTransientFetch("trusted exact HEAD fetch failed")
+    try:
+        commit = _git(
+            trusted_root, "rev-parse", "--verify", f"{binding.head_sha}^{{commit}}"
+        )
+        if commit != binding.head_sha:
+            raise ReviewTransitionError("trusted fetched HEAD differs from GitHub")
+        _git(
+            trusted_root,
+            "merge-base",
+            "--is-ancestor",
+            binding.base_sha,
+            binding.head_sha,
+        )
+    except ReviewTransitionError as exc:
+        raise ReviewTransitionError(
+            "trusted exact HEAD is not a commit descending from base"
+        ) from exc
+    if _trusted_checkout_snapshot(trusted_root) != before:
+        raise ReviewTransitionError("trusted exact-base checkout changed during fetch")
+    revalidate()
 
 
 def _trusted_transition(
@@ -327,8 +493,23 @@ def dispatch_controller_result(
             base_sha,
             gh=gh,
         )
-    elif revalidate_exact_open_pr(binding, gh=gh) != binding:
-        raise ReviewTransitionError("exact PR binding changed before dispatch")
+    else:
+        try:
+            fresh_binding = revalidate_exact_open_pr(binding, gh=gh)
+        except ExactPRBindingChanged as exc:
+            raise ReviewTransitionSuperseded(
+                f"exact PR binding changed before dispatch: {exc.reason}"
+            ) from exc
+        except ExactPRBindingError as exc:
+            if str(exc).startswith("GitHub API request failed"):
+                raise ReviewTransitionTransientGitHub(
+                    "exact PR revalidation is unavailable before dispatch"
+                ) from exc
+            raise ReviewTransitionError(
+                "exact PR revalidation contradicted the binding before dispatch"
+            ) from exc
+        if fresh_binding != binding:
+            raise ReviewTransitionSuperseded("exact PR binding changed before dispatch")
     if binding.pr_number != pr_number:
         raise ReviewTransitionError(
             "resolved exact PR number differs from requested PR"
@@ -468,7 +649,24 @@ def transition(
     target_root = target_root.resolve()
     previous_kind = ""
     owner_authorization_attempted = False
-    binding = preflight(target_root, pr_number)
+
+    def checked_preflight() -> ExactPRBinding:
+        try:
+            return preflight(target_root, pr_number)
+        except ExactPRBindingChanged as exc:
+            raise ReviewTransitionSuperseded(
+                f"trusted exact PR binding changed: {exc.reason}"
+            ) from exc
+        except ExactPRBindingError as exc:
+            if str(exc).startswith("GitHub API request failed"):
+                raise ReviewTransitionTransientGitHub(
+                    "trusted exact PR preflight is unavailable"
+                ) from exc
+            raise ReviewTransitionError(
+                "trusted exact PR preflight contradicted the binding"
+            ) from exc
+
+    binding = checked_preflight()
     if legacy_bootstrap_binding is not None:
         _validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
     if (
@@ -476,9 +674,12 @@ def transition(
         and owner_authorization_binding != f"{binding.pr_number}:{binding.head_sha}"
     ):
         raise ReviewTransitionError("owner authorization binding differs from exact PR")
+    _ensure_trusted_head_object(trusted_root, binding, allow_fetch=not dry_run)
     for attempt in range(6):
-        if attempt and preflight(target_root, pr_number) != binding:
-            raise ReviewTransitionError("exact PR binding changed during transition")
+        if attempt and checked_preflight() != binding:
+            raise ReviewTransitionSuperseded(
+                "exact PR binding changed during transition"
+            )
         rc, controller = _trusted_transition(
             trusted_root,
             target_root,
@@ -503,8 +704,8 @@ def transition(
                 binding,
                 legacy_bootstrap_binding=legacy_bootstrap_binding,
             )
-            if preflight(target_root, pr_number) != binding:
-                raise ReviewTransitionError(
+            if checked_preflight() != binding:
+                raise ReviewTransitionSuperseded(
                     "exact PR binding changed while stabilizing review request"
                 )
             initial_identity = (
@@ -725,6 +926,41 @@ def main(argv: list[str] | None = None) -> int:
                 owner_authorization_binding=args.owner_authorization_binding,
                 poll_existing_only=args.poll_existing_only,
             )
+    except (ReviewTransitionTransientFetch, ReviewTransitionTransientGitHub) as exc:
+        rc = 1
+        fetch_failure = isinstance(exc, ReviewTransitionTransientFetch)
+        result = {
+            "schema_version": 2,
+            "pr": args.pr,
+            "state": "BLOCKED",
+            "next_action": (
+                "RETRY_EXACT_HEAD_FETCH"
+                if fetch_failure
+                else "RETRY_GITHUB_REVALIDATION"
+            ),
+            "merge_ready": False,
+            "merge_result": "NOT_ATTEMPTED",
+            "error_code": (
+                "TRUSTED_HEAD_FETCH_FAILED"
+                if fetch_failure
+                else "TRUSTED_GITHUB_REVALIDATION_UNAVAILABLE"
+            ),
+            "retryable": True,
+            "blockers": [str(exc)],
+            "review_dispatch": {"status": "BLOCKED", "verdict_authority": False},
+        }
+    except ReviewTransitionSuperseded as exc:
+        rc = 1
+        result = {
+            "schema_version": 2,
+            "pr": args.pr,
+            "state": "SUPERSEDED",
+            "next_action": "REVALIDATE_EXACT_PR",
+            "merge_ready": False,
+            "merge_result": "NOT_ATTEMPTED",
+            "blockers": [str(exc)],
+            "review_dispatch": {"status": "SUPERSEDED", "verdict_authority": False},
+        }
     except (
         OSError,
         ValueError,

@@ -58,6 +58,14 @@ class SupersededHeadError(RuntimeError):
     """The local PR checkout cannot safely follow the exact GitHub HEAD."""
 
 
+class TransientTrustedAuthorityError(TransientGitHubError):
+    """A trusted transition failed before the controller could submit a review."""
+
+
+class TransientTrustedHeadFetchError(TransientTrustedAuthorityError):
+    """A trusted exact commit fetch failed before controller execution."""
+
+
 def github_request(
     url: str,
     token: str,
@@ -1119,12 +1127,13 @@ def _verified_resume_context(
         dirty = _git_value(target, "status", "--porcelain", "--untracked-files=all")
         gh, _, _ = resolve_managed_gh(trusted)
         binding = resolve_exact_open_pr(REPOSITORY, head, branch, "main", gh=gh)
-    except (
-        OSError,
-        ValueError,
-        ExactPRBindingError,
-        subprocess.CalledProcessError,
-    ) as exc:
+    except ExactPRBindingError as exc:
+        if str(exc).startswith("GitHub API request failed"):
+            raise TransientTrustedAuthorityError(
+                "trusted monitor GitHub PR binding is temporarily unavailable"
+            ) from exc
+        raise RuntimeError("trusted monitor exact PR binding is unavailable") from exc
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("trusted monitor exact PR binding is unavailable") from exc
     if (
         _SHA.fullmatch(head) is None
@@ -1138,6 +1147,10 @@ def _verified_resume_context(
         if revalidate_exact_open_pr(binding, gh=gh) != binding:
             raise RuntimeError("trusted monitor exact PR binding changed")
     except ExactPRBindingError as exc:
+        if str(exc).startswith("GitHub API request failed"):
+            raise TransientTrustedAuthorityError(
+                "trusted monitor GitHub PR revalidation is temporarily unavailable"
+            ) from exc
         raise RuntimeError("trusted monitor exact PR revalidation failed") from exc
     return trusted, target, adapter
 
@@ -1183,6 +1196,20 @@ def resume_trusted_transition(
         raise RuntimeError("trusted PR transition returned no valid JSON") from exc
     if not isinstance(result, dict) or result.get("pr") != args.pr:
         raise RuntimeError("trusted PR transition identity is invalid")
+    if (
+        completed.returncode != 0
+        and result.get("state") == "BLOCKED"
+        and result.get("retryable") is True
+    ):
+        code = result.get("error_code")
+        if code == "TRUSTED_HEAD_FETCH_FAILED":
+            raise TransientTrustedHeadFetchError(
+                "trusted exact HEAD fetch failed before controller execution"
+            )
+        if code == "TRUSTED_GITHUB_REVALIDATION_UNAVAILABLE":
+            raise TransientTrustedAuthorityError(
+                "trusted exact PR GitHub revalidation is unavailable"
+            )
     dispatch = result.get("review_dispatch")
     submitted = (
         isinstance(dispatch, dict)
@@ -1265,9 +1292,13 @@ def poll_once(
         "https://api.github.com/graphql",
         token,
         body=_graphql_body(GRAPHQL_QUERY, args.owner, args.repo, args.pr),
-        etag=previous.get("etag", ""),
+        etag="" if bootstrap else previous.get("etag", ""),
     )
     if status == 304:
+        if bootstrap:
+            raise TransientGitHubError(
+                "GitHub omitted the exact PR snapshot during monitor bootstrap"
+            )
         unchanged = int(previous.get("unchanged_polls", 0)) + 1
         updated = dict(previous)
         updated["unchanged_polls"] = unchanged
@@ -1349,7 +1380,7 @@ def poll_once(
         print(event, flush=True)
     current["resume_retry_count"] = previous.get("resume_retry_count", 0)
     if getattr(args, "trusted_root", None) and not is_terminal(current, args.abandoned):
-        if "HEAD_CHANGED" in events:
+        if bootstrap or "HEAD_CHANGED" in events:
             sync_exact_pr_head(args, current["head_sha"])
         if bootstrap or events or previous.get("resume_pending"):
             outcome = resume_trusted_transition(
@@ -1452,6 +1483,16 @@ def main() -> int:
             return 2
         except TransientGitHubError as exc:
             transient_failures += 1
+            if (
+                isinstance(exc, TransientTrustedAuthorityError)
+                and transient_failures >= MAX_TRANSIENT_RESUME_RETRIES
+            ):
+                print(
+                    "TRANSIENT_TRUSTED_AUTHORITY_RETRY_EXHAUSTED",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return 3
             delay = min(
                 max(args.interval, 60 * (2 ** min(transient_failures - 1, 6))),
                 args.max_interval,

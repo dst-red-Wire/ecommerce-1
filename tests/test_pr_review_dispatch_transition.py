@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
@@ -10,7 +11,11 @@ from unittest import TestCase, mock
 from scripts import chatgpt_review_transport as review_transport
 from scripts import pr_monitor
 from scripts import pr_review_dispatch_transition as transition
-from scripts.exact_pr_binding import ExactPRBinding
+from scripts.exact_pr_binding import (
+    ExactPRBinding,
+    ExactPRBindingChanged,
+    ExactPRBindingError,
+)
 
 HEAD = "a" * 40
 BASE = "b" * 40
@@ -127,6 +132,9 @@ class PRReviewDispatchTransitionTest(TestCase):
         )
         self.managed_gh = gh_patch.start()
         self.addCleanup(gh_patch.stop)
+        fetch_patch = mock.patch.object(transition, "_ensure_trusted_head_object")
+        self.fetch_head = fetch_patch.start()
+        self.addCleanup(fetch_patch.stop)
 
     def local_git(self):
         return mock.patch.object(
@@ -308,6 +316,45 @@ class PRReviewDispatchTransitionTest(TestCase):
         with self.assertRaisesRegex(transition.ReviewTransitionError, "malformed"):
             transition._request_from_controller(tampered, self.binding)
 
+    def test_binding_change_before_dispatch_has_no_dispatch_or_marker(self):
+        changed = ExactPRBinding(REPOSITORY, 169, "main", BASE, BRANCH, "e" * 40)
+        for outcome, expected in (
+            (changed, transition.ReviewTransitionSuperseded),
+            (
+                ExactPRBindingChanged("HEAD_CHANGED"),
+                transition.ReviewTransitionSuperseded,
+            ),
+            (
+                ExactPRBindingError("GitHub API request failed: PR detail"),
+                transition.ReviewTransitionTransientGitHub,
+            ),
+        ):
+            with (
+                self.subTest(outcome=outcome),
+                self.local_git(),
+                mock.patch.object(
+                    transition,
+                    "revalidate_exact_open_pr",
+                    side_effect=outcome if isinstance(outcome, Exception) else None,
+                    return_value=outcome
+                    if isinstance(outcome, ExactPRBinding)
+                    else None,
+                ),
+                self.assertRaises(expected),
+            ):
+                dispatch = mock.Mock()
+                marker = mock.Mock()
+                transition.dispatch_controller_result(
+                    controller(),
+                    pr_number=169,
+                    target_root=Path("/repo"),
+                    binding=self.binding,
+                    dispatcher=dispatch,
+                    marker_lookup=marker,
+                )
+            dispatch.assert_not_called()
+            marker.assert_not_called()
+
     def test_dry_run_prepares_no_outbox_or_transport(self):
         dispatch = mock.Mock()
         with self.local_git():
@@ -355,6 +402,40 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual(2, trusted.call_count)
         rerun.assert_called_once()
 
+    def test_binding_change_before_second_controller_pass_is_superseded(self):
+        review = controller()
+        changed = ExactPRBinding(REPOSITORY, 169, "main", BASE, BRANCH, "e" * 40)
+        preflight = mock.Mock(side_effect=[self.binding, changed])
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", return_value=(0, review)
+            ) as trusted,
+            mock.patch.object(
+                transition,
+                "dispatch_controller_result",
+                return_value={
+                    **review,
+                    "review_dispatch": {"status": "PASS", "kind": "CODE"},
+                },
+            ) as dispatch,
+            mock.patch.object(transition, "rerun_after_review_marker", return_value=0),
+            mock.patch.object(
+                transition, "reconcile_post_rerun", return_value={"status": "OPEN"}
+            ),
+            mock.patch.object(transition, "publish_owner_authorization") as marker,
+            self.assertRaises(transition.ReviewTransitionSuperseded),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=preflight,
+            )
+        trusted.assert_called_once()
+        dispatch.assert_called_once()
+        marker.assert_not_called()
+        self.assertEqual(2, preflight.call_count)
+
     def test_new_qualification_settles_handoff_before_dispatch(self):
         first = controller(
             pr=172, base=BOOTSTRAP_BASE, branch=BOOTSTRAP_BRANCH, structured=False
@@ -390,6 +471,40 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
         self.assertEqual(2, trusted.call_count)
         self.assertIs(settled, dispatch.call_args.args[0])
+
+    def test_binding_change_while_stabilizing_blocks_second_pass_and_dispatch(self):
+        first = controller(
+            pr=172, base=BOOTSTRAP_BASE, branch=BOOTSTRAP_BRANCH, structured=False
+        )
+        first["qualification"]["source"] = "executed"
+        changed = ExactPRBinding(
+            REPOSITORY,
+            172,
+            "main",
+            BOOTSTRAP_BASE,
+            BOOTSTRAP_BRANCH,
+            "e" * 40,
+        )
+        preflight = mock.Mock(side_effect=[self.bootstrap_binding, changed])
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", return_value=(0, first)
+            ) as trusted,
+            mock.patch.object(transition, "dispatch_controller_result") as dispatch,
+            mock.patch.object(transition, "publish_owner_authorization") as marker,
+            self.assertRaises(transition.ReviewTransitionSuperseded),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                172,
+                legacy_bootstrap_binding=self.legacy_binding_arg,
+                preflight=preflight,
+            )
+        trusted.assert_called_once()
+        dispatch.assert_not_called()
+        marker.assert_not_called()
+        self.assertEqual(2, preflight.call_count)
 
     def test_unstable_qualification_handoff_blocks_before_dispatch(self):
         first = controller(
@@ -431,6 +546,169 @@ class PRReviewDispatchTransitionTest(TestCase):
             )
         self.assertEqual(1, code)
         self.assertEqual("CODE_FAILED", result["state"])
+        self.fetch_head.assert_called_once_with(
+            Path("/trusted"), self.binding, allow_fetch=True
+        )
+
+    def test_dry_run_never_allows_a_trusted_object_fetch(self):
+        with mock.patch.object(
+            transition,
+            "_trusted_transition",
+            return_value=(0, {"state": "DRY_RUN", "pr": 169}),
+        ) as trusted:
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                dry_run=True,
+                preflight=lambda *_: self.binding,
+            )
+        self.fetch_head.assert_called_once_with(
+            Path("/trusted"), self.binding, allow_fetch=False
+        )
+        trusted.assert_called_once()
+
+    def test_changed_binding_returns_explicit_superseded_state(self):
+        with (
+            mock.patch.object(
+                transition,
+                "transition",
+                side_effect=transition.ReviewTransitionSuperseded(
+                    "trusted exact PR binding changed: HEAD_CHANGED"
+                ),
+            ),
+            mock.patch.object(transition, "_print_result") as printer,
+        ):
+            rc = transition.main(
+                [
+                    "--trusted-root",
+                    "/trusted",
+                    "--target-root",
+                    "/target",
+                    "--pr",
+                    "169",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, rc)
+        result = printer.call_args.args[0]
+        self.assertEqual("SUPERSEDED", result["state"])
+        self.assertEqual("SUPERSEDED", result["review_dispatch"]["status"])
+        self.assertEqual("REVALIDATE_EXACT_PR", result["next_action"])
+
+    def test_fetch_failure_blocks_before_controller_or_review_dispatch(self):
+        self.fetch_head.side_effect = transition.ReviewTransitionTransientFetch(
+            "trusted exact HEAD fetch failed"
+        )
+        with (
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            mock.patch.object(transition, "dispatch_controller_result") as dispatch,
+            self.assertRaises(transition.ReviewTransitionTransientFetch),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        trusted.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_github_preflight_unavailable_blocks_before_controller(self):
+        with (
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            mock.patch.object(transition, "dispatch_controller_result") as dispatch,
+            self.assertRaises(transition.ReviewTransitionTransientGitHub),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=mock.Mock(
+                    side_effect=ExactPRBindingError("GitHub API request failed")
+                ),
+            )
+        trusted.assert_not_called()
+        dispatch.assert_not_called()
+
+    def test_non_api_binding_contradiction_is_not_retryable(self):
+        with (
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            self.assertRaises(transition.ReviewTransitionError) as raised,
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=mock.Mock(
+                    side_effect=ExactPRBindingError(
+                        "expected exactly one open PR for the exact source; found 0"
+                    )
+                ),
+            )
+        self.assertNotIsInstance(
+            raised.exception, transition.ReviewTransitionTransientGitHub
+        )
+        trusted.assert_not_called()
+
+    def test_transient_github_revalidation_returns_machine_readable_blocker(self):
+        with (
+            mock.patch.object(
+                transition,
+                "transition",
+                side_effect=transition.ReviewTransitionTransientGitHub(
+                    "trusted exact PR revalidation is unavailable"
+                ),
+            ),
+            mock.patch.object(transition, "_print_result") as printer,
+        ):
+            rc = transition.main(
+                [
+                    "--trusted-root",
+                    "/trusted",
+                    "--target-root",
+                    "/target",
+                    "--pr",
+                    "169",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, rc)
+        result = printer.call_args.args[0]
+        self.assertEqual("BLOCKED", result["state"])
+        self.assertEqual(
+            "TRUSTED_GITHUB_REVALIDATION_UNAVAILABLE", result["error_code"]
+        )
+        self.assertIs(True, result["retryable"])
+        self.assertEqual("RETRY_GITHUB_REVALIDATION", result["next_action"])
+
+    def test_transient_fetch_returns_machine_readable_blocker(self):
+        with (
+            mock.patch.object(
+                transition,
+                "transition",
+                side_effect=transition.ReviewTransitionTransientFetch(
+                    "trusted exact HEAD fetch failed"
+                ),
+            ),
+            mock.patch.object(transition, "_print_result") as printer,
+        ):
+            rc = transition.main(
+                [
+                    "--trusted-root",
+                    "/trusted",
+                    "--target-root",
+                    "/target",
+                    "--pr",
+                    "169",
+                    "--json",
+                ]
+            )
+        self.assertEqual(1, rc)
+        result = printer.call_args.args[0]
+        self.assertEqual("BLOCKED", result["state"])
+        self.assertEqual("TRUSTED_HEAD_FETCH_FAILED", result["error_code"])
+        self.assertIs(True, result["retryable"])
 
     def test_owner_fail_marker_stops_before_security(self):
         review = controller()
@@ -984,3 +1262,293 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual("MERGED", result["state"])
         self.assertEqual("f" * 40, result["merge_sha"])
         reconcile.assert_called_once_with(self.binding, gh=self.gh_path)
+
+
+class TrustedHeadObjectTest(TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        self.origin = root / "origin.git"
+        self.writer = root / "writer"
+        self.trusted = root / "trusted"
+        for command in (
+            ["git", "init", "--bare", str(self.origin)],
+            ["git", "init", "-b", "main", str(self.writer)],
+        ):
+            subprocess.run(command, capture_output=True, text=True, check=True)
+        self.git(self.writer, "config", "user.email", "transition-test@example.invalid")
+        self.git(self.writer, "config", "user.name", "Transition Test")
+        self.git(self.writer, "remote", "add", "origin", str(self.origin))
+        (self.writer / "base.txt").write_text("base", encoding="utf-8")
+        self.git(self.writer, "add", "base.txt")
+        self.git(self.writer, "-c", "commit.gpgsign=false", "commit", "-m", "base")
+        self.base_sha = self.git(self.writer, "rev-parse", "HEAD")
+        self.git(self.writer, "push", "origin", "main")
+        subprocess.run(
+            ["git", "clone", "--branch", "main", str(self.origin), str(self.trusted)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.git(self.writer, "checkout", "-b", "feature")
+        (self.writer / "feature.txt").write_text("new", encoding="utf-8")
+        self.git(self.writer, "add", "feature.txt")
+        self.git(self.writer, "-c", "commit.gpgsign=false", "commit", "-m", "feature")
+        self.head_sha = self.git(self.writer, "rev-parse", "HEAD")
+        self.git(self.writer, "push", "origin", "feature")
+        self.binding = ExactPRBinding(
+            REPOSITORY, 169, "main", self.base_sha, "feature", self.head_sha
+        )
+
+    @staticmethod
+    def git(root, *args):
+        return subprocess.run(
+            ["git", *args],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def local_authority(self, binding=None):
+        return (
+            mock.patch.object(
+                transition, "_trusted_origin_url", return_value=str(self.origin)
+            ),
+            mock.patch.object(transition, "_managed_gh", return_value="/managed/gh"),
+            mock.patch.object(
+                transition,
+                "revalidate_exact_open_pr",
+                return_value=binding or self.binding,
+            ),
+        )
+
+    def test_missing_exact_head_is_fetched_once_without_moving_trusted_base(self):
+        self.assertNotEqual(
+            0,
+            subprocess.run(
+                ["git", "cat-file", "-e", self.head_sha],
+                cwd=self.trusted,
+                capture_output=True,
+                check=False,
+            ).returncode,
+        )
+        before = (
+            self.git(self.trusted, "rev-parse", "HEAD"),
+            self.git(self.trusted, "status", "--porcelain", "--untracked-files=all"),
+            self.git(
+                self.trusted,
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+            ),
+        )
+        origin, gh, revalidate = self.local_authority()
+        with origin, gh, revalidate as checked_binding:
+            transition._ensure_trusted_head_object(
+                self.trusted, self.binding, allow_fetch=True
+            )
+            real_run = subprocess.run
+            with mock.patch.object(
+                transition.subprocess, "run", wraps=real_run
+            ) as runner:
+                transition._ensure_trusted_head_object(
+                    self.trusted, self.binding, allow_fetch=True
+                )
+            self.assertFalse(
+                any("fetch" in call.args[0] for call in runner.call_args_list)
+            )
+        self.assertEqual(
+            "commit", self.git(self.trusted, "cat-file", "-t", self.head_sha)
+        )
+        self.assertEqual(
+            before,
+            (
+                self.git(self.trusted, "rev-parse", "HEAD"),
+                self.git(
+                    self.trusted, "status", "--porcelain", "--untracked-files=all"
+                ),
+                self.git(
+                    self.trusted,
+                    "for-each-ref",
+                    "--format=%(refname) %(objectname)",
+                ),
+            ),
+        )
+        self.assertEqual(4, checked_binding.call_count)
+
+    def test_dry_run_with_missing_object_never_fetches(self):
+        origin, gh, revalidate = self.local_authority()
+        real_run = subprocess.run
+        with (
+            origin,
+            gh,
+            revalidate,
+            mock.patch.object(transition.subprocess, "run", wraps=real_run) as runner,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionError, "dry-run requires"
+            ),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, self.binding, allow_fetch=False
+            )
+        self.assertFalse(any("fetch" in call.args[0] for call in runner.call_args_list))
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+
+    def test_invalid_origin_or_sha_blocks_before_fetch(self):
+        with self.assertRaisesRegex(
+            transition.ReviewTransitionError, "binding is invalid"
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted,
+                ExactPRBinding(
+                    REPOSITORY, 169, "main", self.base_sha, "feature", "bad"
+                ),
+                allow_fetch=True,
+            )
+        with (
+            mock.patch.object(transition, "_managed_gh", return_value="/managed/gh"),
+            self.assertRaisesRegex(transition.ReviewTransitionError, "origin differs"),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, self.binding, allow_fetch=True
+            )
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+
+    def test_missing_remote_sha_fails_closed_and_preserves_trusted_base(self):
+        absent = ExactPRBinding(
+            REPOSITORY, 169, "main", self.base_sha, "feature", "f" * 40
+        )
+        origin, gh, revalidate = self.local_authority(absent)
+        with (
+            origin,
+            gh,
+            revalidate,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionError, "trusted exact HEAD fetch failed"
+            ),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, absent, allow_fetch=True
+            )
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+        self.assertEqual(
+            "", self.git(self.trusted, "status", "--porcelain", "--untracked-files=all")
+        )
+
+    def test_github_revalidation_failure_after_fetch_stops_before_controller(self):
+        with (
+            mock.patch.object(
+                transition, "_trusted_origin_url", return_value=str(self.origin)
+            ),
+            mock.patch.object(transition, "_managed_gh", return_value="/managed/gh"),
+            mock.patch.object(
+                transition,
+                "revalidate_exact_open_pr",
+                side_effect=[
+                    self.binding,
+                    ExactPRBindingError("GitHub API request failed"),
+                ],
+            ) as revalidate,
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            self.assertRaises(transition.ReviewTransitionTransientGitHub),
+        ):
+            transition.transition(
+                self.trusted,
+                self.writer,
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        self.assertEqual(2, revalidate.call_count)
+        trusted.assert_not_called()
+        self.assertEqual(
+            "commit", self.git(self.trusted, "cat-file", "-t", self.head_sha)
+        )
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+
+    def test_ref_change_during_fetch_blocks_before_controller(self):
+        original_snapshot = transition._trusted_checkout_snapshot(self.trusted)
+        changed_snapshot = (
+            original_snapshot[0],
+            original_snapshot[1],
+            original_snapshot[2],
+            original_snapshot[3] + "\nrefs/heads/unexpected " + "e" * 40,
+        )
+        origin, gh, revalidate = self.local_authority()
+        with (
+            origin,
+            gh,
+            revalidate,
+            mock.patch.object(
+                transition,
+                "_trusted_checkout_snapshot",
+                side_effect=[original_snapshot, changed_snapshot],
+            ),
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionError, "checkout changed during fetch"
+            ),
+        ):
+            transition.transition(
+                self.trusted,
+                self.writer,
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        trusted.assert_not_called()
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+
+    def test_github_head_change_after_fetch_is_superseded(self):
+        with (
+            mock.patch.object(
+                transition, "_trusted_origin_url", return_value=str(self.origin)
+            ),
+            mock.patch.object(transition, "_managed_gh", return_value="/managed/gh"),
+            mock.patch.object(
+                transition,
+                "revalidate_exact_open_pr",
+                side_effect=[
+                    self.binding,
+                    ExactPRBindingChanged("HEAD_CHANGED"),
+                ],
+            ) as revalidate,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionSuperseded, "HEAD_CHANGED"
+            ),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, self.binding, allow_fetch=True
+            )
+        self.assertEqual(2, revalidate.call_count)
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+        self.assertEqual(
+            "", self.git(self.trusted, "status", "--porcelain", "--untracked-files=all")
+        )
+
+    def test_commit_outside_base_ancestry_is_rejected(self):
+        self.git(self.writer, "checkout", "--orphan", "unrelated")
+        self.git(self.writer, "rm", "-r", "--force", ".")
+        (self.writer / "other.txt").write_text("other", encoding="utf-8")
+        self.git(self.writer, "add", "other.txt")
+        self.git(self.writer, "-c", "commit.gpgsign=false", "commit", "-m", "unrelated")
+        other_sha = self.git(self.writer, "rev-parse", "HEAD")
+        self.git(self.writer, "push", "origin", "unrelated")
+        unrelated = ExactPRBinding(
+            REPOSITORY, 169, "main", self.base_sha, "unrelated", other_sha
+        )
+        origin, gh, revalidate = self.local_authority(unrelated)
+        with (
+            origin,
+            gh,
+            revalidate,
+            self.assertRaisesRegex(
+                transition.ReviewTransitionError, "not a commit descending"
+            ),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, unrelated, allow_fetch=True
+            )
+        self.assertEqual(self.base_sha, self.git(self.trusted, "rev-parse", "HEAD"))
+        self.assertEqual(
+            "", self.git(self.trusted, "status", "--porcelain", "--untracked-files=all")
+        )
