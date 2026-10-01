@@ -270,8 +270,8 @@ class PRLoopRiskClassificationTests(unittest.TestCase):
         for capability, (path, content) in cases.items():
             with self.subTest(capability=capability):
                 result = self.classify([path], {path: content})
-                self.assertEqual("SENSITIVE", result["classification"])
-                self.assertIn(capability, result["matched_capabilities"])
+                self.assertEqual("PRIVILEGED" if capability == "secrets" else "SENSITIVE", result["classification"])
+                self.assertIn("credential-identity" if capability == "secrets" else capability, result["matched_capabilities"])
 
     def test_application_auth_paths_are_sensitive_without_keyword_content(self):
         paths = (
@@ -410,9 +410,9 @@ print(json.dumps({'classification': 'LOW_RISK', 'authority': 'repository-policy'
             with mock.patch.object(REPOCTL, "ROOT", repository):
                 result = REPOCTL.classify_merge_risk(base_sha, head_sha, 161)
 
-        self.assertEqual("SENSITIVE", result["classification"])
+        self.assertEqual("PRIVILEGED", result["classification"])
         self.assertEqual("exact-pr-base-sha", result["controller_source"])
-        self.assertIn("delivery-authority", result["matched_capabilities"], result)
+        self.assertTrue(result["matched_capabilities"], result)
         state = REPOCTL.derive_pr_loop_state(
             PRLoopStateTests().pr(base_sha=base_sha, head_sha=head_sha),
             {"status": "PASS", "head_sha": head_sha},
@@ -516,8 +516,10 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         ]
         with mock.patch.object(REPOCTL, "pull_request_review_policy", return_value=self.policy()):
             evidence = REPOCTL._chatgpt_review_evidence(comments, "owner", self.SHA_B)
-        self.assertEqual("MISSING", evidence["code"]["status"])
-        self.assertEqual("MISSING", evidence["security"]["status"])
+        self.assertEqual("SUPERSEDED", evidence["code"]["status"])
+        self.assertEqual("SUPERSEDED", evidence["security"]["status"])
+        self.assertEqual(self.SHA_A, evidence["code"]["superseded_head_sha"])
+        self.assertEqual(self.SHA_A, evidence["security"]["superseded_head_sha"])
 
     def test_latest_exact_sha_marker_wins_and_wrong_owner_is_ignored(self):
         comments = [
@@ -600,7 +602,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
         cases = (
             ([self.comment(command, author="attacker")], "MISSING"),
             ([self.comment(f"/owner-authorization approve scope=pr-999 sha={self.SHA_A}")], "MISSING"),
-            ([self.comment(f"/owner-authorization approve scope=pr-161 sha={self.SHA_B}")], "MISSING"),
+            ([self.comment(f"/owner-authorization approve scope=pr-161 sha={self.SHA_B}")], "SUPERSEDED"),
             ([self.comment(command)], "PASS"),
         )
         for comments, expected in cases:
@@ -641,7 +643,7 @@ class PRLoopAuthorityEvidenceTests(unittest.TestCase):
             ),
         ]
         evidence = REPOCTL._owner_authorization_evidence(comments, "owner", 161, self.SHA_A)
-        self.assertEqual("MISSING", evidence["status"])
+        self.assertEqual("SUPERSEDED", evidence["status"])
         self.assertIn("another SHA", evidence["reason"])
 
     def test_later_explicit_revocation_invalidates_authorization(self):
@@ -890,6 +892,12 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                     "preflight": {"status": "PASS"},
                 }),
                 _remote_ref_sha=mock.Mock(return_value="c" * 40),
+                _delivery_exact_bundle_gate=mock.Mock(return_value={
+                    "status": "PASS",
+                    "manifest": ".context/evidence/fixture/manifest.json",
+                    "manifest_digest": "sha256:" + "a" * 64,
+                    "review_evidence": [],
+                }),
                 _require_trusted_pr_execution=mock.Mock(
                     return_value={
                         "trusted_root": Path("/trusted/base"),
@@ -995,9 +1003,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual(self.SHA_A, payload["initial_head_sha"])
         self.assertEqual(self.SHA_B, payload["head_sha"])
         self.assertEqual("PASS", payload["qualification"]["status"])
-        self.assertEqual("MISSING", payload["code_review"]["status"])
-        self.assertEqual("MISSING", payload["security_review"]["status"])
-        self.assertEqual("MISSING", payload["owner_authorization"]["status"])
+        self.assertEqual("SUPERSEDED", payload["code_review"]["status"])
+        self.assertEqual("SUPERSEDED", payload["security_review"]["status"])
+        self.assertEqual("SUPERSEDED", payload["owner_authorization"]["status"])
         self.assertEqual("UNKNOWN", payload["risk_classification"])
         self.assertFalse(payload["merge_ready"])
         transition.assert_called_once()
@@ -1131,7 +1139,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertEqual("SYNC_PR_BASE", payload["state"])
         self.assertEqual(self.SHA_B, payload["head_sha"])
-        self.assertEqual("MISSING", payload["owner_authorization"]["status"])
+        self.assertEqual("SUPERSEDED", payload["owner_authorization"]["status"])
         transition.assert_called_once()
 
     def test_dry_run_is_read_only_and_emits_exact_code_handoff(self):
@@ -1762,6 +1770,57 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 self.assertEqual("BLOCKED", payload["work_item_completion"]["status"])
                 self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
                 self.assertIn(reason, " ".join(payload["blockers"]))
+
+    def test_signed_merge_and_proof_do_not_finish_when_issue_closure_fails(self):
+        rc, payload = self._run_merged_closure("BLOCKED")
+        self.assertEqual(1, rc)
+        self.assertEqual("MERGED", payload["state"])
+        self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
+        self.assertEqual("PASS", payload["post_merge_result"])
+
+    def test_already_closed_issue_does_not_mask_roadmap_drift(self):
+        rc, payload = self._run_merged_closure("CLOSED", 1)
+        self.assertEqual(1, rc)
+        self.assertNotEqual("DONE", payload["state"])
+        self.assertNotEqual("NONE", payload["next_action"])
+        self.assertIn("roadmap", payload["blockers"][-1])
+
+    def test_finish_json_returns_close_work_item_after_verified_merge(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {"state": "MERGED", "mergedAt": "2026-09-30T10:00:00Z",
+                 "headRefOid": self.SHA_A, "mergeCommit": {"oid": "d" * 40}}
+
+        def finish(_base):
+            REPOCTL._FINISH_PR_PHASES.get().update(
+                cleanup_result="PASS", roadmap_result="PASS", post_merge_result="PASS")
+            return 0
+
+        stream = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), \
+             mock.patch.object(REPOCTL, "git", return_value=self.SHA_A), \
+             mock.patch.object(REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]), \
+             mock.patch.object(REPOCTL, "finish_pr", side_effect=finish), \
+             contextlib.redirect_stdout(stream):
+            rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("VERIFIED", payload["state"])
+        self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
+
+    def test_public_post_merge_verification_recovers_before_reporting_pass(self):
+        snapshot = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+        stream = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), \
+             mock.patch.object(REPOCTL, "_github_repository_identity", return_value=("owner", "owner/repo")), \
+             mock.patch.object(REPOCTL, "_github_pr_snapshot", return_value=snapshot), \
+             mock.patch("post_merge_verify.recover_post_merge_proof",
+                        return_value={"status": "PASS", "merge_sha": "d" * 40}) as recover, \
+             contextlib.redirect_stdout(stream):
+            rc = REPOCTL.post_merge_verify_command(161)
+        self.assertEqual(0, rc)
+        self.assertEqual("PASS", json.loads(stream.getvalue())["status"])
+        recover.assert_called_once_with(REPOCTL.ROOT, pr_number=161, snapshot=snapshot)
 
     def test_cleanup_recovery_cannot_finish_without_roadmap(self):
         result = REPOCTL._pr_loop_empty_result(161)

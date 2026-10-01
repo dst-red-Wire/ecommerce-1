@@ -241,7 +241,7 @@ class PublishPrimitiveTests(unittest.TestCase):
     NEW_HEAD = "c" * 40
     BRANCH = "feature/canonical-delivery"
 
-    def invoke(self, *, branch=None, dirty=False, remote_heads=None, signature_rc=0):
+    def invoke(self, *, branch=None, dirty=False, remote_heads=None, signature_rc=0, preflight_rc=0):
         head = [self.HEAD]
         completed = subprocess.CompletedProcess([], 0, "", "")
 
@@ -273,6 +273,8 @@ class PublishPrimitiveTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL, "_valid_exact_evidence", return_value=None if dirty else ROOT / "proof.json"
         ), mock.patch.object(
+            REPOCTL, "_delivery_publish_preflight", return_value=preflight_rc
+        ) as preflight, mock.patch.object(
             REPOCTL, "verify_change", verify
         ), mock.patch.object(
             REPOCTL, "_verify_local_delivery_signatures", return_value=signature_rc
@@ -280,6 +282,8 @@ class PublishPrimitiveTests(unittest.TestCase):
             REPOCTL, "_remote_branch_head", side_effect=remote_heads or [self.HEAD, self.HEAD]
         ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
             rc = REPOCTL.publish("main", "Signed canonical delivery")
+        if rc == 0:
+            preflight.assert_called_once_with("origin/main", head[0])
         return rc, stdout.getvalue(), run_mock, verify
 
     def test_rerun_does_not_commit_or_push_unchanged_head(self):
@@ -289,6 +293,17 @@ class PublishPrimitiveTests(unittest.TestCase):
         verify.assert_not_called()
         self.assertFalse(any(call.args[0][:2] in (["git", "commit"], ["git", "push"])
                              for call in run_mock.call_args_list))
+
+    def test_preflight_failure_blocks_qualification_and_push(self):
+        rc, _text, run_mock, verify = self.invoke(
+            dirty=True, preflight_rc=3, remote_heads=["", self.NEW_HEAD]
+        )
+        self.assertNotEqual(0, rc)
+        verify.assert_not_called()
+        self.assertFalse(any(
+            call.args[0][:2] == ["git", "push"]
+            for call in run_mock.call_args_list
+        ))
 
     def test_new_commit_is_requalified_at_new_exact_sha_before_push(self):
         rc, text, run_mock, verify = self.invoke(

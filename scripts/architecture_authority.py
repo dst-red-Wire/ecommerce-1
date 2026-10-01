@@ -1655,7 +1655,39 @@ def validate(root):
             or risk_classification.get("unknown_or_ambiguous") != "sensitive"
             or risk_classification.get("partial_analysis") != "sensitive"
             or risk_classification.get("git_error") != "sensitive"
-            or risk_classification.get("classifications") != ["LOW_RISK", "SENSITIVE"]
+            or risk_classification.get("classifications")
+            != ["LOW_RISK", "SENSITIVE", "PRIVILEGED", "PRODUCTION"]
+            or risk_classification.get("class_requirements")
+            != {
+                "LOW_RISK": {
+                    "owner_authorization": "not-required-by-policy",
+                    "review_depth": "standard",
+                    "runtime_evidence": "contract-driven",
+                    "recovery": "mutation-class-driven",
+                },
+                "SENSITIVE": {
+                    "owner_authorization": "explicit-repository-owner",
+                    "review_depth": "enhanced",
+                    "runtime_evidence": "contract-driven",
+                    "recovery": "mutation-class-driven",
+                },
+                "PRIVILEGED": {
+                    "owner_authorization": "explicit-repository-owner",
+                    "review_depth": "privileged",
+                    "runtime_evidence": "host-runtime-before-mutation",
+                    "recovery": "capture-restore-verify",
+                },
+                "PRODUCTION": {
+                    "owner_authorization": "explicit-repository-owner",
+                    "review_depth": "production",
+                    "runtime_evidence": "production-runtime-before-mutation",
+                    "recovery": "capture-restore-verify",
+                },
+            }
+            or set((risk_classification.get("privileged", {}).get("capabilities") or {}).keys())
+            != {"host-mutation", "credential-identity"}
+            or set((risk_classification.get("production", {}).get("capabilities") or {}).keys())
+            != {"production-inventory", "production-operations"}
             or set(
                 (risk_classification.get("sensitive", {}).get("capabilities") or {}).keys()
             )

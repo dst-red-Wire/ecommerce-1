@@ -27,7 +27,10 @@ status_derivation:
     NOT_STARTED: no-valid-contract-or-implementation
     CONTRACTED: architecture-and-acceptance-defined
     PARTIAL: some-required-implementation-or-evidence-present
-    IMPLEMENTED: required-implementation-exists-without-complete-proof
+    IMPLEMENTED: required-implementation-paths-exist
+    QUALIFIED: required-exact-sha-qualification-gates-pass
+    RUNTIME_PROVEN: required-runtime-execution-evidence-valid
+    DEPLOYED: required-persistent-deployment-evidence-valid
     PROVEN: all-required-exact-and-runtime-evidence-valid
     BLOCKED: explicit-condition-or-required-dependency-blocked
   runtime_evidence_contract:

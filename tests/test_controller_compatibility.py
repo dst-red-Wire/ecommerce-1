@@ -312,6 +312,219 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
         self.assertFalse(self.audit.exists())
 
 
+class BaseControllerEvidenceValidationTests(unittest.TestCase):
+    """Run the real base validator against a clean, distinct, untrusted HEAD."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name)
+        self.target = self.work / "target"
+        self.base = self.work / "base"
+        self.target.mkdir()
+        self.environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("GIT_", "REPOCTL_TRUSTED_"))
+        }
+        self.environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        for relative in (
+            "scripts/repoctl.py",
+            "scripts/repository_delivery.py",
+            "scripts/qualification_cache.py",
+            "scripts/qualification_steps.py",
+            "scripts/capability_bootstrap.py",
+            "scripts/runtime_orchestration.py",
+            "scripts/ci-affected.rb",
+            "config/contracts/toolchain-lock.json",
+            "config/contracts/qualification-execution-policy.yaml",
+            "config/contracts/ci-evidence.yaml",
+            "config/contracts/ci-topology.yaml",
+            "config/toolchain/versions.env",
+            "config/toolchain/capabilities.json",
+        ):
+            destination = self.target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        (self.target / ".gitignore").write_text(
+            ".context/\n__pycache__/\n", encoding="utf-8"
+        )
+        self.git("init", "-q")
+        self.git("switch", "-qc", "feature/compatibility-fixture")
+        self.commit("base controller")
+        self.base_sha = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base_sha)
+        self.git(
+            "worktree", "add", "--quiet", "--detach", str(self.base), self.base_sha
+        )
+        self.marker = self.work / "HEAD_CONTROLLER_EXECUTED"
+        (self.target / "scripts/repoctl.py").write_text(
+            "from pathlib import Path\n"
+            + f"Path({str(self.marker)!r}).touch()\n"
+            + "raise AssertionError('untrusted HEAD controller executed')\n",
+            encoding="utf-8",
+        )
+        self.commit("untrusted candidate controller")
+        self.head_sha = self.git("rev-parse", "HEAD")
+        self.tree_sha = self.git("rev-parse", "HEAD^{tree}")
+        self.environment.update(
+            REPOCTL_TRUSTED_WRAPPER=str(self.base / "scripts/repository_delivery.py"),
+            REPOCTL_TRUSTED_CONTROLLER=str(self.base / "scripts/repoctl.py"),
+            REPOCTL_TRUSTED_POLICY_ROOT=str(self.base),
+            REPOCTL_TRUSTED_BASE_SHA=self.base_sha,
+            REPOCTL_TRUSTED_TARGET_ROOT=str(self.target),
+            REPOCTL_TRUSTED_HEAD_SHA=self.head_sha,
+            REPOCTL_TRUSTED_PR_NUMBER="171",
+        )
+
+    def git(self, *arguments):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *arguments],
+            cwd=self.target,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def commit(self, message):
+        self.git("add", ".")
+        self.git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            message,
+        )
+
+    def validate(self, changes=None, *, omit_gate=False, exercise_command=False):
+        program = r"""import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import time
+from unittest import mock
+import yaml
+
+controller = Path(os.environ["REPOCTL_TRUSTED_CONTROLLER"])
+spec = importlib.util.spec_from_file_location("fixture_base_controller", controller)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+base = os.environ["REPOCTL_TRUSTED_BASE_SHA"]
+head = os.environ["REPOCTL_TRUSTED_HEAD_SHA"]
+context = module._require_trusted_pr_execution(base_sha=base, head_sha=head, pr_number=171)
+policy = yaml.safe_load((controller.parents[1] / "config/contracts/qualification-execution-policy.yaml").read_text())
+request = json.loads(sys.argv[1])
+# Gate discovery and installed tools are runner inputs. Every acceptance check
+# in _valid_exact_evidence and _complete_gate_inventory remains the real code.
+commands = [(name, module._controller_command(name)) for name in ("governance", "system")]
+with mock.patch.object(module, "_qualification_toolchain", return_value=({}, set())), \
+     mock.patch.object(module, "_global_gate_commands", return_value=commands), \
+     mock.patch.object(module, "affected", return_value=["global"]), \
+     mock.patch.object(module, "qualification_execution_policy", return_value=policy):
+    evidence = {
+        "schema_version": 5, "evidence_kind": "exact_commit", "status": "PASS",
+        "exact_commit_evidence": True, "base_sha": base, "head_sha": head,
+        "head_tree_sha": module.git("rev-parse", head + "^{tree}").strip(),
+        "qualification_identity": module.qualification_identity(),
+        "created_at_epoch": time.time(), "changed_paths": module.changed_paths(base, head),
+        "verification": {"execution_profile": "full", "runtime_scope": []},
+        "gates": [{"gate": name, "status": "PASS", "exit_code": 0} for name, _ in commands],
+    }
+    evidence.update(request["changes"])
+    if request["omit_gate"]:
+        evidence["gates"].pop()
+    path = module.CONTEXT / "evidence" / (head + ".json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(evidence))
+    accepted = module._valid_exact_evidence(base, head)
+    command = module._controller_command("--help")
+    command_code = None
+    if request["exercise_command"]:
+        command_code = subprocess.run(command, capture_output=True, text=True, check=False).returncode
+    print(json.dumps({"accepted": accepted is not None, "controller": str(controller),
+                      "trusted_root": str(context["trusted_root"]), "command": command,
+                      "command_code": command_code}))
+"""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                program,
+                json.dumps(
+                    {
+                        "changes": changes or {},
+                        "omit_gate": omit_gate,
+                        "exercise_command": exercise_command,
+                    }
+                ),
+            ],
+            cwd=self.target,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(self.marker.exists(), "HEAD controller executed")
+        return json.loads(completed.stdout)
+
+    def test_base_controller_accepts_compatible_head_qualification(self):
+        self.assertTrue(self.validate()["accepted"])
+
+    def test_base_controller_rejects_wrong_base_sha(self):
+        self.assertFalse(self.validate({"base_sha": self.head_sha})["accepted"])
+
+    def test_base_controller_rejects_wrong_head_sha(self):
+        self.assertFalse(self.validate({"head_sha": self.base_sha})["accepted"])
+
+    def test_base_controller_rejects_wrong_tree_sha(self):
+        self.assertFalse(self.validate({"head_tree_sha": self.base_sha})["accepted"])
+
+    def test_base_controller_rejects_incomplete_gate_inventory(self):
+        self.assertFalse(self.validate(omit_gate=True)["accepted"])
+
+    def test_base_controller_rejects_fail_evidence(self):
+        self.assertFalse(self.validate({"status": "FAIL"})["accepted"])
+        self.assertFalse(
+            self.validate(
+                {
+                    "gates": [
+                        {"gate": "governance", "status": "PASS", "exit_code": 0},
+                        {"gate": "system", "status": "FAIL", "exit_code": 1},
+                    ]
+                }
+            )["accepted"]
+        )
+
+    def test_base_controller_ignores_non_authoritative_extensions(self):
+        result = self.validate(
+            {
+                "extensions": {
+                    "diagnostic": "candidate metadata",
+                    "claimed_status": "FAIL",
+                    "controller": str(self.target / "scripts/repoctl.py"),
+                }
+            }
+        )
+        self.assertTrue(result["accepted"])
+        self.assertEqual(str(self.base), result["trusted_root"])
+
+    def test_head_controller_is_never_execution_authority(self):
+        result = self.validate(exercise_command=True)
+        self.assertTrue(result["accepted"])
+        self.assertEqual(str(self.base / "scripts/repoctl.py"), result["controller"])
+        self.assertEqual(str(self.base / "scripts/repoctl.py"), result["command"][1])
+        self.assertEqual(0, result["command_code"])
+        self.assertFalse(self.marker.exists())
+
+
 class BaseControllerEnvelopeCompositionTests(unittest.TestCase):
     """Exercise controller callbacks and archive verification as one real flow."""
 

@@ -96,6 +96,27 @@ class ExecutionPropertiesTests(unittest.TestCase):
         violations = REPOCTL.execution_properties_violations(self.policy, registry)
         self.assertTrue(any(expected in item for item in violations), violations)
 
+    def test_recovery_authority_requires_mutation_classes_and_proof_fields(self):
+        for field in ("required_mutation_classes", "proof_fields", "proof_success_status"):
+            with self.subTest(field=field):
+                policy = copy.deepcopy(self.policy)
+                policy["properties"]["recovery"].pop(field)
+                violations = REPOCTL.execution_properties_violations(policy, self.registry)
+                self.assertTrue(
+                    any(f"recovery.{field}" in item for item in violations), violations
+                )
+
+    def test_recovery_authority_rejects_weakened_proof(self):
+        policy = copy.deepcopy(self.policy)
+        policy["properties"]["recovery"]["required_mutation_classes"].remove("production")
+        policy["properties"]["recovery"]["proof_fields"].remove("recovery.restore_verification")
+        policy["properties"]["recovery"]["proof_success_status"] = "DECLARED"
+        violations = REPOCTL.execution_properties_violations(policy, self.registry)
+        for field in ("required_mutation_classes", "proof_fields", "proof_success_status"):
+            self.assertTrue(
+                any(f"recovery.{field}" in item for item in violations), violations
+            )
+
     def test_missing_source_sha_fails_closed(self):
         self.assertEvidenceRejected(lambda x: x.pop("source_sha"), "source_sha")
 

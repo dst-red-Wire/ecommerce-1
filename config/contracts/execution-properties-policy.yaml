@@ -66,6 +66,20 @@ properties:
     capture_before_mutation: required
     restore_on_failure: required
     restore_verification: required
+    required_mutation_classes:
+    - local-virtualization
+    - bcd
+    - native-boot
+    - network
+    - infrastructure
+    - production
+    - credentials
+    - destructive-cleanup
+    proof_fields:
+    - recovery.capture
+    - recovery.restore
+    - recovery.restore_verification
+    proof_success_status: PASS
     proof: capture-mutate-restore-verify
   execution:
     bounded: required

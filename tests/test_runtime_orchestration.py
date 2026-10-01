@@ -352,6 +352,10 @@ class RuntimeOrchestrationTests(unittest.TestCase):
             driver.events.index("prepare:docker"), driver.events.index("restore:docker")
         )
         self.assertTrue(evidence["restore_verified"])
+        self.assertEqual(
+            {"capture": "PASS", "restore": "PASS", "restore_verification": "PASS"},
+            evidence["recovery"],
+        )
 
     def test_duplicate_requests_prepare_once(self):
         caps = {"docker": capability(mutation_class="local-ephemeral", prepare="start")}
@@ -552,13 +556,18 @@ class RuntimeOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL_RESTORE", result.status)
         self.assertEqual(1, result.exit_code)
         self.assertFalse(evidence["restore_verified"])
+        self.assertEqual("PASS", evidence["recovery"]["capture"])
+        self.assertEqual("FAIL", evidence["recovery"]["restore"])
+        self.assertEqual("FAIL", evidence["recovery"]["restore_verification"])
 
     def test_verify_restore_failure_is_blocking(self):
         caps = {"docker": capability(mutation_class="local-ephemeral", prepare="start")}
         driver = FakeDriver({"docker": {"satisfied": False}})
         driver.fail_verify_restore.add("docker")
-        result, _ = self.run_transaction(caps, [CapabilityRequest("docker")], driver)
+        result, evidence = self.run_transaction(caps, [CapabilityRequest("docker")], driver)
         self.assertEqual("FAIL_RESTORE", result.status)
+        self.assertEqual("PASS", evidence["recovery"]["restore"])
+        self.assertEqual("FAIL", evidence["recovery"]["restore_verification"])
 
     def test_initial_running_state_remains_running(self):
         caps = {"docker": capability(mutation_class="local-ephemeral", prepare="start")}

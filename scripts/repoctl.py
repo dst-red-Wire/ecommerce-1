@@ -2499,6 +2499,20 @@ def execution_properties_violations(policy: dict, registry: dict) -> list[str]:
     for (name, field), value in expected.items():
         if not isinstance(properties.get(name), dict) or properties[name].get(field) != value:
             violations.append(f"canonical property {name}.{field} must be {value!r}")
+    recovery = properties.get("recovery")
+    expected_recovery = {
+        "required_mutation_classes": [
+            "local-virtualization", "bcd", "native-boot", "network",
+            "infrastructure", "production", "credentials", "destructive-cleanup",
+        ],
+        "proof_fields": [
+            "recovery.capture", "recovery.restore", "recovery.restore_verification",
+        ],
+        "proof_success_status": "PASS",
+    }
+    for field, value in expected_recovery.items():
+        if not isinstance(recovery, dict) or recovery.get(field) != value:
+            violations.append(f"canonical property recovery.{field} must be {value!r}")
     evidence_contract = policy.get("evidence_contract", {})
     if evidence_contract.get("static_status_forbidden") is not True:
         violations.append("static execution proof status must be forbidden")
@@ -7658,7 +7672,86 @@ def vulnerability_evaluate_command(
 cve_evaluate_command = vulnerability_evaluate_command
 
 
+def _roadmap_publication_reentry(main_sha: str, default_branch: str) -> int:
+    """Start a new publication producer after merge without carrying merge authority."""
+    if re.fullmatch(r"[0-9a-f]{40}", main_sha) is None or default_branch != "main":
+        return fail("roadmap publication requires exact canonical main")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if not name.startswith(("REPOCTL_TRUSTED_", "GIT_", "PYTHON"))
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    # The bootstrap executes only the wrapper blob owned by the signed new
+    # main. That stdlib verifier checks all checkout bytes, including hidden
+    # assume-unchanged substitutions, before importing the publication code.
+    bootstrap = r"""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+root = Path(sys.argv[1])
+sha = sys.argv[2]
+env = dict(os.environ, PATH="/usr/bin:/bin:/usr/local/bin",
+           GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+           GIT_NO_REPLACE_OBJECTS="1")
+git = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c",
+       "core.hooksPath=/dev/null", "-c", "gpg.program=/usr/bin/gpg", "-C", str(root)]
+def read(*args):
+    value = subprocess.run([*git, *args], env=env, capture_output=True, check=False, timeout=30)
+    if value.returncode:
+        raise RuntimeError("roadmap publication Git verification failed")
+    return value.stdout
+try:
+    if (read("rev-parse", "HEAD").decode().strip() != sha
+        or read("rev-parse", "origin/main").decode().strip() != sha
+        or read("branch", "--show-current").decode().strip() != "main"
+        or read("status", "--porcelain", "--untracked-files=all").strip()
+        or read("ls-remote", "--heads", "origin", "refs/heads/main").decode().split()
+           != [sha, "refs/heads/main"]):
+        raise RuntimeError("roadmap publication main binding changed")
+    read("verify-commit", sha)
+    wrapper = root / "scripts/repository_delivery.py"
+    entry = read("ls-tree", "-z", sha, "--", "scripts/repository_delivery.py")
+    metadata, separator, name = entry.partition(b"\t")
+    fields = metadata.split()
+    if (not separator or name != b"scripts/repository_delivery.py\0"
+        or len(fields) != 3 or fields[0] not in (b"100644", b"100755")
+        or fields[1] != b"blob"):
+        raise RuntimeError("roadmap publication verifier is not a regular Git blob")
+    source = read("cat-file", "blob", fields[2].decode("ascii"))
+    api = {"__name__": "roadmap_publication_verifier", "__file__": str(wrapper)}
+    exec(compile(source, str(wrapper), "exec"), api)
+    api["_native_checkout_root"](root, environment=env)
+    api["_native_verify_base_tree"](root, sha, environment=env)
+    if api["_native_clean_checkout"](root, environment=env) != (sha, "main"):
+        raise RuntimeError("roadmap publication source changed during verification")
+    sys.path.insert(0, str(root / "scripts"))
+    with tempfile.TemporaryDirectory(prefix="roadmap-publication-import-") as cache:
+        # -B prevents writes; this separate empty prefix also prevents reads
+        # from mutable ignored bytecode caches beside the verified sources.
+        sys.pycache_prefix = cache
+        import repoctl
+        raise SystemExit(repoctl._roadmap_followup_after_merge())
+except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+    print("FAIL roadmap publication reentry: " + str(exc), file=sys.stderr)
+    raise SystemExit(2)
+"""
+    return run(
+        [sys.executable, "-I", "-B", "-c", bootstrap, str(ROOT), main_sha],
+        env=environment, check=False,
+    ).returncode
+
+
 def _roadmap_followup_after_merge() -> int:
+    """Publish one scoped follow-up and remain nonterminal until it is merged."""
+    import issue_lifecycle
+
+    if any(name.startswith("REPOCTL_TRUSTED_") for name in os.environ):
+        # This new producer may run only after HEAD became signed current main.
+        # The child validates that boundary before importing current source.
+        return _roadmap_publication_reentry(git("rev-parse", "HEAD").strip(), "main")
     check_rc = roadmap_check(quiet=True)
     if check_rc == 0:
         print("PASS finish-pr: roadmap already synchronized")
@@ -7666,45 +7759,149 @@ def _roadmap_followup_after_merge() -> int:
     if check_rc != 1:
         return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
 
-    main_sha = git("rev-parse", "HEAD").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
-        return fail("roadmap follow-up requires exact main SHA")
-
-    policy = repository_delivery_policy()
-    default_branch = str(policy["default_branch"])
-    if git("branch", "--show-current").strip() != default_branch:
-        return fail("roadmap follow-up requires the default branch checkout")
-
-    followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
-    local_exists = run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
-        check=False,
-    ).returncode == 0
-    remote_exists = run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{followup_branch}"],
-        check=False,
-    ).returncode == 0
-
-    if local_exists:
-        run(["git", "switch", followup_branch])
-    elif remote_exists:
-        run(["git", "switch", "-c", followup_branch, "--track", f"origin/{followup_branch}"])
-    else:
-        run(["git", "switch", "-c", followup_branch, f"origin/{default_branch}"])
-
-    if roadmap_sync():
-        return 1
-    if roadmap_check(quiet=True):
-        return fail("roadmap-sync did not converge")
-
-    title = f"chore: synchronize roadmap after {main_sha[:12]}"
-    if deliver(default_branch, title, title):
-        return 1
-
-    run(["git", "switch", default_branch])
-    run(["git", "merge", "--ff-only", f"origin/{default_branch}"])
-    print(f"PASS finish-pr: roadmap synchronization PR published from {followup_branch}")
-    return 0
+    document = "docs/project/MASTER_EXECUTION_PLAN.md"
+    default_branch = str(repository_delivery_policy()["default_branch"])
+    switched = False
+    generated_document: bytes | None = None
+    result = 1
+    try:
+        main_sha = git("rev-parse", "HEAD").strip()
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", main_sha) is None
+            or git("branch", "--show-current").strip() != default_branch
+            or git("rev-parse", f"origin/{default_branch}").strip() != main_sha
+            or _remote_branch_head(default_branch) != main_sha
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            raise RuntimeError("roadmap follow-up requires clean exact current main")
+        # Resolve the intended scope before creating a branch or a commit.
+        # The ordinary selector rejects zero or multiple canonical packages.
+        marker = _delivery_pr_work_item_marker([document])
+        relation = issue_lifecycle.parse_pr_work_item_marker(marker)
+        package_path = relation["work_package_path"]
+        followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
+        gh = shutil.which("gh") or shutil.which("gh.exe")
+        if not gh:
+            raise RuntimeError("roadmap follow-up requires GitHub CLI")
+        open_prs = json.loads(output([
+            gh, "pr", "list", "--base", default_branch, "--state", "open",
+            "--limit", "1000", "--json",
+            "number,state,headRefOid,baseRefName,headRefName",
+        ]))
+        if (
+            not isinstance(open_prs, list) or len(open_prs) >= 1000
+            or any(not isinstance(pr, dict) for pr in open_prs)
+        ):
+            raise RuntimeError("cannot establish complete open roadmap follow-up inventory")
+        pending = [pr for pr in open_prs if str(pr.get("headRefName", "")).startswith(
+            "automation/roadmap-sync/"
+        )]
+        if len(pending) > 1:
+            raise RuntimeError("multiple roadmap follow-up PRs require reconciliation")
+        if pending and pending[0].get("headRefName") != followup_branch:
+            prior = pending[0]
+            if (
+                prior.get("state") != "OPEN" or prior.get("baseRefName") != default_branch
+                or re.fullmatch(r"[0-9a-f]{40}", str(prior.get("headRefOid"))) is None
+                or _remote_branch_head(prior["headRefName"]) != prior["headRefOid"]
+            ):
+                raise RuntimeError("pending roadmap follow-up identity is invalid")
+            print(f"ROADMAP_FOLLOWUP_PENDING pr={prior['number']} branch={prior['headRefName']}")
+            return 3
+        probe = run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
+            check=False, capture=True,
+        )
+        if probe.returncode not in {0, 1}:
+            raise RuntimeError("cannot prove local roadmap follow-up branch state")
+        remote_head = _remote_branch_head(followup_branch)
+        if remote_head:
+            run(["git", "fetch", "origin", f"refs/heads/{followup_branch}"])
+            if git("rev-parse", "FETCH_HEAD").strip() != remote_head:
+                raise RuntimeError("roadmap follow-up remote head changed during fetch")
+        if probe.returncode == 0:
+            run(["git", "switch", followup_branch])
+        else:
+            run(["git", "switch", "-c", followup_branch, remote_head or main_sha])
+        switched = True
+        followup_head = git("rev-parse", "HEAD").strip()
+        for ancestor in filter(None, (main_sha, remote_head)):
+            if run(
+                ["git", "merge-base", "--is-ancestor", ancestor, followup_head],
+                check=False, capture=True,
+            ).returncode:
+                raise RuntimeError("roadmap follow-up branch diverged; preserving it for recovery")
+        existing_paths = git(
+            "diff", "--no-ext-diff", "--no-renames", "--name-only", main_sha, "HEAD", "--"
+        ).splitlines()
+        if set(existing_paths) - {document}:
+            raise RuntimeError("existing roadmap follow-up contains files outside its exact scope")
+        # Probe the clean source before generation. publish repeats preflight
+        # against the committed final diff before qualification or any push.
+        if preflight_command(package_path, main_sha):
+            raise RuntimeError("roadmap follow-up preflight did not PASS")
+        if roadmap_sync():
+            raise RuntimeError("roadmap synchronization failed")
+        if roadmap_check(quiet=True):
+            raise RuntimeError("roadmap-sync did not converge")
+        generated_document = (ROOT / document).read_bytes()
+        changed = git(
+            "diff", "--no-ext-diff", "--no-renames", "--name-only", main_sha, "--"
+        ).splitlines()
+        untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+        if changed != [document] or untracked:
+            raise RuntimeError("generated roadmap follow-up must change exactly its declared document")
+        if _delivery_pr_work_item_marker(changed) != marker:
+            raise RuntimeError("generated roadmap follow-up changed its canonical work package")
+        prs = json.loads(output([
+            gh, "pr", "list", "--head", followup_branch, "--base", default_branch,
+            "--state", "all", "--limit", "2", "--json",
+            "number,state,headRefOid,baseRefName,headRefName",
+        ]))
+        if not isinstance(prs, list) or len(prs) > 1:
+            raise RuntimeError("roadmap follow-up PR identity is ambiguous")
+        if prs:
+            pr = prs[0]
+            if (
+                not isinstance(pr, dict) or pr.get("state") != "OPEN"
+                or pr.get("headRefName") != followup_branch
+                or pr.get("baseRefName") != default_branch
+                or pr.get("headRefOid") != followup_head
+                or remote_head != followup_head
+                or git("status", "--porcelain", "--untracked-files=all").strip()
+            ):
+                raise RuntimeError("existing roadmap follow-up PR is closed or has a different exact source")
+            print(f"ROADMAP_FOLLOWUP_PENDING pr={pr['number']} branch={followup_branch}")
+        else:
+            title = f"chore: synchronize roadmap after {main_sha[:12]}"
+            if deliver(default_branch, title, title):
+                raise RuntimeError("roadmap follow-up delivery incomplete; retained branch is resumable")
+            print(f"ROADMAP_FOLLOWUP_PENDING branch={followup_branch}")
+        result = 3
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        result = fail(str(exc))
+    finally:
+        if switched:
+            dirty = git("status", "--porcelain", "--untracked-files=all").strip()
+            if dirty and generated_document is not None:
+                changed = git("diff", "--name-only", "HEAD", "--").splitlines()
+                untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+                # Restore only this invocation's still-uncommitted generated
+                # bytes. Retained commits stay attached to the deterministic
+                # branch so interrupted publication resumes without a new one.
+                if (
+                    changed == [document] and not untracked
+                    and (ROOT / document).read_bytes() == generated_document
+                ):
+                    run(["git", "restore", "--staged", "--worktree", "--", document])
+                    dirty = git("status", "--porcelain", "--untracked-files=all").strip()
+            if dirty:
+                result = fail("roadmap follow-up left unexpected changes; preserved checkout for recovery")
+            else:
+                run(["git", "switch", default_branch])
+                if git("rev-parse", "HEAD").strip() != main_sha:
+                    result = fail("default branch changed during roadmap follow-up")
+    return result
 
 
 def git_sync() -> int:
@@ -7808,6 +8005,9 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         "git_error",
         "classifications",
         "required_inputs",
+        "class_requirements",
+        "privileged",
+        "production",
         "low_risk",
         "sensitive",
     }:
@@ -7827,11 +8027,13 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
             policy.get("unknown_or_ambiguous") != "sensitive",
             policy.get("partial_analysis") != "sensitive",
             policy.get("git_error") != "sensitive",
-            policy.get("classifications") != ["LOW_RISK", "SENSITIVE"],
+            policy.get("classifications") != list(_RISK_CLASS_REQUIREMENTS),
             policy.get("required_inputs")
             != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
         )
     ):
+        return False
+    if policy.get("class_requirements") != _RISK_CLASS_REQUIREMENTS:
         return False
     required_for = list(MERGE_RISK_CAPABILITIES)
     if owner_boundary.get("mode") != "risk-based":
@@ -7945,6 +8147,42 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
                 re.compile(pattern)
         except re.error:
             return False
+    for category, expected_names in (
+        ("privileged", {"host-mutation", "credential-identity"}),
+        ("production", {"production-inventory", "production-operations"}),
+    ):
+        declaration = policy.get(category)
+        if (
+            not isinstance(declaration, dict)
+            or set(declaration) != {"authorization", "merge_mode", "capabilities"}
+            or declaration["authorization"] != "explicit-repository-owner"
+            or declaration["merge_mode"] != "OWNER_GATED"
+            or not isinstance(declaration["capabilities"], dict)
+            or set(declaration["capabilities"]) != expected_names
+        ):
+            return False
+        for rule in declaration["capabilities"].values():
+            if not isinstance(rule, dict) or set(rule) - {"paths", "content_paths", "content_patterns"}:
+                return False
+            paths = rule.get("paths", [])
+            content_paths = rule.get("content_paths", [])
+            content_patterns = rule.get("content_patterns", [])
+            if any(
+                not isinstance(values, list)
+                or len(values) != len(set(values))
+                or any(not isinstance(value, str) or not value for value in values)
+                for values in (paths, content_paths, content_patterns)
+            ):
+                return False
+            if not paths and not content_patterns:
+                return False
+            if content_patterns and not content_paths:
+                return False
+            try:
+                for pattern in content_patterns:
+                    re.compile(pattern)
+            except re.error:
+                return False
     return True
 
 
@@ -8279,6 +8517,29 @@ def _validate_repository_delivery_policy(policy: dict) -> dict:
                 "direct_default_branch_write": "forbidden",
             },
             "post-merge roadmap reconciliation contract must remain exact",
+        ),
+        (
+            post_merge_policy.get("verification") == {
+                "required_after_finish_pr": True,
+                "output": ".context/evidence/post-merge/<merge_sha>.json",
+                "github_merged_state_alone": "insufficient",
+                "required_checks": [
+                    "github-pr-merged-exact-head",
+                    "merge-commit-known",
+                    "merge-commit-signed",
+                    "signature-verified",
+                    "main-contains-merge",
+                    "qualified-head-tree",
+                    "intended-merged-tree",
+                    "no-unexpected-mutation",
+                    "remote-branch-deleted",
+                    "local-branch-deleted",
+                    "clean-worktree",
+                    "roadmap-sync",
+                ],
+                "work_item_close_requires_pass": True,
+            },
+            "post-merge verification contract must remain exact",
         ),
         (
             _normalized_pr_loop_for_legacy_validation(pr_loop_policy)
@@ -8974,6 +9235,7 @@ def _chatgpt_review_evidence(
         kind: None for kind in evidence_contract["required_kinds"]
     }
     latest_comments: dict[str, dict] = {}
+    superseded: dict[str, dict] = {}
     for comment in _comments_in_immutable_order(comments):
         if _comment_author_login(comment) != owner_login:
             continue
@@ -9002,6 +9264,13 @@ def _chatgpt_review_evidence(
             ):
                 raise RuntimeError("ChatGPT review marker has invalid proof fields")
             if proof["head_sha"] != head_sha:
+                superseded[kind] = {
+                    "status": "SUPERSEDED",
+                    "head_sha": head_sha,
+                    "superseded_head_sha": proof["head_sha"],
+                    "superseded_comment_id": comment.get("id"),
+                    "source": "github-pr-comment",
+                }
                 continue
             completed[kind] = {
                 **proof,
@@ -9015,7 +9284,7 @@ def _chatgpt_review_evidence(
         raise RuntimeError("ChatGPT SECURITY review must follow the CODE review")
     result: dict[str, dict] = {}
     for kind, proof in completed.items():
-        result[kind] = proof or {
+        result[kind] = proof or superseded.get(kind) or {
             "status": "MISSING",
             "head_sha": head_sha,
             "source": "github-pr-comment",
@@ -9068,7 +9337,7 @@ def _owner_authorization_evidence(
         }
     if latest["sha"] != head_sha:
         return {
-            "status": "MISSING",
+            "status": "SUPERSEDED",
             "scope": scope,
             "head_sha": head_sha,
             "command": expected_command,
@@ -9187,7 +9456,7 @@ def _github_pr_snapshot(gh: str, name_with_owner: str, pr_number: int) -> dict:
     }
 
 
-_REVIEW_THREADS_QUERY = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved}}}}}"""
+_REVIEW_THREADS_QUERY = """query($owner:String!,$name:String!,$number:Int!,$cursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$cursor){pageInfo{hasNextPage endCursor}nodes{id isResolved isOutdated}}}}}"""
 
 
 def _github_unresolved_review_threads(gh: str, name_with_owner: str, pr_number: int) -> int:
@@ -9229,8 +9498,16 @@ def _github_unresolved_review_threads(gh: str, name_with_owner: str, pr_number: 
         page_info = connection.get("pageInfo")
         if not isinstance(nodes, list) or not isinstance(page_info, dict):
             raise RuntimeError("GitHub review conversations payload is incomplete")
+        # An exact-head CODE and SECURITY re-review gates this call. GitHub
+        # marks old diff positions outdated after a correction; those threads
+        # remain audit history but no longer block the corrected head.
         unresolved += sum(
-            1 for node in nodes if isinstance(node, dict) and node.get("isResolved") is not True
+            1 for node in nodes
+            if not isinstance(node, dict)
+            or (
+                node.get("isResolved") is not True
+                and node.get("isOutdated") is not True
+            )
         )
         if not page_info.get("hasNextPage"):
             return unresolved
@@ -9286,6 +9563,34 @@ def _review_result_is_pass(result: dict) -> bool:
     return result.get("status") == "PASS" and type(blockers) is int and blockers == 0
 
 
+_RISK_CLASS_REQUIREMENTS = {
+    "LOW_RISK": {
+        "owner_authorization": "not-required-by-policy",
+        "review_depth": "standard",
+        "runtime_evidence": "contract-driven",
+        "recovery": "mutation-class-driven",
+    },
+    "SENSITIVE": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "enhanced",
+        "runtime_evidence": "contract-driven",
+        "recovery": "mutation-class-driven",
+    },
+    "PRIVILEGED": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "privileged",
+        "runtime_evidence": "host-runtime-before-mutation",
+        "recovery": "capture-restore-verify",
+    },
+    "PRODUCTION": {
+        "owner_authorization": "explicit-repository-owner",
+        "review_depth": "production",
+        "runtime_evidence": "production-runtime-before-mutation",
+        "recovery": "capture-restore-verify",
+    },
+}
+
+
 def _merge_risk_result(
     classification: str,
     *,
@@ -9310,6 +9615,7 @@ def _merge_risk_result(
         "reasons": sorted(set(reasons)),
         "matched_capabilities": sorted(set(matched_capabilities)),
         "analysis_complete": analysis_complete,
+        "requirements": dict(_RISK_CLASS_REQUIREMENTS[classification]),
     }
 
 
@@ -9354,10 +9660,10 @@ def _validated_trusted_merge_risk_result(
         "matched_capabilities",
         "analysis_complete",
     }
-    if not isinstance(result, dict) or set(result) != required:
+    if not isinstance(result, dict) or set(result) not in (required, required | {"requirements"}):
         raise RuntimeError("exact-base merge-risk controller returned an invalid envelope")
     if (
-        result.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        result.get("classification") not in _RISK_CLASS_REQUIREMENTS
         or result.get("authority") != "repository-policy"
         or result.get("controller_source") != "exact-pr-base-sha"
         or result.get("controller_path") != MERGE_RISK_CONTROLLER_PATH
@@ -9371,6 +9677,11 @@ def _validated_trusted_merge_risk_result(
         or type(result.get("analysis_complete")) is not bool
     ):
         raise RuntimeError("exact-base merge-risk controller result is not exact-SHA bound")
+    if "requirements" in result:
+        if result["requirements"] != _RISK_CLASS_REQUIREMENTS[result["classification"]]:
+            raise RuntimeError("exact-base merge-risk requirements do not match class")
+    elif result["classification"] not in {"LOW_RISK", "SENSITIVE"}:
+        raise RuntimeError("legacy exact-base risk cannot assert a new class")
     if result["classification"] == "LOW_RISK" and (
         result["analysis_complete"] is not True
         or result["reasons"]
@@ -9509,11 +9820,11 @@ def derive_pr_loop_state(
         return "QUALIFICATION_FAILED", "FIX_QUALIFICATION"
     if qualification.get("status") != "PASS":
         return "QUALIFICATION_REQUIRED", "QUALIFICATION"
-    if code_review.get("head_sha") != current_head or code_review.get("status") == "MISSING":
+    if code_review.get("head_sha") != current_head or code_review.get("status") in {"MISSING", "SUPERSEDED"}:
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_CODE_REVIEW"
     if not _review_result_is_pass(code_review):
         return "CODE_FAILED", "FIX_CODE_FINDINGS"
-    if security_review.get("head_sha") != current_head or security_review.get("status") == "MISSING":
+    if security_review.get("head_sha") != current_head or security_review.get("status") in {"MISSING", "SUPERSEDED"}:
         return "CHATGPT_REVIEW_REQUIRED", "CHATGPT_SECURITY_REVIEW"
     if not _review_result_is_pass(security_review):
         return "SECURITY_FAILED", "FIX_SECURITY_FINDINGS"
@@ -9522,7 +9833,7 @@ def derive_pr_loop_state(
         or risk.get("authority") != "repository-policy"
         or risk.get("base_sha") != pr.get("base_sha")
         or risk.get("head_sha") != pr.get("head_sha")
-        or risk.get("classification") not in {"LOW_RISK", "SENSITIVE"}
+        or risk.get("classification") not in _RISK_CLASS_REQUIREMENTS
         or (
             risk.get("pr") is not None
             and risk.get("pr") != pr.get("number")
@@ -9539,7 +9850,7 @@ def derive_pr_loop_state(
         or risk["matched_capabilities"]
     ):
         return "BLOCKED", "RECLASSIFY_RISK"
-    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
+    if risk["classification"] != "LOW_RISK" and owner_authorization.get("status") != "PASS":
         return "OWNER_AUTH_REQUIRED", "OWNER_AUTHORIZATION"
     if (
         risk["classification"] == "LOW_RISK"
@@ -9668,6 +9979,8 @@ def publish(base: str, message: str) -> int:
         run(["git", "commit", "-m", message], env=commit_env)
 
     head = git("rev-parse", "HEAD").strip()
+    if _delivery_publish_preflight(base_ref, head):
+        return fail("publish requires a PASS work-item preflight before qualification")
     exact_evidence: Path | None = None
     if promotable is not None:
         exact_evidence = _promote_worktree_evidence(base_ref, head, promotable)
@@ -9783,8 +10096,84 @@ def _delivery_open_prs(gh: str, branch: str, base_name: str, head: str) -> list[
     return prs
 
 
+def _delivery_publish_preflight(base_ref: str, head_sha: str) -> int:
+    """Run the scoped capability preflight before exact-head qualification."""
+    import issue_lifecycle
+
+    changed = git(
+        "diff", "--no-ext-diff", "--no-renames", "--name-only",
+        base_ref, head_sha, "--",
+    ).splitlines()
+    try:
+        marker = issue_lifecycle.parse_pr_work_item_marker(
+            _delivery_pr_work_item_marker(changed)
+        )
+        base_sha = git("rev-parse", base_ref).strip()
+        return preflight_command(marker["work_package_path"], base_sha)
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        return fail(f"publish work-item preflight cannot start: {exc}")
+
+
+def _delivery_pr_work_item_marker(changed_paths: list[str]) -> str:
+    """Bind a PR to one canonical work package whose scope covers the diff."""
+    import issue_lifecycle
+
+    candidates: list[dict] = []
+    for path in sorted((ROOT / "config/work-packages").glob("*/*.yaml")):
+        try:
+            package, validation, resolved = _delivery_package_input(
+                str(path), changed_paths=changed_paths
+            )
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"invalid work package candidate {path}: {exc}") from exc
+        expected = (
+            ROOT / "config/work-packages"
+            / str(package.get("milestone"))
+            / f"{package.get('id')}.yaml"
+        )
+        if resolved != expected:
+            raise RuntimeError(f"work package path and identity differ: {path}")
+        if validation.get("status") == "VALID" and validation.get("scope_status") == "VALID":
+            candidates.append(package)
+    if len(candidates) != 1:
+        raise RuntimeError(
+            f"delivery requires exactly one scoped work package; found {len(candidates)}"
+        )
+    return issue_lifecycle.format_pr_work_item_marker(candidates[0])
+
+
 def _delivery_pr_body(gh: str, base_name: str, branch: str, head: str, title: str, ev: dict) -> Path:
     changed = git("diff", "--name-only", f"origin/{base_name}...HEAD")
+    marker = _delivery_pr_work_item_marker(changed.splitlines())
+    import issue_lifecycle
+
+    relation = issue_lifecycle.parse_pr_work_item_marker(marker)
+    package, package_status, _ = _delivery_package_input(
+        relation["work_package_path"],
+        issue=relation["work_item_issue"],
+        milestone=relation["milestone"],
+        changed_paths=changed.splitlines(),
+    )
+    if package_status.get("status") != "VALID":
+        raise RuntimeError("delivery PR work package is invalid")
+    owner_login, _ = _github_repository_identity(gh)
+    acceptance = package["acceptance"]
+    contracts = "\n".join(f"- {path}" for path in acceptance["contracts"])
+    tests = "\n".join(f"- {path}" for path in acceptance["tests"])
+    owner_section = (
+        "## Owner and work package\n\n"
+        f"- Owner: @{owner_login}\n"
+        f"- Work item: #{relation['work_item_issue']}\n"
+        f"- Package: {relation['work_package_path']}\n\n"
+    )
+    contracts_section = f"## Relevant contracts\n\n{contracts}\n\n"
+    tests_section = f"## Required tests\n\n{tests}\n\n"
+    rollback_section = (
+        "## Rollback\n\n"
+        "Stop PR transitions, preserve exact evidence, and submit a signed revert PR "
+        "against current main. Run preflight, qualification, and reviews for the "
+        "revert SHA before merging.\n\n"
+    )
     stat = git("diff", "--stat", f"origin/{base_name}...HEAD")
     metrics = ev.get("metrics") or evidence_metrics(ev.get("gates", []))
     remote_ci = github_exact_ci_status(gh, head)
@@ -9813,7 +10202,7 @@ def _delivery_pr_body(gh: str, base_name: str, branch: str, head: str, title: st
         if isinstance(g, dict)
     )
     body.write_text(
-        f"## Summary\n\n{title}\n\n## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
+        f"## Summary\n\n{title}\n\n## Primary work item\n\n{marker}\n\n{owner_section}{contracts_section}{tests_section}## Scope\n\n```text\n{changed}```\n\n## Diff stat\n\n```text\n{stat}```\n\n## Deterministic validation\n\n| Gate | Status | Duration (s) | Octets écrits | Source |\n| --- | --- | ---: | ---: | --- |\n{rows}\n\n## Review evidence\n\n- Base: `{base_name}` / `{ev['base_sha']}`\n- Head branch: `{branch}`\n- Head SHA: `{head}`\n- Verification mode: `{ev.get('verification', {}).get('mode', 'full')}`\n- Exact commit evidence cache: `.context/evidence/{head}.json` (not committed)\n- Executed gates: {metrics.get('executed_gates', 0)}\n- Reused gates: {metrics.get('reused_gates', 0)}\n- Gate execution time: {metrics.get('executed_seconds', 0)} s\n- Gate written bytes: {_format_written_bytes(total_written_bytes)}\n- Estimated reused time: {metrics.get('estimated_saved_seconds', 0)} s\n- Remote CI exact SHA: {remote_ci}\n\n{rollback_section}## Safety\n\nThis automation creates or refreshes the pull request only. It does not approve, merge, force-push, bypass branch protection, or mutate infrastructure.\n",
         encoding="utf-8",
     )
     return body
@@ -12774,6 +13163,522 @@ def _valid_performance_campaign(head_sha: str) -> Path | None:
     return path
 
 
+def _delivery_pr_work_item_preflight(
+    gh: str,
+    repository: str,
+    snapshot: dict,
+    *,
+    persist: bool,
+) -> dict:
+    """Verify the structured work item and run read-only exact-head probes."""
+    import delivery_preflight
+    import issue_lifecycle
+
+    issue_lifecycle.load_policy(ROOT)
+    number = snapshot.get("number")
+    if type(number) is not int or number < 1:
+        raise RuntimeError("PR snapshot has no valid number")
+    raw = json.loads(output([gh, "api", f"repos/{repository}/pulls/{number}"]))
+    if not isinstance(raw, dict) or raw.get("number") != number:
+        raise RuntimeError("GitHub PR work-item readback is invalid")
+    head = raw.get("head")
+    base = raw.get("base")
+    if (
+        not isinstance(head, dict)
+        or not isinstance(base, dict)
+        or head.get("sha") != snapshot.get("head_sha")
+        or base.get("sha") != snapshot.get("base_sha")
+    ):
+        raise RuntimeError("PR head/base changed during work-item readback")
+    marker = issue_lifecycle.parse_pr_work_item_marker(raw.get("body"))
+    package_path = marker["work_package_path"]
+    changed = git(
+        "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
+        snapshot["base_sha"], snapshot["head_sha"], "--",
+    )
+    changed_paths = [item for item in changed.split(chr(0)) if item]
+    package, validation, path = _delivery_package_input(
+        package_path,
+        issue=marker["work_item_issue"],
+        milestone=marker["milestone"],
+        changed_paths=changed_paths,
+    )
+    if validation["status"] != "VALID" or validation["scope_status"] != "VALID":
+        raise RuntimeError("work package invalid: " + "; ".join(validation["errors"]))
+    roadmap = ruby_yaml("config/contracts/roadmap-policy.yaml")
+    relation = issue_lifecycle.read_pr_work_item_relation(
+        gh, repository, number, roadmap, package
+    )
+    if (
+        relation.get("status") != "PASS"
+        or relation.get("head_sha") != snapshot["head_sha"]
+        or relation.get("base_sha") != snapshot["base_sha"]
+    ):
+        raise RuntimeError(
+            "PR/work-item/tracker relation invalid: "
+            + "; ".join(relation.get("errors") or ["exact base/head readback changed"])
+        )
+    import issue_completion
+
+    dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
+    if dependencies["status"] != "PASS":
+        raise RuntimeError("work package dependencies are not verified: "
+                           + "; ".join(dependencies.get("errors", [])))
+    import post_merge_verify
+
+    package_bytes = post_merge_verify._record_bytes(path, label="work package")
+    import work_package
+    import yaml
+
+    try:
+        captured_package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("captured work package YAML is invalid") from exc
+    if captured_package != package:
+        raise RuntimeError("work package differs from its validated declaration")
+    committed_package = delivery_preflight._base_blob(
+        ROOT, snapshot["head_sha"], package_path
+    )
+    if committed_package != package_bytes:
+        raise RuntimeError("work package differs from exact HEAD blob")
+    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    tree_sha = git("rev-parse", f"{snapshot['head_sha']}^{{tree}}").strip()
+    execution = package["execution"]
+    preflight = delivery_preflight.run_preflight(
+        ROOT,
+        expected_head_sha=snapshot["head_sha"],
+        expected_base_sha=snapshot["base_sha"],
+        expected_branch=snapshot["head_branch"],
+        expected_head_tree_sha=tree_sha,
+        expected_package_id=package["id"],
+        expected_package_digest=package_digest,
+        expected_issue=package["work_item_issue"],
+        expected_milestone=package["milestone"],
+        required_capabilities=execution.get("required_capabilities", []),
+        capability_parameters=execution.get("capability_parameters", {}),
+    )
+    if (
+        post_merge_verify._record_bytes(path, label="work package") != package_bytes
+        or git("rev-parse", "HEAD").strip() != snapshot["head_sha"]
+        or git("rev-parse", "origin/main").strip() != snapshot["base_sha"]
+        or git("branch", "--show-current").strip() != snapshot["head_branch"]
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError("work package or exact source changed during preflight")
+    receipt = {}
+    preflight_path = ""
+    preflight_digest = ""
+    if persist:
+        destination = delivery_preflight.write_preflight(ROOT, preflight)
+        preflight_path = str(destination.relative_to(ROOT))
+        if preflight["status"] == "PASS":
+            receipt = delivery_preflight.verify_preflight(
+                ROOT,
+                expected_head_sha=snapshot["head_sha"],
+                expected_head_tree_sha=tree_sha,
+                expected_base_sha=snapshot["base_sha"],
+                expected_branch=snapshot["head_branch"],
+                expected_package_id=package["id"],
+                expected_package_digest=package_digest,
+                expected_issue=package["work_item_issue"],
+                expected_milestone=package["milestone"],
+                expected_capabilities=execution.get("required_capabilities", []),
+                expected_capability_parameters=execution.get("capability_parameters", {}),
+                expected_result=preflight,
+            )
+            if receipt.get("status") != "PASS":
+                raise RuntimeError("fresh BASE preflight verification failed")
+            preflight_digest = receipt["evidence_digest"]
+    return {
+        "status": preflight["status"],
+        "reason": preflight.get("reason", ""),
+        "work_package": package_path,
+        "work_package_id": package["id"],
+        "work_item_issue": package["work_item_issue"],
+        "milestone": package["milestone"],
+        "pr": number,
+        "preflight": preflight,
+        "preflight_verification": receipt,
+        "preflight_path": preflight_path,
+        "preflight_digest": preflight_digest,
+    }
+
+
+def _delivery_exact_bundle_gate(
+    base_sha: str,
+    head_sha: str,
+    work_item: dict,
+    *,
+    reviews: dict | None = None,
+    create: bool = True,
+) -> dict:
+    """Inventory independent exact-head proofs without issuing their verdicts."""
+    import delivery_preflight
+    import evidence_bundle
+    import issue_lifecycle
+    import post_merge_verify
+    import runtime_authority
+    import work_package
+    import yaml
+
+    if create:
+        if type(work_item.get("pr")) is not int or work_item["pr"] < 1:
+            raise RuntimeError("fresh bundle requires an exact PR identity")
+        _require_trusted_pr_execution(
+            pr_number=work_item["pr"], base_sha=base_sha, head_sha=head_sha
+        )
+    package, validation, package_path = _delivery_package_input(
+        work_item["work_package"],
+        issue=work_item["work_item_issue"],
+        milestone=work_item["milestone"],
+    )
+    if validation["status"] != "VALID":
+        raise RuntimeError("work package changed before evidence bundling")
+    package_bytes = post_merge_verify._record_bytes(package_path, label="work package")
+    try:
+        captured_package = yaml.load(
+            package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader
+        )
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("captured work package YAML is invalid") from exc
+    if captured_package != package:
+        raise RuntimeError("work package differs from its validated declaration")
+    package_relative = str(package_path.relative_to(ROOT))
+    if delivery_preflight._base_blob(ROOT, head_sha, package_relative) != package_bytes:
+        raise RuntimeError("work package differs from exact HEAD blob")
+    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    branch = git("branch", "--show-current").strip()
+    preflight_relative = f".context/evidence/preflight/{head_sha}.json"
+    execution = package["execution"]
+    expected_result = None
+    previous_receipt = work_item.get("preflight_verification")
+    if create:
+        expected_result = work_item.get("preflight")
+        if (
+            work_item.get("status") != "PASS"
+            or not isinstance(expected_result, dict)
+            or expected_result.get("execution_authority") != "exact-base"
+            or not isinstance(previous_receipt, dict)
+            or previous_receipt.get("status") != "PASS"
+            or previous_receipt.get("authority") != "current-preflight-verification"
+            or previous_receipt.get("fresh_execution_verified") is not True
+            or work_item.get("preflight_path") != preflight_relative
+            or previous_receipt.get("evidence_path") != preflight_relative
+            or work_item.get("preflight_digest")
+            != previous_receipt.get("evidence_digest")
+        ):
+            raise RuntimeError("fresh BASE preflight result and receipt required")
+    # Dry-run inspects the persisted proof without authorizing a fresh execution.
+    # Its nonpersisted probe result can legitimately have a different timestamp.
+    preflight = delivery_preflight.verify_preflight(
+        ROOT,
+        expected_head_sha=head_sha,
+        expected_head_tree_sha=tree_sha,
+        expected_base_sha=base_sha,
+        expected_branch=branch,
+        expected_package_id=package["id"],
+        expected_package_digest=package_digest,
+        expected_issue=package["work_item_issue"],
+        expected_milestone=package["milestone"],
+        expected_capabilities=execution.get("required_capabilities", []),
+        expected_capability_parameters=execution.get("capability_parameters", {}),
+        expected_result=expected_result,
+    )
+    if (
+        preflight.get("status") != "PASS"
+        or preflight.get("authority") != "current-preflight-verification"
+        or preflight.get("fresh_execution_verified") is not create
+        or preflight.get("evidence_path") != preflight_relative
+        or (
+            create
+            and preflight.get("evidence_digest") != previous_receipt["evidence_digest"]
+        )
+    ):
+        raise RuntimeError("BASE preflight receipt changed before evidence bundling")
+    preflight_bytes = post_merge_verify._record_bytes(
+        ROOT / preflight_relative, label="preflight proof"
+    )
+    preflight_digest = evidence_bundle.digest_bytes(preflight_bytes)
+    if preflight_digest != preflight["evidence_digest"]:
+        raise RuntimeError("preflight bytes changed after fresh verification")
+    qualified_path = _valid_exact_evidence(base_sha, head_sha)
+    if qualified_path is None:
+        raise RuntimeError("exact-SHA qualification is missing or invalid")
+    qualification = json.loads(
+        post_merge_verify._record_bytes(qualified_path, label="qualification proof")
+    )
+    if not isinstance(qualification, dict) or qualification.get("status") != "PASS":
+        raise RuntimeError("exact-SHA qualification is not PASS")
+    acceptance = issue_lifecycle.derive_premerge_acceptance(
+        package,
+        qualification,
+        issue_lifecycle.read_qualified_head_snapshot(ROOT, head_sha),
+    )
+    if acceptance["status"] != "PASS":
+        raise RuntimeError(
+            "work package acceptance is not PASS: " + "; ".join(acceptance["errors"])
+        )
+    gate_paths = [preflight_relative]
+    if qualification_workflow("qualification_proof").get("performance_audit_runs") == 1:
+        audit = _valid_performance_audit(base_sha, head_sha)
+        if audit is None:
+            raise RuntimeError("exact-SHA performance audit is missing")
+        gate_paths.append(str(audit.relative_to(ROOT)))
+    runtime_paths = package["acceptance"]["runtime_evidence"]
+    runtime_digests = []
+    for relative in runtime_paths:
+        verdict = runtime_authority.verify_runtime_proof(
+            ROOT,
+            package["milestone"],
+            head_sha,
+            relative,
+            recovery_required=package["execution"]["recovery_required"],
+        )
+        if verdict["status"] != "PASS":
+            raise RuntimeError(
+                f"runtime producer validation failed for {relative}: "
+                + verdict["reason"]
+            )
+        path = evidence_bundle._safe_file(ROOT, relative)
+        digest = evidence_bundle.digest_file(path)
+        if verdict["evidence_digest"] != digest:
+            raise RuntimeError(f"runtime proof changed after validation: {relative}")
+        runtime_digests.append(digest)
+    if package["execution"]["runtime_required"] and not runtime_digests:
+        raise RuntimeError("work package requires runtime evidence")
+    review_paths = []
+    if reviews:
+        for kind in ("code", "security"):
+            proof = reviews.get(kind)
+            if proof is None or not _review_result_is_pass(proof):
+                continue
+            if (
+                proof.get("head_sha") != head_sha
+                or type(proof.get("comment_id")) is not int
+            ):
+                raise RuntimeError(f"{kind} review is not an exact GitHub comment")
+            relative = (
+                f".context/evidence/{head_sha}/reviews/"
+                f"{kind}-{proof['comment_id']}.json"
+            )
+            directory = ROOT
+            for component in (".context", "evidence", head_sha, "reviews"):
+                directory = directory / component
+                if directory.is_symlink() or (
+                    directory.exists() and not directory.is_dir()
+                ):
+                    raise RuntimeError("review evidence directory is unsafe")
+                if create:
+                    directory.mkdir(exist_ok=True)
+                if directory.exists() and not directory.resolve().is_relative_to(
+                    ROOT.resolve()
+                ):
+                    raise RuntimeError("review evidence directory escapes repository")
+            path = ROOT / relative
+            content = evidence_bundle.canonical_bytes(
+                {
+                    "pr": work_item.get("pr"),
+                    "provider": "ChatGPT",
+                    "source": "github-pr-comment",
+                    "review": proof,
+                    "verdict_authority": False,
+                }
+            )
+            if path.exists() or path.is_symlink():
+                if (
+                    post_merge_verify._record_bytes(path, label="review snapshot")
+                    != content
+                ):
+                    raise RuntimeError("review snapshot is immutable and differs")
+            elif create:
+                evidence_bundle._atomic_write(path, content)
+            else:
+                raise RuntimeError(
+                    "review snapshot is missing for read-only bundle check"
+                )
+            review_paths.append(relative)
+    toolchain_digest = evidence_bundle.digest_file(
+        evidence_bundle._safe_file(ROOT, "config/contracts/toolchain-lock.json")
+    )
+    runtime_identity = (
+        evidence_bundle.digest_bytes(
+            evidence_bundle.canonical_bytes({"runtime_evidence": runtime_digests})
+        )
+        if runtime_digests
+        else ""
+    )
+    created = None
+    if create:
+        created = evidence_bundle.create_bundle(
+            ROOT,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            tree_sha=tree_sha,
+            qualification_identity=qualification["qualification_identity"],
+            toolchain_digest=toolchain_digest,
+            runtime_evidence=runtime_paths,
+            gate_evidence=gate_paths,
+            review_evidence=review_paths,
+            runtime_identity=runtime_identity,
+        )
+    verified = evidence_bundle.verify_bundle(
+        ROOT,
+        head_sha,
+        expected_identity={
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "tree_sha": tree_sha,
+            "toolchain_digest": toolchain_digest,
+            "qualification_identity": qualification["qualification_identity"],
+            "runtime_identity": runtime_identity,
+        },
+    )
+    if verified["status"] != "PASS" or (
+        created is not None
+        and created["manifest_digest"] != verified["manifest_digest"]
+    ):
+        raise RuntimeError("exact-SHA evidence bundle integrity did not PASS")
+    manifest_relative = f".context/evidence/{head_sha}/manifest.json"
+    manifest_bytes = post_merge_verify._record_bytes(
+        ROOT / manifest_relative, label="evidence bundle manifest"
+    )
+    if evidence_bundle.digest_bytes(manifest_bytes) != verified["manifest_digest"]:
+        raise RuntimeError("evidence bundle manifest changed after verification")
+    manifest = json.loads(manifest_bytes)
+    preflight_references = [
+        item
+        for item in manifest["gate_evidence"]
+        if item.get("path") == preflight_relative
+    ]
+    if (
+        len(preflight_references) != 1
+        or preflight_references[0].get("sha256") != preflight_digest
+        or manifest["evidence_digests"].get(preflight_relative) != preflight_digest
+    ):
+        raise RuntimeError("bundle preflight differs from captured verified bytes")
+    for field, required in (
+        ("gate_evidence", gate_paths + [f".context/evidence/{head_sha}.json"]),
+        ("runtime_evidence", runtime_paths),
+        ("review_evidence", review_paths),
+    ):
+        found = {item.get("path") for item in manifest[field]}
+        if not set(required) <= found:
+            raise RuntimeError(f"exact-SHA bundle lacks required {field} references")
+    if (
+        post_merge_verify._record_bytes(package_path, label="work package")
+        != package_bytes
+        or post_merge_verify._record_bytes(
+            ROOT / preflight_relative, label="preflight proof"
+        )
+        != preflight_bytes
+        or git("rev-parse", "HEAD").strip() != head_sha
+        or git("rev-parse", "HEAD^{tree}").strip() != tree_sha
+        or git("rev-parse", "origin/main").strip() != base_sha
+        or git("branch", "--show-current").strip() != branch
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError(
+            "work package, preflight or exact source changed during bundling"
+        )
+    return {
+        "status": "PASS",
+        "authority": "bundle-integrity-only",
+        "preflight_verification": preflight,
+        "manifest": manifest_relative,
+        "manifest_digest": verified["manifest_digest"],
+        "preflight_evidence_digest": preflight_digest,
+        "acceptance": acceptance,
+        "runtime_identity": runtime_identity,
+        "review_evidence": review_paths,
+    }
+
+
+def _delivery_risk_evidence_gate(
+    base_sha: str, head_sha: str, risk: dict, work_item: dict, bundle: dict,
+) -> dict:
+    """Enforce exact-base risk requirements independently of owner approval."""
+    import evidence_bundle
+    import runtime_authority
+
+    classification = risk.get("classification")
+    if classification in {"LOW_RISK", "SENSITIVE"}:
+        # Their existing contract-driven checks remain in the exact bundle gate.
+        return {"status": "PASS", "classification": classification,
+                "runtime": "CONTRACT_DRIVEN", "recovery": "CONTRACT_DRIVEN"}
+    if (
+        classification not in {"PRIVILEGED", "PRODUCTION"}
+        or risk.get("authority") != "repository-policy"
+        or risk.get("controller_source") != "exact-pr-base-sha"
+        or risk.get("policy_source") != "exact-pr-base-sha"
+        or risk.get("base_sha") != base_sha or risk.get("head_sha") != head_sha
+        or risk.get("requirements") != _RISK_CLASS_REQUIREMENTS[classification]
+    ):
+        raise RuntimeError("runtime/recovery requirements lack exact-base risk authority")
+    package, validation, _path = _delivery_package_input(
+        work_item["work_package"], issue=work_item["work_item_issue"],
+        milestone=work_item["milestone"],
+    )
+    if validation["status"] != "VALID":
+        raise RuntimeError("work package changed before risk evidence validation")
+    execution = package["execution"]
+    if execution.get("runtime_required") is not True or execution.get("recovery_required") is not True:
+        raise RuntimeError(
+            f"{classification} requires runtime_required=true and recovery_required=true"
+        )
+    runtime_paths = package["acceptance"].get("runtime_evidence")
+    if not isinstance(runtime_paths, list) or not runtime_paths:
+        raise RuntimeError(f"{classification} requires producer-validated runtime and recovery evidence")
+    manifest_relative = f".context/evidence/{head_sha}/manifest.json"
+    if bundle.get("status") != "PASS" or bundle.get("manifest") != manifest_relative:
+        raise RuntimeError("risk evidence requires the verified exact-SHA bundle")
+    tree_sha = git("rev-parse", "HEAD^{tree}").strip()
+    verified = evidence_bundle.verify_bundle(
+        ROOT, head_sha,
+        expected_identity={"base_sha": base_sha, "head_sha": head_sha, "tree_sha": tree_sha},
+    )
+    manifest_path = evidence_bundle._safe_file(ROOT, manifest_relative)
+    manifest_bytes = manifest_path.read_bytes()
+    if (
+        verified.get("status") != "PASS"
+        or verified.get("manifest_digest") != bundle.get("manifest_digest")
+        or evidence_bundle.digest_bytes(manifest_bytes) != bundle.get("manifest_digest")
+    ):
+        raise RuntimeError("risk evidence bundle changed after verification")
+    manifest = json.loads(manifest_bytes, object_pairs_hook=evidence_bundle._unique_object)
+    entries = {item["path"]: item["sha256"] for item in manifest["runtime_evidence"]}
+    verdicts = []
+    for relative in runtime_paths:
+        if relative not in entries:
+            raise RuntimeError(f"runtime/recovery proof is absent from exact bundle: {relative}")
+        verdict = runtime_authority.verify_runtime_proof(
+            ROOT, package["milestone"], head_sha, relative, recovery_required=True,
+        )
+        if verdict.get("status") != "PASS":
+            raise RuntimeError(
+                f"{classification} runtime/recovery producer validation failed: "
+                + str(verdict.get("reason") or "missing producer verdict")
+            )
+        if (
+            not verdict.get("producer") or verdict.get("head_sha") != head_sha
+            or verdict.get("head_tree_sha") != tree_sha
+            or verdict.get("evidence_path") != relative
+            or verdict.get("evidence_digest") != entries[relative]
+            or evidence_bundle.digest_file(evidence_bundle._safe_file(ROOT, relative)) != entries[relative]
+        ):
+            raise RuntimeError("runtime/recovery producer verdict differs from exact bundled bytes")
+        recovery = verdict.get("recovery")
+        if not isinstance(recovery, dict) or any(
+            recovery.get(phase) != "PASS" for phase in ("capture", "restore", "restore_verification")
+        ):
+            raise RuntimeError("producer-verified capture, restore and restore verification are required")
+        if classification == "PRODUCTION" and verdict.get("environment") != "production":
+            raise RuntimeError("production risk requires a production producer; host/lab proof is insufficient")
+        verdicts.append(verdict)
+    return {"status": "PASS", "classification": classification,
+            "runtime": "PASS", "recovery": "PASS", "producer_verdicts": verdicts}
+
+
 def finish_pr(base: str, *, json_output: bool = False) -> int:
     if json_output:
         return _finish_pr_json(base)
@@ -12902,6 +13807,8 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail(f"finish-pr requires exactly one open PR for {branch} -> {base_name}; found {len(prs)}")
     pr = prs[0]
     number = int(pr["number"])
+    if number != pre_pr["number"]:
+        return fail("finish-pr PR number changed after work-item preflight")
     metadata = github_pull_request_metadata(gh, number)
     base_sha = git("rev-parse", base_ref).strip()
     if metadata["is_draft"]:
@@ -12935,14 +13842,26 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     for kind in ("code", "security"):
         if not _review_result_is_pass(reviews[kind]):
             return fail(f"finish-pr {kind} authority changed during revalidation")
+    try:
+        bundle = _delivery_exact_bundle_gate(
+            exact_pr["base_sha"], head, work_item, reviews=reviews
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr exact-SHA evidence bundle failed: {exc}")
+    if len(bundle["review_evidence"]) != 2:
+        return fail("finish-pr bundle lacks independent CODE and SECURITY review references")
 
     risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    try:
+        _delivery_risk_evidence_gate(exact_pr["base_sha"], head, risk, work_item, bundle)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr risk runtime/recovery gate failed: {exc}")
     owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
     print(
         "PASS finish-pr: deterministic merge risk "
         f"{risk['classification']} for exact head {head}"
     )
-    if risk["classification"] == "SENSITIVE" and owner_authorization.get("status") != "PASS":
+    if risk["classification"] != "LOW_RISK" and owner_authorization.get("status") != "PASS":
         return fail(
             "finish-pr owner authorization missing for exact head; required command: "
             + str(owner_authorization.get("command") or "")
@@ -13005,39 +13924,6 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail(f"finish-pr final authority revalidation failed: {exc}")
     if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
         return fail("finish-pr ChatGPT review authority changed during final revalidation")
-    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
-    if risk["classification"] == "LOW_RISK" and fresh_risk["classification"] != "LOW_RISK":
-        return fail(
-            "finish-pr risk changed from LOW_RISK to SENSITIVE; "
-            + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
-        )
-    fresh_owner_authorization = _owner_authorization_for_risk(
-        fresh_risk, fresh_raw_owner_authorization
-    )
-    if (
-        fresh_risk["classification"] == "SENSITIVE"
-        and fresh_owner_authorization.get("status") != "PASS"
-    ):
-        return fail("finish-pr owner authorization changed during final revalidation")
-    if (
-        fresh_risk["classification"] == "LOW_RISK"
-        and fresh_owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
-    ):
-        return fail("finish-pr low-risk owner boundary changed during final revalidation")
-    if fresh_unresolved_threads:
-        return fail(
-            "finish-pr review conversations changed during final revalidation; "
-            f"unresolved={fresh_unresolved_threads}"
-        )
-    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
-    if not protection_ok:
-        return fail(f"finish-pr final revalidation: {protection_reason}")
-    checks_ok, checks_reason = _github_required_checks_status(gh, number)
-    if not checks_ok:
-        return fail(f"finish-pr final revalidation: {checks_reason}")
-
-    merge_method = str(policy["merge"]["method"])
-    merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
     try:
         import evidence_bundle
         import post_merge_verify
@@ -13062,8 +13948,6 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         if preflight_digest != fresh_work_item["preflight_digest"]:
             raise RuntimeError("final preflight differs from fresh BASE execution")
 
-        # The compatibility envelope authorized these archived bytes in this
-        # process. Bind the retained witness to that same final BASE execution.
         canonical_evidence = _valid_exact_evidence(base_ref, head)
         canonical_audit = _valid_performance_audit(base_ref, head)
         if canonical_evidence is None or canonical_audit is None:
@@ -13082,6 +13966,11 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         qualification_payload = json.loads(captured_evidence)
         if not isinstance(qualification_payload, dict):
             raise ValueError("qualification evidence is not an object")
+        final_bundle = _delivery_exact_bundle_gate(
+            fresh_pr["base_sha"], head, fresh_work_item, reviews=fresh_reviews
+        )
+        if len(final_bundle["review_evidence"]) != 2:
+            raise RuntimeError("final evidence bundle lacks both review references")
         identity = {
             "base_sha": fresh_pr["base_sha"],
             "head_sha": head,
@@ -13090,17 +13979,13 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             "toolchain_digest": evidence_bundle.digest_file(evidence_bundle._safe_file(
                 ROOT, "config/contracts/toolchain-lock.json"
             )),
-            "runtime_identity": "",
+            "runtime_identity": final_bundle["runtime_identity"],
         }
-        created = evidence_bundle.create_bundle(
-            ROOT, **identity,
-            gate_evidence=[str(canonical_audit.relative_to(ROOT)), preflight_path],
-        )
         verified = evidence_bundle.verify_bundle(ROOT, head, expected_identity=identity)
-        if created["manifest_digest"] != verified["manifest_digest"]:
+        if verified["manifest_digest"] != final_bundle["manifest_digest"]:
             raise RuntimeError("final BASE evidence bundle changed")
         manifest_bytes = post_merge_verify._record_bytes(
-            ROOT / created["manifest"], label="final BASE bundle"
+            ROOT / final_bundle["manifest"], label="final BASE bundle"
         )
         manifest = json.loads(manifest_bytes)
         indexed_digests = manifest.get("evidence_digests") if isinstance(manifest, dict) else None
@@ -13108,12 +13993,56 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         audit_digest = evidence_bundle.digest_bytes(captured_audit)
         if (
             not isinstance(indexed_digests, dict)
-            or evidence_bundle.digest_bytes(manifest_bytes) != created["manifest_digest"]
+            or evidence_bundle.digest_bytes(manifest_bytes) != final_bundle["manifest_digest"]
             or indexed_digests.get(str(canonical_evidence.relative_to(ROOT))) != evidence_digest
             or indexed_digests.get(str(canonical_audit.relative_to(ROOT))) != audit_digest
             or indexed_digests.get(preflight_path) != preflight_digest
         ):
             raise RuntimeError("final BASE bundle does not retain the validated bytes")
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr final work-item/evidence gate failed: {exc}")
+    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    try:
+        _delivery_risk_evidence_gate(
+            fresh_pr["base_sha"], head, fresh_risk, fresh_work_item, final_bundle
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr final risk runtime/recovery gate failed: {exc}")
+    if risk["classification"] != fresh_risk["classification"]:
+        return fail(
+            "finish-pr risk classification changed during final revalidation; "
+            + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
+        )
+    fresh_owner_authorization = _owner_authorization_for_risk(
+        fresh_risk, fresh_raw_owner_authorization
+    )
+    if (
+        fresh_risk["classification"] != "LOW_RISK"
+        and fresh_owner_authorization.get("status") != "PASS"
+    ):
+        return fail("finish-pr owner authorization changed during final revalidation")
+    if (
+        fresh_risk["classification"] == "LOW_RISK"
+        and fresh_owner_authorization.get("status") != "NOT_REQUIRED_BY_POLICY"
+    ):
+        return fail("finish-pr low-risk owner boundary changed during final revalidation")
+    if fresh_unresolved_threads:
+        return fail(
+            "finish-pr review conversations changed during final revalidation; "
+            f"unresolved={fresh_unresolved_threads}"
+        )
+    protection_ok, protection_reason = _github_branch_protection_status(gh, base_name)
+    if not protection_ok:
+        return fail(f"finish-pr final revalidation: {protection_reason}")
+    checks_ok, checks_reason = _github_required_checks_status(gh, number)
+    if not checks_ok:
+        return fail(f"finish-pr final revalidation: {checks_reason}")
+
+    merge_method = str(policy["merge"]["method"])
+    merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
+    try:
+        import post_merge_verify
+
         witness = post_merge_verify.write_pre_merge_witness(
             ROOT, pr_number=number, snapshot=fresh_pr,
             qualification=qualification_payload,
@@ -13122,7 +14051,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         if (
             not isinstance(retained, dict)
             or retained.get("evidence_sha256") != evidence_digest
-            or retained.get("manifest_sha256") != created["manifest_digest"]
+            or retained.get("manifest_sha256") != final_bundle["manifest_digest"]
         ):
             raise RuntimeError("signed pre-merge witness differs from validated BASE bytes")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
@@ -13422,7 +14351,35 @@ def _pr_loop_qualification(
     evidence = _valid_exact_evidence(base_ref, head_sha)
     audit = _valid_performance_audit(base_ref, head_sha) if evidence is not None else None
     if evidence is None or audit is None:
-        return {"status": "MISSING", "source": "none", "head_sha": head_sha}
+        for previous in git("rev-list", head_sha).splitlines()[1:]:
+            if re.fullmatch(r"[0-9a-f]{40}", previous) is None:
+                continue
+            historical = ROOT / ".context" / "evidence" / f"{previous}.json"
+            if not historical.is_file() or historical.is_symlink():
+                continue
+            try:
+                if historical.stat().st_size > 10_000_000:
+                    continue
+                prior = json.loads(historical.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, ValueError):
+                continue
+            if (
+                isinstance(prior, dict)
+                and prior.get("status") == "PASS"
+                and prior.get("exact_commit_evidence") is True
+                and prior.get("head_sha") == previous
+            ):
+                return {
+                    "status": "SUPERSEDED",
+                    "source": "historical",
+                    "head_sha": head_sha,
+                    "superseded_head_sha": previous,
+                }
+        return {
+            "status": "MISSING",
+            "source": "none",
+            "head_sha": head_sha,
+        }
     return {
         "status": "PASS",
         "source": "reused",
@@ -14447,11 +15404,11 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             new_head = sync["new_head_sha"]
             result["head_sha"] = new_head
             result["qualification"] = sync["qualification"]
-            result["code_review"] = {"status": "MISSING", "head_sha": new_head}
-            result["security_review"] = {"status": "MISSING", "head_sha": new_head}
+            result["code_review"] = {"status": "SUPERSEDED", "head_sha": new_head, "superseded_head_sha": initial_head_sha}
+            result["security_review"] = {"status": "SUPERSEDED", "head_sha": new_head, "superseded_head_sha": initial_head_sha}
             result["risk"] = {**_pr_loop_empty_result(pr_number)["risk"], "head_sha": new_head}
             result["risk_classification"] = "UNKNOWN"
-            result["owner_authorization"] = {"status": "MISSING", "head_sha": new_head}
+            result["owner_authorization"] = {"status": "SUPERSEDED", "head_sha": new_head, "superseded_head_sha": initial_head_sha}
             result["owner_authorization_required"] = True
             result["merge_ready"] = False
             result["next_action"] = "QUALIFICATION"
@@ -14655,6 +15612,30 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             risk=result["risk"],
         )
 
+    if result["qualification"].get("status") == "PASS":
+        try:
+            result["evidence_bundle"] = _delivery_exact_bundle_gate(
+                initial["base_sha"],
+                initial_head_sha,
+                work_item,
+                reviews={
+                    "code": result["code_review"],
+                    "security": result["security_review"],
+                },
+                create=not dry_run,
+            )
+            if all(_review_result_is_pass(result[kind]) for kind in ("code_review", "security_review")):
+                result["risk_evidence"] = _delivery_risk_evidence_gate(
+                    initial["base_sha"], initial_head_sha, result["risk"],
+                    work_item, result["evidence_bundle"],
+                )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            result["state"] = "BLOCKED"
+            result["next_action"] = "FIX_EVIDENCE_BUNDLE"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
+
     if state in {
         "QUALIFICATION_REQUIRED",
         "CHATGPT_REVIEW_REQUIRED",
@@ -14836,6 +15817,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             before_merge["base_sha"], initial_head_sha
         )
         refresh_authorities(before_merge)
+        try:
+            result["risk_evidence"] = _delivery_risk_evidence_gate(
+                before_merge["base_sha"], initial_head_sha, result["risk"],
+                work_item, result["evidence_bundle"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            result["state"] = "BLOCKED"
+            result["next_action"] = "FIX_RUNTIME_RECOVERY_EVIDENCE"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         merge_requirements, details = _pr_loop_merge_requirements(
             gh,
             name_with_owner,
@@ -15069,145 +16061,15 @@ def _delivery_package_input(
     return package, status, resolved
 
 
-def _delivery_pr_work_item_preflight(
-    gh: str,
-    repository: str,
-    snapshot: dict,
-    *,
-    persist: bool,
-) -> dict:
-    """Verify the structured work item and run read-only exact-head probes."""
-    import delivery_preflight
-    import issue_lifecycle
-
-    issue_lifecycle.load_policy(ROOT)
-    number = snapshot.get("number")
-    if type(number) is not int or number < 1:
-        raise RuntimeError("PR snapshot has no valid number")
-    raw = json.loads(output([gh, "api", f"repos/{repository}/pulls/{number}"]))
-    if not isinstance(raw, dict) or raw.get("number") != number:
-        raise RuntimeError("GitHub PR work-item readback is invalid")
-    head = raw.get("head")
-    base = raw.get("base")
-    if (
-        not isinstance(head, dict)
-        or not isinstance(base, dict)
-        or head.get("sha") != snapshot.get("head_sha")
-        or base.get("sha") != snapshot.get("base_sha")
-    ):
-        raise RuntimeError("PR head/base changed during work-item readback")
-    marker = issue_lifecycle.parse_pr_work_item_marker(raw.get("body"))
-    package_path = marker["work_package_path"]
-    changed = git(
-        "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
-        snapshot["base_sha"], snapshot["head_sha"], "--",
-    )
-    changed_paths = [item for item in changed.split(chr(0)) if item]
-    package, validation, path = _delivery_package_input(
-        package_path,
-        issue=marker["work_item_issue"],
-        milestone=marker["milestone"],
-        changed_paths=changed_paths,
-    )
-    if validation["status"] != "VALID" or validation["scope_status"] != "VALID":
-        raise RuntimeError("work package invalid: " + "; ".join(validation["errors"]))
-    roadmap = ruby_yaml("config/contracts/roadmap-policy.yaml")
-    relation = issue_lifecycle.read_pr_work_item_relation(
-        gh, repository, number, roadmap, package
-    )
-    if (
-        relation.get("status") != "PASS"
-        or relation.get("head_sha") != snapshot["head_sha"]
-        or relation.get("base_sha") != snapshot["base_sha"]
-    ):
-        raise RuntimeError(
-            "PR/work-item/tracker relation invalid: "
-            + "; ".join(relation.get("errors") or ["exact base/head readback changed"])
-        )
-    import issue_completion
-
-    dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
-    if dependencies["status"] != "PASS":
-        raise RuntimeError("work package dependencies are not verified: "
-                           + "; ".join(dependencies.get("errors", [])))
-    import post_merge_verify
-
-    package_bytes = post_merge_verify._record_bytes(path, label="work package")
-    import work_package
-    import yaml
-
+def work_package_command(package_arg: str, issue: int, milestone: str) -> int:
     try:
-        captured_package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
-    except (UnicodeError, yaml.YAMLError) as exc:
-        raise ValueError("captured work package YAML is invalid") from exc
-    if captured_package != package:
-        raise RuntimeError("work package differs from its validated declaration")
-    committed_package = delivery_preflight._base_blob(
-        ROOT, snapshot["head_sha"], package_path
-    )
-    if committed_package != package_bytes:
-        raise RuntimeError("work package differs from exact HEAD blob")
-    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
-    tree_sha = git("rev-parse", f"{snapshot['head_sha']}^{{tree}}").strip()
-    execution = package["execution"]
-    preflight = delivery_preflight.run_preflight(
-        ROOT,
-        expected_head_sha=snapshot["head_sha"],
-        expected_base_sha=snapshot["base_sha"],
-        expected_branch=snapshot["head_branch"],
-        expected_head_tree_sha=tree_sha,
-        expected_package_id=package["id"],
-        expected_package_digest=package_digest,
-        expected_issue=package["work_item_issue"],
-        expected_milestone=package["milestone"],
-        required_capabilities=execution.get("required_capabilities", []),
-        capability_parameters=execution.get("capability_parameters", {}),
-    )
-    if (
-        post_merge_verify._record_bytes(path, label="work package") != package_bytes
-        or git("rev-parse", "HEAD").strip() != snapshot["head_sha"]
-        or git("rev-parse", "origin/main").strip() != snapshot["base_sha"]
-        or git("branch", "--show-current").strip() != snapshot["head_branch"]
-        or git("status", "--porcelain", "--untracked-files=all").strip()
-    ):
-        raise RuntimeError("work package or exact source changed during preflight")
-    receipt = {}
-    preflight_path = ""
-    preflight_digest = ""
-    if persist:
-        destination = delivery_preflight.write_preflight(ROOT, preflight)
-        preflight_path = str(destination.relative_to(ROOT))
-        if preflight["status"] == "PASS":
-            receipt = delivery_preflight.verify_preflight(
-                ROOT,
-                expected_head_sha=snapshot["head_sha"],
-                expected_head_tree_sha=tree_sha,
-                expected_base_sha=snapshot["base_sha"],
-                expected_branch=snapshot["head_branch"],
-                expected_package_id=package["id"],
-                expected_package_digest=package_digest,
-                expected_issue=package["work_item_issue"],
-                expected_milestone=package["milestone"],
-                expected_capabilities=execution.get("required_capabilities", []),
-                expected_capability_parameters=execution.get("capability_parameters", {}),
-                expected_result=preflight,
-            )
-            if receipt.get("status") != "PASS":
-                raise RuntimeError("fresh BASE preflight verification failed")
-            preflight_digest = receipt["evidence_digest"]
-    return {
-        "status": preflight["status"],
-        "reason": preflight.get("reason", ""),
-        "work_package": package_path,
-        "work_package_id": package["id"],
-        "work_item_issue": package["work_item_issue"],
-        "milestone": package["milestone"],
-        "pr": number,
-        "preflight": preflight,
-        "preflight_verification": receipt,
-        "preflight_path": preflight_path,
-        "preflight_digest": preflight_digest,
-    }
+        _, status, _ = _delivery_package_input(
+            package_arg, issue=issue, milestone=milestone
+        )
+    except (OSError, ValueError) as exc:
+        status = {"status": "INVALID", "errors": [str(exc)]}
+    print(json.dumps(status, sort_keys=True))
+    return 0 if status["status"] == "VALID" else 2
 
 
 def _delivery_command_failure(reason: str) -> int:
@@ -15216,6 +16078,223 @@ def _delivery_command_failure(reason: str) -> int:
         sort_keys=True,
     ))
     return 1
+
+
+def preflight_command(package_arg: str, base_sha: str) -> int:
+    """Fail before host probes unless the package and exact source scope validate."""
+    import delivery_preflight
+    import post_merge_verify
+    import work_package
+    import yaml
+
+    try:
+        _, status, _ = _delivery_package_input(package_arg)
+        if status["status"] != "VALID":
+            return _delivery_command_failure("; ".join(status["errors"]))
+        if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
+            return _delivery_command_failure("full exact base SHA required")
+        head_sha = git("rev-parse", "HEAD").strip()
+        tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        branch = git("branch", "--show-current").strip()
+        if (
+            run(
+                ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+                check=False,
+                capture=True,
+            ).returncode
+            != 0
+        ):
+            return _delivery_command_failure("exact base must be an ancestor of HEAD")
+        changed = git(
+            "diff",
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            base_sha,
+            head_sha,
+            "--",
+        )
+        changed_paths = [item for item in changed.split(chr(0)) if item]
+        package, status, path = _delivery_package_input(
+            package_arg, changed_paths=changed_paths
+        )
+        if status["status"] != "VALID":
+            return _delivery_command_failure("; ".join(status["errors"]))
+        if package.get("dependencies"):
+            import issue_completion
+
+            gh = shutil.which("gh") or shutil.which("gh.exe")
+            if not gh:
+                raise RuntimeError("GitHub CLI required to verify dependencies")
+            _owner, repository = _github_repository_identity(gh)
+            dependencies = issue_completion.verify_dependencies(
+                ROOT, gh, repository, package
+            )
+            if dependencies["status"] != "PASS":
+                raise RuntimeError(
+                    "work package dependencies are not verified: "
+                    + "; ".join(dependencies.get("errors", []))
+                )
+        package_bytes = post_merge_verify._record_bytes(path, label="work package")
+        try:
+            captured_package = yaml.load(
+                package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader
+            )
+        except (UnicodeError, yaml.YAMLError) as exc:
+            raise ValueError("captured work package YAML is invalid") from exc
+        if captured_package != package:
+            raise RuntimeError("work package differs from its validated declaration")
+        relative = str(path.relative_to(ROOT))
+        if delivery_preflight._base_blob(ROOT, head_sha, relative) != package_bytes:
+            raise RuntimeError("work package differs from exact HEAD blob")
+        package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+        execution = package["execution"]
+        result = delivery_preflight.run_preflight(
+            ROOT,
+            expected_head_sha=head_sha,
+            expected_base_sha=base_sha,
+            expected_branch=branch,
+            expected_head_tree_sha=tree_sha,
+            expected_package_id=package["id"],
+            expected_package_digest=package_digest,
+            expected_issue=package["work_item_issue"],
+            expected_milestone=package["milestone"],
+            required_capabilities=execution.get("required_capabilities", []),
+            capability_parameters=execution.get("capability_parameters", {}),
+        )
+        if (
+            post_merge_verify._record_bytes(path, label="work package") != package_bytes
+            or git("rev-parse", "HEAD").strip() != head_sha
+            or git("rev-parse", "HEAD^{tree}").strip() != tree_sha
+            or git("rev-parse", "origin/main").strip() != base_sha
+            or git("branch", "--show-current").strip() != branch
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            return _delivery_command_failure(
+                "work package or exact source changed during preflight"
+            )
+        if result["status"] == "PASS" and result.get("execution_authority") not in {
+            "exact-base",
+            "diagnostic",
+        }:
+            raise RuntimeError("preflight execution authority is missing")
+        # Keep the original producer payload intact. Local diagnostics remain useful
+        # for publication and may be inventoried, but cannot authorize a merge.
+        destination = delivery_preflight.write_preflight(ROOT, result)
+        receipt = {}
+        if result["status"] == "PASS" and result["execution_authority"] == "exact-base":
+            _require_trusted_pr_execution(base_sha=base_sha, head_sha=head_sha)
+            receipt = delivery_preflight.verify_preflight(
+                ROOT,
+                expected_head_sha=head_sha,
+                expected_head_tree_sha=tree_sha,
+                expected_base_sha=base_sha,
+                expected_branch=branch,
+                expected_package_id=package["id"],
+                expected_package_digest=package_digest,
+                expected_issue=package["work_item_issue"],
+                expected_milestone=package["milestone"],
+                expected_capabilities=execution.get("required_capabilities", []),
+                expected_capability_parameters=execution.get(
+                    "capability_parameters", {}
+                ),
+                expected_result=result,
+            )
+            if (
+                receipt.get("status") != "PASS"
+                or receipt.get("authority") != "current-preflight-verification"
+                or receipt.get("fresh_execution_verified") is not True
+                or receipt.get("evidence_path") != str(destination.relative_to(ROOT))
+            ):
+                raise RuntimeError("fresh BASE preflight verification failed")
+            captured = post_merge_verify._record_bytes(
+                destination, label="preflight proof"
+            )
+            if (
+                "sha256:" + hashlib.sha256(captured).hexdigest()
+                != receipt["evidence_digest"]
+            ):
+                raise RuntimeError("preflight bytes changed after fresh verification")
+        rendered = {
+            **result,
+            "authority": receipt["authority"] if receipt else "diagnostic-only",
+            "preflight_path": str(destination.relative_to(ROOT)),
+            "preflight_digest": receipt.get("evidence_digest", ""),
+            "preflight_verification": receipt,
+        }
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _delivery_command_failure(str(exc))
+    print(json.dumps(rendered, sort_keys=True))
+    return (
+        0
+        if result["status"] == "PASS"
+        else 3
+        if result["status"] == "BLOCKED_RUNTIME"
+        else 1
+    )
+
+
+def evidence_bundle_command(
+    base_sha: str,
+    *,
+    artifacts: list[str],
+    runtime_evidence: list[str],
+    gate_evidence: list[str],
+    review_evidence: list[str],
+    runtime_identity: str = "",
+) -> int:
+    """Index existing exact-SHA proofs; never issue a gate or review verdict."""
+    import evidence_bundle
+
+    try:
+        if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
+            return _delivery_command_failure("full exact base SHA required")
+        if git("status", "--porcelain", "--untracked-files=all").strip():
+            return _delivery_command_failure("evidence bundle requires a clean worktree")
+        head_sha = git("rev-parse", "HEAD").strip()
+        tree_sha = git("rev-parse", "HEAD^{tree}").strip()
+        if run(["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+               check=False, capture=True).returncode != 0:
+            return _delivery_command_failure("exact base must be an ancestor of HEAD")
+        qualification = evidence_bundle._read_json(evidence_bundle._safe_file(
+            ROOT, f".context/evidence/{head_sha}.json"
+        ))
+        toolchain_digest = evidence_bundle.digest_file(evidence_bundle._safe_file(
+            ROOT, "config/contracts/toolchain-lock.json"
+        ))
+        identity = {
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+            "tree_sha": tree_sha,
+            "toolchain_digest": toolchain_digest,
+            "qualification_identity": qualification.get("qualification_identity"),
+            "runtime_identity": runtime_identity,
+        }
+        created = evidence_bundle.create_bundle(
+            ROOT,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            tree_sha=tree_sha,
+            qualification_identity=identity["qualification_identity"],
+            toolchain_digest=toolchain_digest,
+            artifacts=artifacts,
+            runtime_evidence=runtime_evidence,
+            gate_evidence=gate_evidence,
+            review_evidence=review_evidence,
+            runtime_identity=runtime_identity,
+        )
+        verified = evidence_bundle.verify_bundle(
+            ROOT, head_sha, expected_identity=identity
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        return _delivery_command_failure(str(exc))
+    print(json.dumps({
+        **created,
+        "integrity_status": verified["status"],
+        "authority": verified["authority"],
+    }, sort_keys=True))
+    return 0
 
 
 def post_merge_verify_command(pr_number: int) -> int:
@@ -15277,8 +16356,26 @@ def main() -> int:
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
+    milestone_parser = sub.add_parser("milestone-plan")
+    milestone_parser.add_argument("--milestone", required=True)
+    milestone_parser.add_argument("--create", action="store_true")
+    milestone_parser.add_argument("--json", action="store_true")
     post_merge_parser = sub.add_parser("post-merge-verify")
     post_merge_parser.add_argument("--pr", type=int, required=True)
+    work_package_parser = sub.add_parser("work-package")
+    work_package_parser.add_argument("--package", required=True)
+    work_package_parser.add_argument("--issue", type=int, required=True)
+    work_package_parser.add_argument("--milestone", required=True)
+    preflight_parser = sub.add_parser("preflight")
+    preflight_parser.add_argument("--package", required=True)
+    preflight_parser.add_argument("--base", required=True)
+    bundle_parser = sub.add_parser("evidence-bundle")
+    bundle_parser.add_argument("--base", required=True)
+    bundle_parser.add_argument("--artifact", action="append", default=[])
+    bundle_parser.add_argument("--runtime-evidence", action="append", default=[])
+    bundle_parser.add_argument("--gate-evidence", action="append", default=[])
+    bundle_parser.add_argument("--review-evidence", action="append", default=[])
+    bundle_parser.add_argument("--runtime-identity", default="")
     m25 = sub.add_parser("m25-runtime-evidence")
     m25.add_argument("--vm-name", required=True)
     sub.add_parser("roadmap-sync")
@@ -15545,8 +16642,28 @@ def main() -> int:
         print("PASS canonical-workspace")
         return 0
     try:
+        if args.cmd == "milestone-plan":
+            import milestone_plan
+
+            argv = ["--milestone", args.milestone, "--json"]
+            if args.create:
+                argv.append("--create")
+            return milestone_plan.main(argv)
         if args.cmd == "post-merge-verify":
             return post_merge_verify_command(args.pr)
+        if args.cmd == "work-package":
+            return work_package_command(args.package, args.issue, args.milestone)
+        if args.cmd == "preflight":
+            return preflight_command(args.package, args.base)
+        if args.cmd == "evidence-bundle":
+            return evidence_bundle_command(
+                args.base,
+                artifacts=args.artifact,
+                runtime_evidence=args.runtime_evidence,
+                gate_evidence=args.gate_evidence,
+                review_evidence=args.review_evidence,
+                runtime_identity=args.runtime_identity,
+            )
         if args.cmd == "vm":
             from vm_lifecycle import reconcile_cli
 

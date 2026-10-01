@@ -94,7 +94,7 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
         self.assertTrue(ready)
         self.assertIn("ChatGPT CODE and SECURITY reviews PASS", reason)
 
-    def test_ignores_codex_and_wrong_sha_comments(self):
+    def test_ignores_codex_and_supersedes_wrong_sha_review(self):
         codex = "<!-- codex-security-review:v1 {\"status\":\"completed\"} -->"
         ready, reason = self.run_with_comments(
             [
@@ -104,7 +104,8 @@ class ChatGPTReviewAuthorityTests(unittest.TestCase):
             ]
         )
         self.assertFalse(ready)
-        self.assertIn("missing ChatGPT exact-SHA review proof: code", reason)
+        self.assertIn("ChatGPT code review is not PASS", reason)
+        self.assertIn("SUPERSEDED", reason)
 
     def test_rejects_blocking_chatgpt_finding(self):
         ready, reason = self.run_with_comments(

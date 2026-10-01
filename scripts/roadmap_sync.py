@@ -65,7 +65,10 @@ def policy() -> dict[str, Any]:
         or derivation.get("manual_status_override") != "forbidden"
         or derivation.get("qualification_base_ref") != "origin/main"
         or set(derivation.get("statuses", {}))
-        != {"NOT_STARTED", "CONTRACTED", "PARTIAL", "IMPLEMENTED", "PROVEN", "BLOCKED"}
+        != {
+            "NOT_STARTED", "CONTRACTED", "PARTIAL", "IMPLEMENTED",
+            "QUALIFIED", "RUNTIME_PROVEN", "DEPLOYED", "PROVEN", "BLOCKED",
+        }
         or derivation.get("dependency_terminal_statuses") != ["DONE", "PROVEN"]
     ):
         raise RuntimeError("roadmap status derivation contract is invalid")
@@ -138,12 +141,11 @@ def policy() -> dict[str, Any]:
             base_requirement_fields = {
                 "implementation_paths", "qualification_gates", "qce_capabilities", "runtime_evidence"
             }
+            optional_requirement_fields = {"resolved_capabilities", "post_merge_evidence"}
             if (
                 not isinstance(requirements, dict)
                 or not base_requirement_fields.issubset(requirements)
-                or set(requirements) - base_requirement_fields != (
-                    {"resolved_capabilities"} if "resolved_capabilities" in requirements else set()
-                )
+                or set(requirements) - base_requirement_fields - optional_requirement_fields
             ):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements are invalid")
             paths = requirements["implementation_paths"]
@@ -151,7 +153,8 @@ def policy() -> dict[str, Any]:
             capabilities = requirements["qce_capabilities"]
             runtime = requirements["runtime_evidence"]
             resolved = requirements.get("resolved_capabilities", [])
-            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime, resolved)):
+            post_merge = requirements.get("post_merge_evidence", [])
+            if not all(isinstance(group, list) for group in (paths, gates, capabilities, runtime, resolved, post_merge)):
                 raise RuntimeError(f"roadmap milestone {milestone_id} requirements must be lists")
             for requirement in resolved:
                 if not isinstance(requirement, dict) or set(requirement) != {"tool", "capability", "scope", "status"}:
@@ -207,6 +210,17 @@ def policy() -> dict[str, Any]:
                     and environments != ["management"]
                 ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} deployment must target management")
+            for reference in post_merge:
+                if not isinstance(reference, str):
+                    raise ValueError(f"roadmap milestone {milestone_id} post-merge evidence is invalid")
+                reference_path = Path(reference)
+                if (
+                    reference_path.is_absolute()
+                    or reference_path.parts[:3] != (".context", "evidence", "post-merge")
+                    or len(reference_path.parts) != 4
+                    or not re.fullmatch(r"[0-9a-f]{40}\.json", reference_path.name)
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} post-merge evidence is unsafe")
             if milestone_id in {"M2.5", "M3", "M4", "M5", "M6", "M7", "M8", "M9"} and not runtime:
                 raise RuntimeError(f"roadmap milestone {milestone_id} requires runtime evidence")
             if milestone_id == "M2.5":
@@ -408,6 +422,48 @@ def _runtime_evidence_result(
     return True, relative
 
 
+def _fresh_post_merge_snapshot(pr_number: int) -> dict[str, Any]:
+    """Read GitHub for this invocation; a stored proof never supplies authority."""
+    import repoctl
+
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        raise RuntimeError("fresh post-merge verification requires GitHub CLI")
+    return repoctl._github_pr_snapshot(gh, github_name_with_owner(gh), pr_number)
+
+
+def _post_merge_evidence_result(root: Path, reference: str) -> tuple[bool, str]:
+    """Accept only the canonical signed proof after fresh external verification."""
+    import post_merge_verify
+
+    expected = Path(".context/evidence/post-merge")
+    relative = Path(reference)
+    if relative.parent != expected or re.fullmatch(r"[0-9a-f]{40}\.json", relative.name) is None:
+        return False, f"post-merge evidence reference is unsafe: {reference}"
+    try:
+        # These untrusted fields only select the external PR to query. The
+        # canonical reader verifies the schema, detached signer, retained
+        # qualification/bundle, exact PR/Git identity and current ancestry.
+        hint = post_merge_verify._strict_json(root / relative, label="post-merge proof")
+        pr_number = hint.get("pr")
+        if type(pr_number) is not int or pr_number <= 0:
+            raise post_merge_verify.PostMergeError("post-merge proof PR number is invalid")
+        snapshot = _fresh_post_merge_snapshot(pr_number)
+        post_merge_verify.read_post_merge_proof(
+            root,
+            relative.stem,
+            expected_pr=pr_number,
+            expected_head=snapshot.get("head_sha"),
+            snapshot=snapshot,
+        )
+    except (
+        OSError, UnicodeError, RuntimeError, ValueError, TypeError, KeyError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return False, f"post-merge verification failed: {reference}: {exc}"
+    return True, reference
+
+
 def _qce_capability_statuses(payload: dict[str, Any] | None) -> dict[str, str]:
     statuses: dict[str, str] = {}
     if not isinstance(payload, dict):
@@ -484,7 +540,18 @@ def derive_projection(
         state = states.get(tracker)
         if not isinstance(state, dict):
             raise RuntimeError(f"roadmap tracker state missing for #{tracker}")
-        requirements = milestone["requirements"]
+        requirements = milestone.get("requirements")
+        if not isinstance(requirements, dict):
+            results.append({
+                "milestone": milestone_id,
+                "status": "NOT_STARTED",
+                "requirements": [f"tracker:#{tracker}", "contract"],
+                "evidence": [],
+                "missing_evidence": ["contract"],
+                "blockers": [],
+            })
+            status_index[milestone_id] = "NOT_STARTED"
+            continue
         evidence: list[str] = []
         missing: list[str] = []
         blockers: list[str] = []
@@ -552,9 +619,10 @@ def derive_projection(
                 missing.append(f"capability:{tool_name}.{capability_name}:{scope}:{expected}")
 
         runtime_declarations = requirements["runtime_evidence"]
-        requirement_names.extend(f"runtime:{item['path']}" for item in runtime_declarations)
-        runtime_valid = True
+        runtime_results: list[tuple[str, bool]] = []
         for declaration in runtime_declarations:
+            proof_type = str(declaration.get("proof_type", "runtime"))
+            requirement_names.append(f"{proof_type}:{declaration['path']}")
             valid, detail = _runtime_evidence_result(
                 root,
                 declaration,
@@ -565,24 +633,61 @@ def derive_projection(
                 int(derivation["evidence_max_age_seconds"]),
                 now,
             )
-            runtime_valid = runtime_valid and valid
+            runtime_results.append((proof_type, valid))
             (evidence if valid else missing).append(detail)
 
-        implementation_complete = tracker_complete and len(present_paths) == len(paths)
+        post_merge_declarations = requirements.get("post_merge_evidence", [])
+        post_merge_results: list[bool] = []
+        for reference in post_merge_declarations:
+            requirement_names.append(f"post-merge:{reference}")
+            valid, detail = _post_merge_evidence_result(root, reference)
+            post_merge_results.append(valid)
+            (evidence if valid else missing).append(detail)
+        post_merge_complete = all(post_merge_results)
+        implementation_complete = bool(paths) and len(present_paths) == len(paths)
+        qualification_complete = bool(gates) and all(
+            gate_statuses.get(gate) == "PASS" for gate in gates
+        )
+        runtime_kinds = {"runtime", "lab-readiness"}
+        runtime_required = any(kind in runtime_kinds for kind, _ in runtime_results)
+        runtime_complete = all(
+            valid for kind, valid in runtime_results if kind in runtime_kinds
+        )
+        deployment_required = any(
+            kind == "persistent-deployment" for kind, _ in runtime_results
+        )
+        deployment_complete = all(
+            valid for kind, valid in runtime_results if kind == "persistent-deployment"
+        )
         proof_complete = (
-            implementation_complete
-            and all(gate_statuses.get(gate) == "PASS" for gate in gates)
+            tracker_complete
+            and implementation_complete
+            and qualification_complete
             and all(qce_statuses.get(capability) == "PROVEN" for capability in capabilities)
             and resolved_complete
-            and runtime_valid
+            and runtime_complete
+            and deployment_complete
+            and post_merge_complete
         )
         if blockers:
             status = "BLOCKED"
         elif proof_complete:
             status = "PROVEN"
+        elif (
+            implementation_complete and qualification_complete and deployment_required
+            and deployment_complete and runtime_complete
+        ):
+            status = "DEPLOYED"
+        elif (
+            implementation_complete and qualification_complete and runtime_required
+            and runtime_complete
+        ):
+            status = "RUNTIME_PROVEN"
+        elif implementation_complete and qualification_complete:
+            status = "QUALIFIED"
         elif implementation_complete:
             status = "IMPLEMENTED"
-        elif tracker_complete or present_paths or evidence:
+        elif present_paths or any(gate_statuses.get(gate) == "PASS" for gate in gates):
             status = "PARTIAL"
         else:
             status = "CONTRACTED"

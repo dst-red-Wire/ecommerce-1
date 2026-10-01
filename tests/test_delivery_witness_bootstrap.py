@@ -317,6 +317,26 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         lock = self.root / "config/contracts/toolchain-lock.json"
         lock.parent.mkdir(parents=True)
         lock.write_text("{}\n", encoding="utf-8")
+        self.package = {
+            "id": "delivery-fixture",
+            "milestone": "M7",
+            "tracker_issue": 107,
+            "work_item_issue": 170,
+            "execution": {
+                "preflight_required": True,
+                "required_capabilities": [],
+                "capability_parameters": {},
+                "runtime_required": True,
+                "recovery_required": False,
+            },
+            "acceptance": {
+                "runtime_evidence": [".context/evidence/runtime/fixture.json"],
+            },
+        }
+        self.package_path = self.root / "config/work-packages/M7/delivery-fixture.yaml"
+        self.package_path.parent.mkdir(parents=True)
+        self.package_path.write_bytes(evidence_bundle.canonical_bytes(self.package))
+        self.package_digest = evidence_bundle.digest_file(self.package_path)
         self.git("add", ".")
         self.git("commit", "-qm", "base fixture")
         self.base = self.git("rev-parse", "HEAD")
@@ -350,6 +370,16 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         self.bundle_digest = None
         self.preflight_calls = []
         self.preflight_path = self.context / "evidence/preflight" / f"{self.head}.json"
+        self.runtime_path = self.root / self.package["acceptance"]["runtime_evidence"][0]
+        self.runtime_path.parent.mkdir(parents=True)
+        self.runtime_path.write_bytes(evidence_bundle.canonical_bytes({
+            "fixture": "runtime bytes validated at the mocked producer boundary",
+            "head_sha": self.head,
+            "head_tree_sha": self.tree,
+        }))
+        self.latest_preflight = None
+        self.latest_preflight_receipt = None
+        self.bundle_creations = []
         for name, value in (("ROOT", self.root), ("CONTEXT", self.context)):
             patcher = mock.patch.object(REPOCTL, name, value)
             patcher.start()
@@ -408,6 +438,9 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         witness_digests=None,
         preflight_outcomes=None,
     ):
+        self.preflight_calls.clear()
+        self.bundle_creations.clear()
+
         def fresh(*_args):
             self.events.append("qualification")
             self.write_artifacts(self.final_payload)
@@ -422,17 +455,19 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             if isinstance(outcome, Exception):
                 raise outcome
             payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "status": "PASS",
+                "execution_authority": "exact-base",
                 "source_sha": self.head,
                 "base_sha": self.base,
-                "tree_sha": self.tree,
+                "head_tree_sha": self.tree,
                 "branch": self.branch,
                 "work_package_id": "delivery-fixture",
-                "work_package_digest": "sha256:" + "6" * 64,
+                "work_package_digest": self.package_digest,
                 "work_item_issue": 170,
                 "milestone": "M7",
                 "required_capabilities": [],
+                "capability_parameters": {},
                 "capacity": "PASS",
                 "environment": "PASS",
                 "checks": {
@@ -446,6 +481,26 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             if persist:
                 self.preflight_path.parent.mkdir(parents=True, exist_ok=True)
                 self.preflight_path.write_bytes(evidence_bundle.canonical_bytes(payload))
+            encoded = evidence_bundle.canonical_bytes(payload)
+            self.latest_preflight = payload
+            self.latest_preflight_receipt = {
+                "status": "PASS",
+                "producer": "scripts/delivery_preflight.py:run_preflight",
+                "authority": "current-preflight-verification",
+                "head_sha": self.head,
+                "head_tree_sha": self.tree,
+                "base_sha": self.base,
+                "work_package_id": self.package["id"],
+                "work_package_digest": self.package_digest,
+                "work_item_issue": 170,
+                "milestone": "M7",
+                "required_capabilities": [],
+                "capability_parameters": {},
+                "evidence_path": str(self.preflight_path.relative_to(self.root)),
+                "evidence_digest": evidence_bundle.digest_bytes(encoded),
+                "fresh_execution_verified": True,
+                "payload": payload,
+            }
             result = {
                 "status": "PASS",
                 "reason": "",
@@ -455,7 +510,7 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
                 "milestone": "M7",
                 "pr": snapshot["number"],
                 "preflight": payload,
-                "preflight_verification": {"status": "PASS"},
+                "preflight_verification": self.latest_preflight_receipt,
                 "preflight_path": str(self.preflight_path.relative_to(self.root)),
                 "preflight_digest": evidence_bundle.digest_bytes(
                     evidence_bundle.canonical_bytes(payload)
@@ -463,6 +518,35 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             }
             result.update(outcome or {})
             return result
+
+        def verify_preflight(root, **expected):
+            # The producer boundary is isolated; all persisted proof bytes,
+            # bundle construction and capture comparisons remain real.
+            self.assertEqual(self.root, root)
+            self.assertEqual(self.head, expected["expected_head_sha"])
+            self.assertEqual(self.base, expected["expected_base_sha"])
+            self.assertEqual(self.tree, expected["expected_head_tree_sha"])
+            self.assertEqual(self.package_digest, expected["expected_package_digest"])
+            self.assertEqual({}, expected["expected_capability_parameters"])
+            self.assertEqual(self.latest_preflight, expected["expected_result"])
+            self.assertEqual(
+                evidence_bundle.canonical_bytes(self.latest_preflight),
+                self.preflight_path.read_bytes(),
+            )
+            return self.latest_preflight_receipt
+
+        def verify_runtime(root, milestone, head, relative, *, recovery_required):
+            self.assertEqual((self.root, "M7", self.head), (root, milestone, head))
+            self.assertEqual(self.package["acceptance"]["runtime_evidence"][0], relative)
+            self.assertFalse(recovery_required)
+            return {
+                "status": "PASS",
+                "producer": "fixture:runtime-validator",
+                "head_sha": self.head,
+                "head_tree_sha": self.tree,
+                "evidence_path": relative,
+                "evidence_digest": evidence_bundle.digest_file(self.runtime_path),
+            }
 
         def run(argv, **_kwargs):
             if argv[:3] == ["gh", "pr", "merge"]:
@@ -533,8 +617,16 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             return {**value, "is_draft": False, "base_ref": "main"}
 
         reviews = {
-            kind: {"status": "PASS", "blocking_findings": 0, "head_sha": self.head}
-            for kind in ("code", "security")
+            kind: {
+                "provider": "ChatGPT",
+                "kind": kind,
+                "source": "github-pr-comment",
+                "status": "PASS",
+                "blocking_findings": 0,
+                "head_sha": self.head,
+                "comment_id": comment,
+            }
+            for kind, comment in (("code", 101), ("security", 102))
         }
         patches = {
             "git": mock.Mock(side_effect=self.git),
@@ -554,6 +646,11 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             "remote_commit_provenance_check": mock.Mock(return_value=0),
             "_fresh_qualification_for_finish": mock.Mock(side_effect=fresh),
             "_delivery_pr_work_item_preflight": mock.Mock(side_effect=preflight),
+            "_delivery_package_input": mock.Mock(return_value=(
+                self.package,
+                {"status": "VALID", "scope_status": "VALID", "errors": []},
+                self.package_path,
+            )),
             "_pr_loop_qualification": mock.Mock(
                 return_value={
                     "status": "PASS",
@@ -608,7 +705,12 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         create_bundle = evidence_bundle.create_bundle
 
         def create_after_replacement(*args, **kwargs):
-            during_bundle()
+            final = len(self.preflight_calls) == 2
+            self.bundle_creations.append("final" if final else "initial")
+            if final and bundle_error:
+                raise bundle_error
+            if final and during_bundle:
+                during_bundle()
             return create_bundle(*args, **kwargs)
 
         with contextlib.ExitStack() as stack:
@@ -627,23 +729,29 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
                     post_merge_verify, "write_post_merge_proof", side_effect=post_proof
                 )
             )
-            if bundle_error:
-                stack.enter_context(
-                    mock.patch.object(
-                        evidence_bundle, "create_bundle", side_effect=bundle_error
-                    )
-                )
-            elif during_bundle:
-                stack.enter_context(
-                    mock.patch.object(
-                        evidence_bundle,
-                        "create_bundle",
-                        side_effect=create_after_replacement,
-                    )
-                )
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
-            return REPOCTL.finish_pr("main")
+            stack.enter_context(
+                mock.patch("delivery_preflight.verify_preflight", side_effect=verify_preflight)
+            )
+            stack.enter_context(mock.patch(
+                "issue_lifecycle.derive_premerge_acceptance",
+                return_value={"status": "PASS", "errors": []},
+            ))
+            stack.enter_context(mock.patch(
+                "issue_lifecycle.read_qualified_head_snapshot",
+                return_value={"head_sha": self.head, "tree_sha": self.tree},
+            ))
+            stack.enter_context(mock.patch(
+                "runtime_authority.verify_runtime_proof", side_effect=verify_runtime
+            ))
+            stack.enter_context(mock.patch.object(
+                evidence_bundle, "create_bundle", side_effect=create_after_replacement
+            ))
+            output = io.StringIO()
+            stack.enter_context(contextlib.redirect_stdout(output))
+            stack.enter_context(contextlib.redirect_stderr(output))
+            result = REPOCTL.finish_pr("main")
+            self.finish_output = output.getvalue()
+            return result
 
     def test_final_base_qualification_is_bundled_before_signed_witness_and_merge(self):
         stale = evidence_bundle.create_bundle(
@@ -657,7 +765,7 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             ),
             gate_evidence=[str(self.audit.relative_to(self.root))],
         )
-        self.assertEqual(0, self.run_finish())
+        self.assertEqual(0, self.run_finish(), self.finish_output)
         self.assertEqual(
             ["qualification", "witness", "merge", "cleanup", "post-proof"], self.events
         )
@@ -680,6 +788,31 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         )
         self.assertEqual(
             2, json.loads(self.preflight_path.read_bytes())["probe_sequence"]
+        )
+        self.assertEqual(["initial", "final"], self.bundle_creations)
+        review_paths = {item["path"] for item in manifest["review_evidence"]}
+        self.assertEqual({
+            f".context/evidence/{self.head}/reviews/code-101.json",
+            f".context/evidence/{self.head}/reviews/security-102.json",
+        }, review_paths)
+        for relative in review_paths:
+            snapshot = json.loads((self.root / relative).read_bytes())
+            self.assertEqual(self.issue_number, snapshot["pr"])
+            self.assertEqual(self.head, snapshot["review"]["head_sha"])
+            self.assertFalse(snapshot["verdict_authority"])
+        self.assertEqual(
+            self.package["acceptance"]["runtime_evidence"],
+            [item["path"] for item in manifest["runtime_evidence"]],
+        )
+        self.assertEqual(
+            evidence_bundle.digest_file(self.runtime_path),
+            manifest["evidence_digests"][str(self.runtime_path.relative_to(self.root))],
+        )
+        self.assertEqual(
+            evidence_bundle.digest_bytes(evidence_bundle.canonical_bytes({
+                "runtime_evidence": [evidence_bundle.digest_file(self.runtime_path)],
+            })),
+            manifest["runtime_identity"],
         )
 
     def test_preflight_failure_blocks_finish_even_with_external_authorities_pass(self):
@@ -712,7 +845,7 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         }
         relative = "config/work-packages/M7/delivery-fixture.yaml"
         path = self.root / relative
-        path.parent.mkdir(parents=True)
+        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(evidence_bundle.canonical_bytes(package))
         self.git("add", relative)
         self.git("commit", "-qm", "exact work-package fixture")
@@ -816,13 +949,17 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         for path in (self.raw, self.audit, self.preflight_path):
             with self.subTest(artifact=str(path.relative_to(self.root))):
                 self.events.clear()
+                mutations = []
 
                 def replace(artifact=path):
+                    mutations.append(artifact)
                     payload = json.loads(artifact.read_bytes())
                     payload["created_at_epoch"] = 3
                     artifact.write_bytes(evidence_bundle.canonical_bytes(payload))
 
                 self.assertNotEqual(0, self.run_finish(during_bundle=replace))
+                self.assertEqual([path], mutations, self.finish_output)
+                self.assertEqual(["initial", "final"], self.bundle_creations)
                 self.assertEqual(["qualification"], self.events)
 
     def test_returned_witness_cannot_change_qualification_or_manifest_digest(self):
