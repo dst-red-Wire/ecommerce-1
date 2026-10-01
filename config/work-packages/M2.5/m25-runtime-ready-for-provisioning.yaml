@@ -10,6 +10,7 @@ scope:
     - tests/test_terraform_network_checks.py
     - platform/terraform/environments/mgmt/README.md
     - config/work-packages/M2.5/m25-runtime-ready-for-provisioning.yaml
+    - scripts/windows/LabNativeBoot.ps1
   forbidden_paths: []
 dependencies: []
 acceptance:
@@ -25,6 +26,7 @@ acceptance:
     - .context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json
   tests:
     - tests/test_terraform_network_checks.py
+    - tests/test_windows_packer_pipeline.py
     - tests/test_m2_5_mgmt_bootstrap.py
     - tests/test_m25_runtime_evidence.py
     - tests/test_work_package.py
