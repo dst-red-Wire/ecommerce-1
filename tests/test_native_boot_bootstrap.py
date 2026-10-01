@@ -109,6 +109,31 @@ class NativeBootBootstrapTests(unittest.TestCase):
                 self.assertLess(branch.index("Assert-ShadowRunnerBytes -RunnerRoot"),
                                 branch.index("& $runner -Action $action"))
 
+    def test_shadow_manifest_property_count_on_windows_powershell(self):
+        exe = "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        if not Path(exe).exists():
+            self.skipTest("Windows PowerShell 5.1 is unavailable")
+        lines = [line.strip() for line in self._source("Reboot").splitlines()
+                 if "runner_files.PSObject.Properties" in line and "-ne 7" in line]
+        self.assertEqual(len(lines), 1)
+        self.assertTrue(lines[0].endswith(") {"))
+        condition = lines[0][:-3]
+        seven = json.dumps({"runner_files": {f"file{i}": "digest" for i in range(7)}})
+        six = json.dumps({"runner_files": {f"file{i}": "digest" for i in range(6)}})
+        eight = json.dumps({"runner_files": {f"file{i}": "digest" for i in range(8)}})
+        script = (
+            "$stored=ConvertFrom-Json -InputObject '" + seven + "';"
+            "if (" + condition + ") { exit 1 };"
+            "$stored=ConvertFrom-Json -InputObject '" + six + "';"
+            "if (-not (" + condition + ")) { exit 2 };"
+            "$stored=ConvertFrom-Json -InputObject '" + eight + "';"
+            "if (-not (" + condition + ")) { exit 3 }; exit 0"
+        )
+        result = subprocess.run(
+            [exe, "-NoProfile", "-NonInteractive", "-Command", script],
+            text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_self_test_uses_attested_uac_bootstrap(self):
         source = self._source("SelfTest")
         self.assertIn("Assert-PublishedHead", source)

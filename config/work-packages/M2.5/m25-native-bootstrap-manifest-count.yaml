@@ -1,0 +1,40 @@
+id: m25-native-bootstrap-manifest-count
+milestone: M2.5
+tracker_issue: 32
+work_item_issue: 178
+objective: Correct the Windows PowerShell 5.1 protected runner manifest count in the exact-base native bootstrap.
+scope:
+  allowed_paths:
+    - scripts/repoctl.py
+    - tests/test_native_boot_bootstrap.py
+    - config/work-packages/M2.5/m25-native-bootstrap-manifest-count.yaml
+  forbidden_paths: []
+dependencies: []
+acceptance:
+  contracts:
+    - config/contracts/review-policy.yaml
+    - config/contracts/work-package-policy.yaml
+    - config/contracts/qualification-execution-policy.yaml
+  qualification_gates: [governance, contracts, automation, security, system]
+  runtime_evidence: []
+  tests:
+    - tests/test_native_boot_bootstrap.py
+    - tests/test_work_package.py
+  qce_capabilities: []
+execution:
+  preflight_required: true
+  runtime_required: false
+  recovery_required: false
+  required_capabilities: [toolchain-pinned]
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+  - Windows PowerShell 5.1 accepts exactly seven protected runner file properties and rejects six.
+  - Exact-head FULL qualification, CODE and SECURITY reviews, owner authorization and merge checks pass.
+  - No Hetzner provisioning or paid resource mutation occurs.
