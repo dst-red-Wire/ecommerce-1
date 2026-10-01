@@ -1615,7 +1615,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL", payload["cleanup_result"])
         self.assertEqual("FAIL", payload["output_contract"])
 
-    def test_cleanup_success_reaches_done(self):
+    def _run_merged_closure(self, completion_status="CLOSED", roadmap_status=0):
         result = REPOCTL._pr_loop_empty_result(161)
         result.update({"head_sha": self.SHA_A, "merge_result": "PASS"})
         merged = self.snapshot(
@@ -1638,7 +1638,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         ), mock.patch.object(
             REPOCTL, "_roadmap_followup_after_merge", return_value=0
         ) as roadmap, mock.patch.object(
-            REPOCTL, "roadmap_check", return_value=0
+            REPOCTL, "roadmap_check", side_effect=[0, roadmap_status]
         ), mock.patch.object(
             REPOCTL, "_github_pr_snapshot", return_value=merged
         ), mock.patch.object(
@@ -1646,9 +1646,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             return_value=({"code": {}, "security": {}}, {}),
         ), mock.patch(
             "issue_completion.complete_work_item",
-            return_value={"status": "CLOSED", "issue": 170, "errors": []},
+            return_value={"status": completion_status, "issue": 170, "errors": []},
         ), mock.patch(
-            "post_merge_verify.read_post_merge_proof",
+            "post_merge_verify.recover_post_merge_proof",
             return_value={
                 "status": "PASS", "pr": 161,
                 "head_sha": self.SHA_A, "merge_sha": "d" * 40,
@@ -1663,13 +1663,65 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                     "gh", "owner/repo", merged, result, dry_run=False, json_output=True
                 )
         payload = json.loads(stream.getvalue().strip().splitlines()[-1])
+        return rc, payload
+
+    def test_cleanup_success_reaches_done(self):
+        rc, payload = self._run_merged_closure()
         self.assertEqual(0, rc)
         self.assertEqual("DONE", payload["state"])
-        self.assertEqual("PASS", payload["merge_result"])
-        self.assertEqual("PASS", payload["cleanup_result"])
-        self.assertEqual("PASS", payload["roadmap_result"])
+        self.assertEqual("CLOSED", payload["work_item_completion"]["status"])
         self.assertEqual("PASS", payload["post_merge_result"])
-        roadmap.assert_called_once_with()
+
+    def test_signed_merge_and_proof_do_not_finish_when_issue_closure_fails(self):
+        rc, payload = self._run_merged_closure("BLOCKED")
+        self.assertEqual(1, rc)
+        self.assertEqual("VERIFIED", payload["state"])
+        self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
+        self.assertEqual("PASS", payload["post_merge_result"])
+
+    def test_already_closed_issue_does_not_mask_roadmap_drift(self):
+        rc, payload = self._run_merged_closure("CLOSED", 1)
+        self.assertEqual(1, rc)
+        self.assertNotEqual("DONE", payload["state"])
+        self.assertNotEqual("NONE", payload["next_action"])
+        self.assertIn("roadmap", payload["blockers"][-1])
+
+    def test_finish_json_returns_close_work_item_after_verified_merge(self):
+        before = {"number": 161, "headRefOid": self.SHA_A}
+        after = {"state": "MERGED", "mergedAt": "2026-09-30T10:00:00Z",
+                 "headRefOid": self.SHA_A, "mergeCommit": {"oid": "d" * 40}}
+
+        def finish(_base):
+            REPOCTL._FINISH_PR_PHASES.get().update(
+                cleanup_result="PASS", roadmap_result="PASS", post_merge_result="PASS")
+            return 0
+
+        stream = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), \
+             mock.patch.object(REPOCTL, "git", return_value=self.SHA_A), \
+             mock.patch.object(REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]), \
+             mock.patch.object(REPOCTL, "finish_pr", side_effect=finish), \
+             contextlib.redirect_stdout(stream):
+            rc = REPOCTL._finish_pr_json("main")
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("PASS", payload["merge_result"])
+        self.assertEqual("VERIFIED", payload["state"])
+        self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
+
+    def test_public_post_merge_verification_recovers_before_reporting_pass(self):
+        snapshot = self.snapshot(state="MERGED", merged=True, merge_commit_sha="d" * 40)
+        stream = io.StringIO()
+        with mock.patch.object(REPOCTL.shutil, "which", return_value="gh"), \
+             mock.patch.object(REPOCTL, "_github_repository_identity", return_value=("owner", "owner/repo")), \
+             mock.patch.object(REPOCTL, "_github_pr_snapshot", return_value=snapshot), \
+             mock.patch("post_merge_verify.recover_post_merge_proof",
+                        return_value={"status": "PASS", "merge_sha": "d" * 40}) as recover, \
+             contextlib.redirect_stdout(stream):
+            rc = REPOCTL.post_merge_verify_command(161)
+        self.assertEqual(0, rc)
+        self.assertEqual("PASS", json.loads(stream.getvalue())["status"])
+        recover.assert_called_once_with(REPOCTL.ROOT, pr_number=161, snapshot=snapshot)
 
     def test_cleanup_recovery_cannot_finish_without_roadmap(self):
         result = REPOCTL._pr_loop_empty_result(161)

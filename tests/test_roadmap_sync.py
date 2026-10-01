@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -304,8 +306,14 @@ class RoadmapSyncTests(unittest.TestCase):
             payload["deployment_state"] = "DEPLOYED"
             self.assertEqual("QUALIFIED", status("closed"))
             payload["deployment_persistence"] = "persistent"
-            self.assertEqual("DEPLOYED", status("open"))
-            self.assertEqual("PROVEN", status("closed"))
+            self.assertEqual("QUALIFIED", status("open"))
+            self.assertEqual("QUALIFIED", status("closed"))
+            valid, detail = ROADMAP._runtime_evidence_result(
+                root, declaration, "M2.5", head, tree,
+                policy["status_derivation"]["runtime_evidence_contract"], 86400, now,
+            )
+            self.assertFalse(valid)
+            self.assertIn("no registered producer and state verifier", detail)
 
     def test_runtime_and_post_merge_proofs_advance_separate_statuses(self):
         policy = self._runtime_policy()
@@ -353,7 +361,7 @@ class RoadmapSyncTests(unittest.TestCase):
             }
             post_merge_path.write_text(json.dumps(proof), encoding="utf-8")
             self.assertEqual("RUNTIME_PROVEN", status("open"))
-            self.assertEqual("PROVEN", status("closed"))
+            self.assertEqual("RUNTIME_PROVEN", status("closed"))
             proof["signature_verified"] = False
             post_merge_path.write_text(json.dumps(proof), encoding="utf-8")
             self.assertEqual("RUNTIME_PROVEN", status("closed"))
@@ -387,6 +395,36 @@ class RoadmapSyncTests(unittest.TestCase):
             self.assertRaisesRegex(RuntimeError, "M2.5 requires canonical lab and persistent"),
         ):
             ROADMAP.policy()
+
+    def test_document_only_checks_rendering_without_projecting_proofs(self):
+        with (
+            mock.patch.object(ROADMAP, "tracker_states") as tracker,
+            mock.patch.object(ROADMAP, "_current_projection") as projection,
+            mock.patch.object(ROADMAP, "_write_projection") as writer,
+        ):
+            self.assertEqual(0, ROADMAP.check_document(quiet=True))
+        tracker.assert_not_called()
+        projection.assert_not_called()
+        writer.assert_not_called()
+
+    def test_document_only_rejects_actual_rendering_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = ROOT / "docs/project/MASTER_EXECUTION_PLAN.md"
+            path = root / "docs/project/MASTER_EXECUTION_PLAN.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    "Canonical tracker: GitHub issue `#32`.",
+                    "Canonical tracker: GitHub issue `#15`.", 1,
+                ), encoding="utf-8",
+            )
+            policy = ROADMAP.policy()
+            with (
+                mock.patch.object(ROADMAP, "ROOT", root),
+                mock.patch.object(ROADMAP, "policy", return_value=policy),
+            ):
+                self.assertEqual(1, ROADMAP.check_document(quiet=True))
 
     def test_blocked_qce_capability_blocks_mapped_milestone(self):
         policy = self._runtime_policy()
@@ -565,6 +603,415 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertIn("roadmap_sync()", followup)
         self.assertIn("deliver(default_branch, title, title)", followup)
         self.assertNotIn("git push origin main", followup)
+
+
+class RoadmapFollowupTests(unittest.TestCase):
+    """Use real local Git refs, package selection and preflight without GitHub writes."""
+
+    document = "docs/project/MASTER_EXECUTION_PLAN.md"
+    package_path = "config/work-packages/M7/m7-verified-delivery-chain.yaml"
+
+    def setUp(self):
+        self.workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(self.workspace.cleanup)
+        self.root = Path(self.workspace.name) / "repo"
+        self.root.mkdir()
+        self.remote = Path(self.workspace.name) / "remote.git"
+        subprocess.run(
+            ["git", "init", "--bare", "-q", str(self.remote)],
+            check=True, capture_output=True,
+        )
+        self.git("init", "-q", "-b", "main")
+        self.git("config", "user.name", "Roadmap tests")
+        self.git("config", "user.email", "roadmap@example.test")
+        self.git("config", "commit.gpgsign", "false")
+        self.git("config", "core.hooksPath", "/dev/null")
+        self.git("remote", "add", "origin", str(self.remote))
+        shutil.copytree(ROOT / "config/contracts", self.root / "config/contracts")
+        for relative in ("architecture.lock.yaml", self.package_path):
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        path = self.root / self.document
+        path.parent.mkdir(parents=True)
+        path.write_text("stale\n", encoding="utf-8")
+        (self.root / ".gitignore").write_text(".context/\n", encoding="utf-8")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture main")
+        self.git("push", "-q", "-u", "origin", "main")
+        self.main = self.git("rev-parse", "HEAD")
+        self.prs = []
+        self.deliveries = 0
+        self.original_output = REPOCTL.output
+        self.patches = [
+            mock.patch.object(REPOCTL, "ROOT", self.root),
+            mock.patch.object(REPOCTL, "roadmap_check", side_effect=self.check),
+            mock.patch.object(REPOCTL, "roadmap_sync", side_effect=self.sync),
+            mock.patch.object(REPOCTL, "output", side_effect=self.output),
+            mock.patch.object(REPOCTL, "deliver", side_effect=self.deliver),
+        ]
+        for patch in self.patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def git(self, *arguments):
+        result = subprocess.run(
+            ["git", *arguments], cwd=self.root, text=True,
+            capture_output=True, check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        return result.stdout.strip()
+
+    def check(self, *, quiet=False):
+        return int((self.root / self.document).read_text(encoding="utf-8") != "synced\n")
+
+    def sync(self):
+        (self.root / self.document).write_text("synced\n", encoding="utf-8")
+        return 0
+
+    def output(self, command, **kwargs):
+        if command[1:3] == ["pr", "list"]:
+            if command[command.index("--state") + 1] == "open":
+                return json.dumps([pr for pr in self.prs if pr["state"] == "OPEN"])
+            return json.dumps(self.prs)
+        return self.original_output(command, **kwargs)
+
+    def deliver(self, base, title, message):
+        self.deliveries += 1
+        if self.git("status", "--porcelain", "--untracked-files=all"):
+            self.git("add", self.document)
+            self.git("commit", "-qm", message)
+        head = self.git("rev-parse", "HEAD")
+        # This is the actual publication preflight, including the canonical
+        # selector and the base-owned toolchain capability probe.
+        result = REPOCTL._delivery_publish_preflight("origin/main", head)
+        self.assertEqual(0, result)
+        branch = self.git("branch", "--show-current")
+        self.git("push", "-q", "-u", "origin", branch)
+        self.prs = [{
+            "number": 200, "state": "OPEN", "headRefOid": head,
+            "baseRefName": "main", "headRefName": branch,
+        }]
+        return 0
+
+    def commit_main_change(self):
+        self.git("add", ".")
+        self.git("commit", "-qm", "fixture policy change")
+        self.git("push", "-q", "origin", "main")
+        self.main = self.git("rev-parse", "HEAD")
+
+    def test_scoped_followup_passes_real_preflight_and_reruns_without_new_commit(self):
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual("main", self.git("branch", "--show-current"))
+        self.assertEqual(self.main, self.git("rev-parse", "HEAD"))
+        branch = f"automation/roadmap-sync/{self.main[:12]}"
+        followup = self.git("rev-parse", branch)
+        self.assertEqual("1", self.git("rev-list", "--count", f"main..{branch}"))
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(1, self.deliveries)
+        self.assertEqual(followup, self.git("rev-parse", branch))
+        self.assertEqual("main", self.git("branch", "--show-current"))
+        self.assertEqual("", self.git("status", "--porcelain"))
+
+    def test_missing_scope_blocks_before_branch_or_commit(self):
+        import yaml
+
+        path = self.root / self.package_path
+        package = yaml.safe_load(path.read_text(encoding="utf-8"))
+        package["scope"]["allowed_paths"].remove(self.document)
+        path.write_text(yaml.safe_dump(package), encoding="utf-8")
+        self.commit_main_change()
+        self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(0, self.deliveries)
+        self.assertEqual("", self.git("for-each-ref", "refs/heads/automation/"))
+        self.assertEqual(self.main, self.git("rev-parse", "HEAD"))
+
+    def test_ambiguous_scope_blocks_before_branch_or_commit(self):
+        import yaml
+
+        package = yaml.safe_load((self.root / self.package_path).read_text(encoding="utf-8"))
+        package["id"] = "m7-duplicate-roadmap"
+        package["work_item_issue"] = 171
+        path = self.root / "config/work-packages/M7/m7-duplicate-roadmap.yaml"
+        path.write_text(yaml.safe_dump(package), encoding="utf-8")
+        self.commit_main_change()
+        self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(0, self.deliveries)
+        self.assertEqual("", self.git("for-each-ref", "refs/heads/automation/"))
+
+    def test_failed_publication_restores_main_and_reuses_retained_commit(self):
+        def fail_after_commit(base, title, message):
+            self.git("add", self.document)
+            self.git("commit", "-qm", message)
+            return 1
+
+        with mock.patch.object(REPOCTL, "deliver", side_effect=fail_after_commit):
+            self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        branch = f"automation/roadmap-sync/{self.main[:12]}"
+        retained = self.git("rev-parse", branch)
+        self.assertEqual("main", self.git("branch", "--show-current"))
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(retained, self.git("rev-parse", branch))
+        self.assertEqual("1", self.git("rev-list", "--count", f"main..{branch}"))
+
+    def test_failed_publication_before_commit_restores_only_generated_bytes(self):
+        with mock.patch.object(REPOCTL, "deliver", return_value=1):
+            self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual("main", self.git("branch", "--show-current"))
+        self.assertEqual("", self.git("status", "--porcelain"))
+        self.assertEqual(self.main, self.git("rev-parse", "HEAD"))
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(1, self.deliveries)
+
+    def test_out_of_scope_generation_is_preserved_without_commit_or_publication(self):
+        def bad_sync():
+            self.sync()
+            (self.root / "architecture.lock.yaml").write_text("unexpected\n", encoding="utf-8")
+            return 0
+
+        with mock.patch.object(REPOCTL, "roadmap_sync", side_effect=bad_sync):
+            self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(0, self.deliveries)
+        self.assertEqual(self.main, self.git("rev-parse", "HEAD"))
+        self.assertIn("architecture.lock.yaml", self.git("status", "--porcelain"))
+
+    def test_advancing_main_does_not_duplicate_an_open_followup(self):
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        (self.root / "other.txt").write_text("unrelated main change\n", encoding="utf-8")
+        self.commit_main_change()
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(1, self.deliveries)
+        branches = self.git("for-each-ref", "--format=%(refname)", "refs/heads/automation/")
+        self.assertEqual(1, len(branches.splitlines()))
+        self.assertEqual("main", self.git("branch", "--show-current"))
+        self.assertEqual(self.main, self.git("rev-parse", "HEAD"))
+
+    def test_closed_followup_is_not_recreated_in_a_loop(self):
+        self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+        self.prs[0]["state"] = "CLOSED"
+        self.assertEqual(2, REPOCTL._roadmap_followup_after_merge())
+        self.assertEqual(1, self.deliveries)
+        self.assertEqual("main", self.git("branch", "--show-current"))
+
+
+class RoadmapSignedPostMergeTests(unittest.TestCase):
+    """Exercise the real Git/GPG/bundle verifier; only GitHub transport is faked."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests import test_post_merge_verify
+
+        cls.fixture_type = test_post_merge_verify.PostMergeVerifyTests
+        cls.verifier = test_post_merge_verify.post_merge_verify
+        cls.fixture_type.setUpClass()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.fixture_type.tearDownClass()
+
+    def setUp(self):
+        self.fixture = self.fixture_type(methodName="runTest")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.tearDown)
+        self.reference = (
+            f".context/evidence/post-merge/{self.fixture.merge}.json"
+        )
+        self.proof = self.verifier.write_post_merge_proof(
+            self.fixture.root, pr_number=171, snapshot=self.fixture.snapshot,
+            qualification=self.fixture.qualification,
+        )
+
+    def project(self, *, snapshot=None):
+        policy = RoadmapSyncTests()._runtime_policy()
+        requirements = policy["milestones"][0]["requirements"]
+        requirements["implementation_paths"] = ["base.txt"]
+        requirements["runtime_evidence"] = []
+        requirements["post_merge_evidence"] = [self.reference]
+        with mock.patch.object(
+            ROADMAP, "_fresh_post_merge_snapshot",
+            return_value=self.fixture.snapshot if snapshot is None else snapshot,
+        ) as read:
+            projection = ROADMAP.derive_projection(
+                policy,
+                {99: {"state": "closed", "state_reason": "completed"}},
+                root=self.fixture.root,
+                qualification_gates={"governance": "PASS"},
+                effective_capabilities={"tools": {}},
+                head=self.fixture.git("rev-parse", "HEAD"),
+                tree=self.fixture.git("rev-parse", "HEAD^{tree}"),
+            )
+        read.assert_called_once_with(171)
+        return projection["milestones"][0]
+
+    def test_real_signed_proof_with_fresh_github_allows_proven(self):
+        result = self.project()
+        self.assertEqual("PROVEN", result["status"], result["missing_evidence"])
+        self.assertIn(self.reference, result["evidence"])
+        # Every projection requests a new snapshot, never a saved GitHub flag.
+        self.assertEqual("PROVEN", self.project()["status"])
+
+    def test_unsigned_complete_proof_cannot_advance_projection(self):
+        self.proof.with_suffix(".json.sig").unlink()
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("signature is missing", " ".join(result["missing_evidence"]))
+
+    def test_invalid_signature_cannot_advance_projection(self):
+        self.proof.with_suffix(".json.sig").write_bytes(b"not a signature")
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("signature did not verify", " ".join(result["missing_evidence"]))
+
+    def test_other_valid_signer_cannot_advance_projection(self):
+        signed = subprocess.run(
+            [
+                "gpg", "--batch", "--yes", "--local-user",
+                self.fixture.untrusted_fingerprint,
+                "--output", str(self.proof.with_suffix(".json.sig")),
+                "--detach-sign", str(self.proof),
+            ],
+            text=True, capture_output=True, check=False, timeout=30,
+        )
+        self.assertEqual(0, signed.returncode, signed.stderr)
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("historical signing authority", " ".join(result["missing_evidence"]))
+
+    def test_tampered_signed_proof_cannot_advance_projection(self):
+        value = json.loads(self.proof.read_text(encoding="utf-8"))
+        value["merge_signature"]["fingerprint"] = "f" * 40
+        self.proof.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("signature did not verify", " ".join(result["missing_evidence"]))
+
+    def test_wrong_fresh_pr_or_head_cannot_advance_projection(self):
+        for mutation in ({"number": 172}, {"head_sha": "f" * 40}):
+            with self.subTest(mutation=mutation):
+                result = self.project(snapshot={**self.fixture.snapshot, **mutation})
+                self.assertEqual("QUALIFIED", result["status"])
+                self.assertTrue(result["missing_evidence"])
+
+    def test_main_without_merged_change_cannot_advance_projection(self):
+        self.fixture.git("switch", "--detach", self.fixture.base)
+        self.fixture.git("update-ref", "refs/remotes/origin/main", self.fixture.base)
+        self.fixture.git(
+            "update-ref", "refs/heads/main", self.fixture.base,
+            repo=self.fixture.remote,
+        )
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("does not contain", " ".join(result["missing_evidence"]))
+
+    def test_tampered_qualification_bundle_cannot_advance_projection(self):
+        evidence = self.fixture.root / ".context/evidence" / f"{self.fixture.head}.json"
+        evidence.write_bytes(evidence.read_bytes() + b"\n")
+        result = self.project()
+        self.assertEqual("QUALIFIED", result["status"])
+        self.assertIn("differ from trusted witness", " ".join(result["missing_evidence"]))
+
+    def test_unavailable_github_cannot_use_saved_pass(self):
+        with mock.patch.object(
+            ROADMAP, "_fresh_post_merge_snapshot",
+            side_effect=RuntimeError("GitHub unavailable"),
+        ):
+            valid, detail = ROADMAP._post_merge_evidence_result(
+                self.fixture.root, self.reference
+            )
+        self.assertFalse(valid)
+        self.assertIn("GitHub unavailable", detail)
+
+    def prepare_publication_reentry(self):
+        root = self.fixture.root
+        for relative in (
+            ".gitattributes", "scripts/repository_delivery.py",
+            "scripts/delivery_preflight.py", "scripts/runtime_orchestration.py",
+        ):
+            shutil.copyfile(ROOT / relative, root / relative)
+        # The signed fixture's producer exercises the actual capability probe
+        # and records only harmless facts. It never contacts a real GitHub API.
+        (root / "scripts/repoctl.py").write_text(
+            "import hashlib, json, os, subprocess\n"
+            "from pathlib import Path\n"
+            "import delivery_preflight\n"
+            "def _roadmap_followup_after_merge():\n"
+            "    root = Path.cwd()\n"
+            "    head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()\n"
+            "    branch = 'automation/roadmap-sync/reentry-test'\n"
+            "    subprocess.run(['git', 'switch', '-c', branch], check=True, capture_output=True)\n"
+            "    try:\n"
+            "        digest = 'sha256:' + hashlib.sha256((root / 'config/contracts/toolchain-lock.json').read_bytes()).hexdigest()\n"
+            "        proof = delivery_preflight.run_preflight(root, expected_head_sha=head, expected_base_sha=head, expected_branch=branch, required_capabilities=['toolchain-pinned'], capability_parameters={'toolchain-pinned': {'sha256': digest}})\n"
+            "        proof['inherited_merge_context'] = any(k.startswith('REPOCTL_TRUSTED_') for k in os.environ)\n"
+            "        (root / '.context/reentry.json').write_text(json.dumps(proof))\n"
+            "        return 3 if proof['status'] == 'PASS' else 2\n"
+            "    finally:\n"
+            "        subprocess.run(['git', 'switch', 'main'], check=True, capture_output=True)\n",
+            encoding="utf-8",
+        )
+        self.fixture.git("add", ".")
+        # The qualification runner sets commit.gpgsign=false for synthetic
+        # repositories; this fixture specifically requires a signed new main.
+        self.fixture.git("commit", "-S", "-qm", "new signed main producer")
+        current = self.fixture.git("rev-parse", "HEAD")
+        self.fixture.git("verify-commit", current)
+        self.fixture.git("push", "-q", "origin", "main")
+        return current
+
+    def test_new_main_publication_drops_stale_merge_context_only_in_child(self):
+        current = self.prepare_publication_reentry()
+        inherited = {
+            "REPOCTL_TRUSTED_BASE_SHA": self.fixture.base,
+            "REPOCTL_TRUSTED_HEAD_SHA": self.fixture.head,
+            "REPOCTL_TRUSTED_POLICY_ROOT": str(self.fixture.root),
+            "REPOCTL_TRUSTED_TARGET_ROOT": str(self.fixture.root),
+            "REPOCTL_TRUSTED_CONTROLLER": str(self.fixture.root / "scripts/repoctl.py"),
+        }
+        with (
+            mock.patch.object(REPOCTL, "ROOT", self.fixture.root),
+            mock.patch.dict(os.environ, inherited),
+        ):
+            self.assertEqual(3, REPOCTL._roadmap_followup_after_merge())
+            for name, value in inherited.items():
+                self.assertEqual(value, os.environ[name])
+        proof = json.loads((self.fixture.root / ".context/reentry.json").read_text())
+        self.assertEqual("PASS", proof["status"])
+        self.assertEqual(current, proof["source_sha"])
+        self.assertEqual(current, proof["base_sha"])
+        self.assertFalse(proof["inherited_merge_context"])
+        self.assertEqual("main", self.fixture.git("branch", "--show-current"))
+        self.assertEqual("", self.fixture.git("status", "--porcelain"))
+
+    def test_reentry_rejects_hidden_checkout_substitution_before_execution(self):
+        current = self.prepare_publication_reentry()
+        controller = self.fixture.root / "scripts/repoctl.py"
+        controller.write_text(
+            "from pathlib import Path\n"
+            "Path('.context/unsafe-producer').touch()\n", encoding="utf-8",
+        )
+        self.fixture.git("update-index", "--assume-unchanged", "scripts/repoctl.py")
+        self.assertEqual("", self.fixture.git("status", "--porcelain"))
+        with mock.patch.object(REPOCTL, "ROOT", self.fixture.root):
+            self.assertEqual(2, REPOCTL._roadmap_publication_reentry(current, "main"))
+        self.assertFalse((self.fixture.root / ".context/unsafe-producer").exists())
+        self.assertFalse((self.fixture.root / ".context/reentry.json").exists())
+
+    def test_unsafe_reference_cannot_select_another_proof(self):
+        with mock.patch.object(ROADMAP, "_fresh_post_merge_snapshot") as snapshot:
+            for reference in (
+                "/tmp/proof.json",
+                ".context/evidence/post-merge/../elsewhere.json",
+                ".context/evidence/post-merge/not-a-sha.json",
+            ):
+                with self.subTest(reference=reference):
+                    valid, detail = ROADMAP._post_merge_evidence_result(
+                        self.fixture.root, reference
+                    )
+                    self.assertFalse(valid)
+                    self.assertIn("reference is unsafe", detail)
+        snapshot.assert_not_called()
 
 
 if __name__ == "__main__":

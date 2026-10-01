@@ -6,22 +6,34 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import yaml
-
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = "config/contracts/work-package-policy.yaml"
 REQUIRED_FIELDS = (
-    "id", "milestone", "tracker_issue", "work_item_issue", "objective",
-    "scope", "dependencies", "acceptance", "execution", "review",
-    "completion", "exit_criteria",
+    "id",
+    "milestone",
+    "tracker_issue",
+    "work_item_issue",
+    "objective",
+    "scope",
+    "dependencies",
+    "acceptance",
+    "execution",
+    "review",
+    "completion",
+    "exit_criteria",
 )
 SCOPE_FIELDS = ("allowed_paths", "forbidden_paths")
 ACCEPTANCE_FIELDS = (
-    "contracts", "qualification_gates", "runtime_evidence", "tests",
+    "contracts",
+    "qualification_gates",
+    "runtime_evidence",
+    "tests",
     "qce_capabilities",
 )
 EXECUTION_FIELDS = ("preflight_required", "runtime_required", "recovery_required")
@@ -82,7 +94,9 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         "qualification_authority": "config/contracts/qualification-execution-policy.yaml",
     }
     if set(value) != set(expected_header) | {"validation"}:
-        raise WorkPackageError("WorkPackagePolicy has missing or unknown top-level fields")
+        raise WorkPackageError(
+            "WorkPackagePolicy has missing or unknown top-level fields"
+        )
     for key, expected in expected_header.items():
         if type(value.get(key)) is not type(expected) or value[key] != expected:
             raise WorkPackageError(f"WorkPackagePolicy.{key} is invalid")
@@ -144,7 +158,9 @@ def _nonempty_text(value: object, label: str, errors: list[str], *, limit: int) 
         or len(value) > limit
         or any(ord(char) < 32 for char in value)
     ):
-        errors.append(f"{label} must be nonempty single-line text of at most {limit} characters")
+        errors.append(
+            f"{label} must be nonempty single-line text of at most {limit} characters"
+        )
         return ""
     return value
 
@@ -190,25 +206,31 @@ def _safe_path(
         errors.append(f"{label} must be a repository-relative path")
         return ""
     parts = value.split("/")
-    if any(part in ("", ".", "..") for part in parts) or parts[0] == ".git" or (parts[0] == ".context" and not allow_context):
+    if (
+        any(part in ("", ".", "..") for part in parts)
+        or parts[0] == ".git"
+        or (parts[0] == ".context" and not allow_context)
+    ):
         errors.append(f"{label} contains unsafe path components")
         return ""
-    if any(any(char in part for char in "*?[]") for part in parts):
-        if (
-            not subtree
-            or parts[-1] != "**"
-            or len(parts) < 3
-            or any(any(char in part for char in "*?[]") for part in parts[:-1])
-        ):
-            errors.append(f"{label} has an unbounded or unsupported path pattern")
-            return ""
+    if any(any(char in part for char in "*?[]") for part in parts) and (
+        not subtree
+        or parts[-1] != "**"
+        or len(parts) < 3
+        or any(any(char in part for char in "*?[]") for part in parts[:-1])
+    ):
+        errors.append(f"{label} has an unbounded or unsupported path pattern")
+        return ""
     return value
 
 
-def _patterns(value: object, label: str, errors: list[str], *, nonempty: bool) -> list[str]:
+def _patterns(
+    value: object, label: str, errors: list[str], *, nonempty: bool
+) -> list[str]:
     values = _string_list(value, label, errors, nonempty=nonempty)
     result = [
-        path for index, raw in enumerate(values)
+        path
+        for index, raw in enumerate(values)
         if (path := _safe_path(raw, f"{label}[{index}]", errors, subtree=True))
     ]
     return result
@@ -235,10 +257,11 @@ def _known_qce_capabilities(roadmap: Mapping[str, Any]) -> set[str]:
 def _validate_contract_path(path: str, root: Path, errors: list[str]) -> None:
     if not (
         path == "architecture.lock.yaml"
-        or path.startswith("config/contracts/")
-        or path.startswith("config/infrastructure/")
+        or path.startswith(("config/contracts/", "config/infrastructure/"))
     ):
-        errors.append(f"acceptance.contracts: {path} is outside canonical contract roots")
+        errors.append(
+            f"acceptance.contracts: {path} is outside canonical contract roots"
+        )
         return
     candidate = root / path
     try:
@@ -265,9 +288,15 @@ def _validate_relations(
     if expected_milestone is not None and milestone != expected_milestone:
         errors.append("milestone does not match the requested milestone")
     items = roadmap.get("milestones")
-    matches = [
-        item for item in items if isinstance(item, dict) and item.get("id") == milestone
-    ] if isinstance(items, list) else []
+    matches = (
+        [
+            item
+            for item in items
+            if isinstance(item, dict) and item.get("id") == milestone
+        ]
+        if isinstance(items, list)
+        else []
+    )
     if len(matches) != 1:
         errors.append(f"milestone {milestone} is not unique in RoadmapPolicy")
         return
@@ -275,7 +304,9 @@ def _validate_relations(
     if type(tracker) is not int or tracker <= 0:
         errors.append("tracker_issue must be a positive issue number")
     elif tracker != matches[0].get("tracker"):
-        errors.append(f"tracker_issue does not match RoadmapPolicy milestone {milestone}")
+        errors.append(
+            f"tracker_issue does not match RoadmapPolicy milestone {milestone}"
+        )
     issue = package.get("work_item_issue")
     if type(issue) is not int or issue <= 0:
         errors.append("work_item_issue must be a positive issue number")
@@ -315,7 +346,9 @@ def _validate_acceptance(
             if gate not in known_gates:
                 errors.append(f"acceptance.qualification_gates: unknown gate {gate}")
 
-    tests = _string_list(acceptance.get("tests"), "acceptance.tests", errors, nonempty=True)
+    tests = _string_list(
+        acceptance.get("tests"), "acceptance.tests", errors, nonempty=True
+    )
     for index, raw in enumerate(tests):
         path = _safe_path(raw, f"acceptance.tests[{index}]", errors)
         if path and not path.startswith("tests/"):
@@ -327,26 +360,41 @@ def _validate_acceptance(
     known_capabilities = _known_qce_capabilities(roadmap)
     for capability in capabilities:
         if capability not in known_capabilities:
-            errors.append(f"acceptance.qce_capabilities: unknown capability {capability}")
+            errors.append(
+                f"acceptance.qce_capabilities: unknown capability {capability}"
+            )
 
     evidence = _string_list(
         acceptance.get("runtime_evidence"), "acceptance.runtime_evidence", errors
     )
     for index, raw in enumerate(evidence):
-        path = _safe_path(raw, f"acceptance.runtime_evidence[{index}]", errors, allow_context=True)
-        if path and (not path.startswith(".context/evidence/") or not path.endswith(".json")):
+        path = _safe_path(
+            raw, f"acceptance.runtime_evidence[{index}]", errors, allow_context=True
+        )
+        if path and (
+            not path.startswith(".context/evidence/") or not path.endswith(".json")
+        ):
             errors.append(
                 f"acceptance.runtime_evidence: {path} must be a .context/evidence JSON path"
             )
     if execution.get("runtime_required") is True and not evidence:
-        errors.append("acceptance.runtime_evidence required when execution.runtime_required")
+        errors.append(
+            "acceptance.runtime_evidence required when execution.runtime_required"
+        )
     if execution.get("runtime_required") is False and evidence:
-        errors.append("execution.runtime_required is false but runtime evidence is required")
+        errors.append(
+            "execution.runtime_required is false but runtime evidence is required"
+        )
 
 
 PARAMETER_TYPES = {
-    "positive-integer", "nonempty-string", "pinned-version", "sha256-digest",
-    "tcp-port", "repository-relative-path", "virtualbox-backend",
+    "positive-integer",
+    "nonempty-string",
+    "pinned-version",
+    "sha256-digest",
+    "tcp-port",
+    "repository-relative-path",
+    "virtualbox-backend",
 }
 
 
@@ -371,10 +419,14 @@ def _validate_parameter_value(
             and re.fullmatch(
                 r"[0-9]+\.[0-9]+\.[0-9]+",
                 value,
-            ) is not None
+            )
+            is not None
         )
     elif kind == "sha256-digest":
-        valid = isinstance(value, str) and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+        valid = (
+            isinstance(value, str)
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", value) is not None
+        )
     elif kind == "repository-relative-path":
         valid = bool(_safe_path(value, label, errors, allow_context=True))
         if not valid:
@@ -392,12 +444,20 @@ def _validate_capabilities(
     execution: Mapping[str, Any], qualification: Mapping[str, Any], errors: list[str]
 ) -> None:
     capabilities = _string_list(
-        execution.get("required_capabilities", []), "execution.required_capabilities", errors
+        execution.get("required_capabilities", []),
+        "execution.required_capabilities",
+        errors,
     )
     runtime = qualification.get("runtime_orchestration")
     preflight = qualification.get("work_item_preflight")
-    runtime_registry = runtime.get("capabilities") if isinstance(runtime, dict) else None
-    extra_registry = preflight.get("additional_capabilities") if isinstance(preflight, dict) else None
+    runtime_registry = (
+        runtime.get("capabilities") if isinstance(runtime, dict) else None
+    )
+    extra_registry = (
+        preflight.get("additional_capabilities")
+        if isinstance(preflight, dict)
+        else None
+    )
     if not isinstance(runtime_registry, dict) or not isinstance(extra_registry, dict):
         errors.append("QualificationExecutionPolicy capability registries are invalid")
         return
@@ -417,7 +477,9 @@ def _validate_capabilities(
     for capability in capabilities:
         definition = definitions.get(capability)
         if not isinstance(definition, dict):
-            errors.append(f"execution.required_capabilities: unknown capability {capability}")
+            errors.append(
+                f"execution.required_capabilities: unknown capability {capability}"
+            )
             continue
         required = definition.get("required_parameters", [])
         types = definition.get("parameter_types", {})
@@ -426,23 +488,169 @@ def _validate_capabilities(
             or not all(isinstance(name, str) for name in required)
             or len(set(required)) != len(required)
             or not isinstance(types, dict)
-            or not all(isinstance(name, str) and kind in PARAMETER_TYPES for name, kind in types.items())
+            or not all(
+                isinstance(name, str) and kind in PARAMETER_TYPES
+                for name, kind in types.items()
+            )
             or not set(required) <= set(types)
         ):
-            errors.append(f"QualificationExecutionPolicy metadata invalid for {capability}")
+            errors.append(
+                f"QualificationExecutionPolicy metadata invalid for {capability}"
+            )
             continue
         values = parameters.get(capability, {})
         if not isinstance(values, dict):
-            errors.append(f"execution.capability_parameters.{capability} must be a mapping")
+            errors.append(
+                f"execution.capability_parameters.{capability} must be a mapping"
+            )
             continue
         for name in sorted(set(required) - set(values)):
-            errors.append(f"execution.capability_parameters.{capability}.{name} is required")
+            errors.append(
+                f"execution.capability_parameters.{capability}.{name} is required"
+            )
         for name in sorted(set(values) - set(types), key=str):
-            errors.append(f"execution.capability_parameters.{capability}.{name} is not declared")
+            errors.append(
+                f"execution.capability_parameters.{capability}.{name} is not declared"
+            )
         for name in sorted(set(values) & set(types)):
             _validate_parameter_value(
                 capability, name, values[name], types[name], errors
             )
+
+
+def resolve_dependencies(
+    package: Mapping[str, Any], *, root: Path = ROOT
+) -> list[dict[str, Any]]:
+    """Resolve canonical declarations in dependency order, without reading proofs."""
+    if not isinstance(package, Mapping):
+        raise WorkPackageError("dependencies: package must be a mapping")
+    errors: list[str] = []
+    requested = _string_list(package.get("dependencies"), "dependencies", errors)
+    if errors:
+        raise WorkPackageError("; ".join(errors))
+    if not requested:
+        return []
+    root = Path(root)
+    roadmap = _read_yaml(root / "config/contracts/roadmap-policy.yaml")
+    milestones: dict[str, Mapping[str, Any]] = {}
+    for item in roadmap.get("milestones", []):
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise WorkPackageError("dependencies: invalid canonical milestone")
+        if item["id"] in milestones:
+            raise WorkPackageError("dependencies: ambiguous canonical milestone")
+        milestones[item["id"]] = item
+
+    def permitted_milestones(
+        identifier: str, active: frozenset[str] = frozenset()
+    ) -> set[str]:
+        if identifier in active or identifier not in milestones:
+            raise WorkPackageError("dependencies: unknown or cyclic milestone relation")
+        allowed = {identifier}
+        requirements = milestones[identifier].get("requires", [])
+        if not isinstance(requirements, list) or any(
+            not isinstance(value, str) for value in requirements
+        ):
+            raise WorkPackageError("dependencies: invalid milestone requirements")
+        for required in requirements:
+            allowed.update(permitted_milestones(required, active | {identifier}))
+        return allowed
+
+    registry = root / "config/work-packages"
+    for component in (root, root / "config", registry):
+        if component.is_symlink():
+            raise WorkPackageError(
+                "dependencies: canonical registry contains a symlink"
+            )
+    entries = sorted(registry.glob("*/*.yaml"))
+    if len(entries) > 256:
+        raise WorkPackageError(
+            "dependencies: canonical registry exceeds package budget"
+        )
+    indexed: dict[str, dict[str, Any]] = {}
+    issues: set[int] = set()
+    for path in entries:
+        if (
+            path.parent.is_symlink()
+            or path.is_symlink()
+            or path.stat().st_size > 1_000_000
+        ):
+            raise WorkPackageError("dependencies: canonical package is unsafe")
+        item = _read_yaml(path)
+        identifier = item.get("id")
+        relation_errors: list[str] = []
+        _validate_relations(
+            item,
+            roadmap,
+            relation_errors,
+            expected_issue=None,
+            expected_milestone=path.parent.name,
+        )
+        if (
+            not isinstance(identifier, str)
+            or re.fullmatch(ID_PATTERN, identifier) is None
+            or path.stem != identifier
+            or relation_errors
+        ):
+            raise WorkPackageError(
+                "dependencies: canonical package relation is invalid"
+            )
+        if identifier in indexed or item["work_item_issue"] in issues:
+            raise WorkPackageError(
+                "dependencies: ambiguous package ID or work-item issue"
+            )
+        indexed[identifier] = item
+        issues.add(item["work_item_issue"])
+    identifier = package.get("id")
+    if not isinstance(identifier, str) or re.fullmatch(ID_PATTERN, identifier) is None:
+        raise WorkPackageError("dependencies: invalid source package ID")
+    if identifier in indexed and indexed[identifier] != dict(package):
+        raise WorkPackageError(
+            "dependencies: source differs from its canonical declaration"
+        )
+    # The source may be a newly declared package, while dependencies must already
+    # have unique canonical files. Never recursively call package validation.
+    indexed[identifier] = dict(package)
+    visited: set[str] = set()
+    active: set[str] = set()
+    ordered: list[dict[str, Any]] = []
+
+    def visit(current_id: str) -> None:
+        if current_id in active:
+            raise WorkPackageError("dependencies: cyclic work-package relation")
+        if current_id in visited:
+            return
+        current = indexed.get(current_id)
+        if current is None:
+            raise WorkPackageError(f"dependencies: unregistered package {current_id}")
+        active.add(current_id)
+        declaration_errors: list[str] = []
+        declared = _string_list(
+            current.get("dependencies"), "dependencies", declaration_errors
+        )
+        if declaration_errors:
+            raise WorkPackageError("; ".join(declaration_errors))
+        permitted = permitted_milestones(current.get("milestone"))
+        for dependency in declared:
+            if re.fullmatch(ID_PATTERN, dependency) is None:
+                raise WorkPackageError("dependencies: invalid dependency identifier")
+            candidate = indexed.get(dependency)
+            if candidate is None:
+                raise WorkPackageError(
+                    f"dependencies: unregistered package {dependency}"
+                )
+            if candidate.get("milestone") not in permitted:
+                raise WorkPackageError(
+                    f"dependencies: milestone {candidate.get('milestone')} is not permitted "
+                    f"for {current.get('milestone')}"
+                )
+            visit(dependency)
+        active.remove(current_id)
+        visited.add(current_id)
+        if current_id != identifier:
+            ordered.append(current)
+
+    visit(identifier)
+    return ordered
 
 
 def validate_work_package(
@@ -459,7 +667,9 @@ def validate_work_package(
     try:
         load_policy(root)
         roadmap = _read_yaml(root / "config/contracts/roadmap-policy.yaml")
-        qualification = _read_yaml(root / "config/contracts/qualification-execution-policy.yaml")
+        qualification = _read_yaml(
+            root / "config/contracts/qualification-execution-policy.yaml"
+        )
     except WorkPackageError as exc:
         return [str(exc)]
     item = _mapping(package, "work_package", REQUIRED_FIELDS, errors)
@@ -478,8 +688,12 @@ def validate_work_package(
     )
     _nonempty_text(item.get("objective"), "objective", errors, limit=400)
     scope = _mapping(item.get("scope"), "scope", SCOPE_FIELDS, errors)
-    allowed = _patterns(scope.get("allowed_paths"), "scope.allowed_paths", errors, nonempty=True)
-    forbidden = _patterns(scope.get("forbidden_paths"), "scope.forbidden_paths", errors, nonempty=False)
+    allowed = _patterns(
+        scope.get("allowed_paths"), "scope.allowed_paths", errors, nonempty=True
+    )
+    forbidden = _patterns(
+        scope.get("forbidden_paths"), "scope.forbidden_paths", errors, nonempty=False
+    )
     for pattern in sorted(set(allowed) & set(forbidden)):
         errors.append(f"scope pattern {pattern} is both allowed and forbidden")
 
@@ -488,8 +702,17 @@ def validate_work_package(
         if re.fullmatch(ID_PATTERN, dependency) is None or dependency == identifier:
             errors.append(f"dependencies: invalid or self-referential ID {dependency}")
 
+    if dependencies and not any(error.startswith("dependencies") for error in errors):
+        try:
+            resolve_dependencies(item, root=root)
+        except (WorkPackageError, OSError, TypeError, ValueError) as exc:
+            errors.append(str(exc))
+
     execution = _mapping(
-        item.get("execution"), "execution", EXECUTION_FIELDS, errors,
+        item.get("execution"),
+        "execution",
+        EXECUTION_FIELDS,
+        errors,
         optional_fields=EXECUTION_OPTIONAL_FIELDS,
     )
     for field in EXECUTION_FIELDS:
@@ -497,18 +720,25 @@ def validate_work_package(
             errors.append(f"execution.{field} must be boolean")
     if execution.get("preflight_required") is not True:
         errors.append("execution.preflight_required must be true")
-    if execution.get("recovery_required") is True and execution.get("runtime_required") is not True:
+    if (
+        execution.get("recovery_required") is True
+        and execution.get("runtime_required") is not True
+    ):
         errors.append("execution.recovery_required requires execution.runtime_required")
     _validate_capabilities(execution, qualification, errors)
 
-    acceptance = _mapping(item.get("acceptance"), "acceptance", ACCEPTANCE_FIELDS, errors)
+    acceptance = _mapping(
+        item.get("acceptance"), "acceptance", ACCEPTANCE_FIELDS, errors
+    )
     _validate_acceptance(acceptance, execution, root, roadmap, qualification, errors)
 
     review = _mapping(item.get("review"), "review", REVIEW_FIELDS, errors)
     for field in REVIEW_FIELDS:
         if review.get(field) != "required":
             errors.append(f"review.{field} must be required")
-    completion = _mapping(item.get("completion"), "completion", COMPLETION_FIELDS, errors)
+    completion = _mapping(
+        item.get("completion"), "completion", COMPLETION_FIELDS, errors
+    )
     if completion.get("post_merge_verification") is not True:
         errors.append("completion.post_merge_verification must be true")
 
@@ -518,14 +748,18 @@ def validate_work_package(
 
     if changed_paths is not None:
         if isinstance(changed_paths, (str, bytes)):
-            errors.append("scope.changed_paths must be a sequence of repository-relative paths")
+            errors.append(
+                "scope.changed_paths must be a sequence of repository-relative paths"
+            )
         else:
             for index, raw in enumerate(changed_paths):
                 path = _safe_path(raw, f"scope.changed_paths[{index}]", errors)
                 if not path:
                     continue
                 if not any(_matches(path, pattern) for pattern in allowed):
-                    errors.append(f"scope.changed_paths: {path} is outside allowed_paths")
+                    errors.append(
+                        f"scope.changed_paths: {path} is outside allowed_paths"
+                    )
                 if any(_matches(path, pattern) for pattern in forbidden):
                     errors.append(f"scope.changed_paths: {path} is forbidden")
     return errors
@@ -540,8 +774,10 @@ def work_package_status(
     expected_milestone: str | None = None,
 ) -> dict[str, Any]:
     """Return declaration status, explicitly excluding execution and proof claims."""
-    paths = changed_paths if isinstance(changed_paths, (str, bytes)) else (
-        None if changed_paths is None else list(changed_paths)
+    paths = (
+        changed_paths
+        if isinstance(changed_paths, (str, bytes))
+        else (None if changed_paths is None else list(changed_paths))
     )
     errors = validate_work_package(
         package,
@@ -550,7 +786,7 @@ def work_package_status(
         expected_issue=expected_issue,
         expected_milestone=expected_milestone,
     )
-    scope_errors = any(error.startswith("scope.") or error.startswith("scope ") for error in errors)
+    scope_errors = any(error.startswith(("scope.", "scope ")) for error in errors)
     return {
         "status": "INVALID" if errors else "VALID",
         "scope_status": (
@@ -602,4 +838,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

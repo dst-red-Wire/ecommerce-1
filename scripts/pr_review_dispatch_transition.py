@@ -391,15 +391,9 @@ def dispatch_controller_result(
         "transport": "EXTERNAL" if transport is not None else "UNAVAILABLE",
         "verdict_authority": False,
     }
-    if (
-        status == "BLOCKED"
-        and record.get("reason") == "BLOCKED_EXTERNAL_REVIEW_TRANSPORT"
-    ):
-        controller["state"] = "BLOCKED_EXTERNAL_REVIEW_TRANSPORT"
-        controller["next_action"] = "CONNECT_EXTERNAL_CHATGPT_REVIEW_TRANSPORT"
-        controller.setdefault("blockers", []).append(
-            "ChatGPT review transport is unavailable; exact handoff is ready in review_request"
-        )
+    # Missing transport is a handoff boundary, not a qualification failure.
+    # Keep the exact-base controller's CODE/SECURITY request and next_action.
+    # The non-authoritative dispatch record exposes transport availability.
     return controller
 
 
@@ -524,9 +518,7 @@ def transition(
             result["state"] = f"{dispatch.get('kind')}_FAILED"
             result["next_action"] = "RESOLVE_CHATGPT_FINDINGS"
             return 1, result
-        return (
-            1 if result.get("state") == "BLOCKED_EXTERNAL_REVIEW_TRANSPORT" else 0
-        ), result
+        return 0, result
     raise ReviewTransitionError("bounded review transition did not converge")
 
 

@@ -7672,7 +7672,86 @@ def vulnerability_evaluate_command(
 cve_evaluate_command = vulnerability_evaluate_command
 
 
+def _roadmap_publication_reentry(main_sha: str, default_branch: str) -> int:
+    """Start a new publication producer after merge without carrying merge authority."""
+    if re.fullmatch(r"[0-9a-f]{40}", main_sha) is None or default_branch != "main":
+        return fail("roadmap publication requires exact canonical main")
+    environment = {
+        name: value for name, value in os.environ.items()
+        if not name.startswith(("REPOCTL_TRUSTED_", "GIT_", "PYTHON"))
+    }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    # The bootstrap executes only the wrapper blob owned by the signed new
+    # main. That stdlib verifier checks all checkout bytes, including hidden
+    # assume-unchanged substitutions, before importing the publication code.
+    bootstrap = r"""
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+
+root = Path(sys.argv[1])
+sha = sys.argv[2]
+env = dict(os.environ, PATH="/usr/bin:/bin:/usr/local/bin",
+           GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+           GIT_NO_REPLACE_OBJECTS="1")
+git = ["/usr/bin/git", "-c", "core.fsmonitor=false", "-c",
+       "core.hooksPath=/dev/null", "-c", "gpg.program=/usr/bin/gpg", "-C", str(root)]
+def read(*args):
+    value = subprocess.run([*git, *args], env=env, capture_output=True, check=False, timeout=30)
+    if value.returncode:
+        raise RuntimeError("roadmap publication Git verification failed")
+    return value.stdout
+try:
+    if (read("rev-parse", "HEAD").decode().strip() != sha
+        or read("rev-parse", "origin/main").decode().strip() != sha
+        or read("branch", "--show-current").decode().strip() != "main"
+        or read("status", "--porcelain", "--untracked-files=all").strip()
+        or read("ls-remote", "--heads", "origin", "refs/heads/main").decode().split()
+           != [sha, "refs/heads/main"]):
+        raise RuntimeError("roadmap publication main binding changed")
+    read("verify-commit", sha)
+    wrapper = root / "scripts/repository_delivery.py"
+    entry = read("ls-tree", "-z", sha, "--", "scripts/repository_delivery.py")
+    metadata, separator, name = entry.partition(b"\t")
+    fields = metadata.split()
+    if (not separator or name != b"scripts/repository_delivery.py\0"
+        or len(fields) != 3 or fields[0] not in (b"100644", b"100755")
+        or fields[1] != b"blob"):
+        raise RuntimeError("roadmap publication verifier is not a regular Git blob")
+    source = read("cat-file", "blob", fields[2].decode("ascii"))
+    api = {"__name__": "roadmap_publication_verifier", "__file__": str(wrapper)}
+    exec(compile(source, str(wrapper), "exec"), api)
+    api["_native_checkout_root"](root, environment=env)
+    api["_native_verify_base_tree"](root, sha, environment=env)
+    if api["_native_clean_checkout"](root, environment=env) != (sha, "main"):
+        raise RuntimeError("roadmap publication source changed during verification")
+    sys.path.insert(0, str(root / "scripts"))
+    with tempfile.TemporaryDirectory(prefix="roadmap-publication-import-") as cache:
+        # -B prevents writes; this separate empty prefix also prevents reads
+        # from mutable ignored bytecode caches beside the verified sources.
+        sys.pycache_prefix = cache
+        import repoctl
+        raise SystemExit(repoctl._roadmap_followup_after_merge())
+except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+    print("FAIL roadmap publication reentry: " + str(exc), file=sys.stderr)
+    raise SystemExit(2)
+"""
+    return run(
+        [sys.executable, "-I", "-B", "-c", bootstrap, str(ROOT), main_sha],
+        env=environment, check=False,
+    ).returncode
+
+
 def _roadmap_followup_after_merge() -> int:
+    """Publish one scoped follow-up and remain nonterminal until it is merged."""
+    import issue_lifecycle
+
+    if any(name.startswith("REPOCTL_TRUSTED_") for name in os.environ):
+        # This new producer may run only after HEAD became signed current main.
+        # The child validates that boundary before importing current source.
+        return _roadmap_publication_reentry(git("rev-parse", "HEAD").strip(), "main")
     check_rc = roadmap_check(quiet=True)
     if check_rc == 0:
         print("PASS finish-pr: roadmap already synchronized")
@@ -7680,45 +7759,149 @@ def _roadmap_followup_after_merge() -> int:
     if check_rc != 1:
         return fail(f"roadmap-check failed before synchronization with exit code {check_rc}")
 
-    main_sha = git("rev-parse", "HEAD").strip()
-    if not re.fullmatch(r"[0-9a-f]{40}", main_sha):
-        return fail("roadmap follow-up requires exact main SHA")
-
-    policy = repository_delivery_policy()
-    default_branch = str(policy["default_branch"])
-    if git("branch", "--show-current").strip() != default_branch:
-        return fail("roadmap follow-up requires the default branch checkout")
-
-    followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
-    local_exists = run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
-        check=False,
-    ).returncode == 0
-    remote_exists = run(
-        ["git", "show-ref", "--verify", "--quiet", f"refs/remotes/origin/{followup_branch}"],
-        check=False,
-    ).returncode == 0
-
-    if local_exists:
-        run(["git", "switch", followup_branch])
-    elif remote_exists:
-        run(["git", "switch", "-c", followup_branch, "--track", f"origin/{followup_branch}"])
-    else:
-        run(["git", "switch", "-c", followup_branch, f"origin/{default_branch}"])
-
-    if roadmap_sync():
-        return 1
-    if roadmap_check(quiet=True):
-        return fail("roadmap-sync did not converge")
-
-    title = f"chore: synchronize roadmap after {main_sha[:12]}"
-    if deliver(default_branch, title, title):
-        return 1
-
-    run(["git", "switch", default_branch])
-    run(["git", "merge", "--ff-only", f"origin/{default_branch}"])
-    print(f"PASS finish-pr: roadmap synchronization PR published from {followup_branch}")
-    return 0
+    document = "docs/project/MASTER_EXECUTION_PLAN.md"
+    default_branch = str(repository_delivery_policy()["default_branch"])
+    switched = False
+    generated_document: bytes | None = None
+    result = 1
+    try:
+        main_sha = git("rev-parse", "HEAD").strip()
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", main_sha) is None
+            or git("branch", "--show-current").strip() != default_branch
+            or git("rev-parse", f"origin/{default_branch}").strip() != main_sha
+            or _remote_branch_head(default_branch) != main_sha
+            or git("status", "--porcelain", "--untracked-files=all").strip()
+        ):
+            raise RuntimeError("roadmap follow-up requires clean exact current main")
+        # Resolve the intended scope before creating a branch or a commit.
+        # The ordinary selector rejects zero or multiple canonical packages.
+        marker = _delivery_pr_work_item_marker([document])
+        relation = issue_lifecycle.parse_pr_work_item_marker(marker)
+        package_path = relation["work_package_path"]
+        followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
+        gh = shutil.which("gh") or shutil.which("gh.exe")
+        if not gh:
+            raise RuntimeError("roadmap follow-up requires GitHub CLI")
+        open_prs = json.loads(output([
+            gh, "pr", "list", "--base", default_branch, "--state", "open",
+            "--limit", "1000", "--json",
+            "number,state,headRefOid,baseRefName,headRefName",
+        ]))
+        if (
+            not isinstance(open_prs, list) or len(open_prs) >= 1000
+            or any(not isinstance(pr, dict) for pr in open_prs)
+        ):
+            raise RuntimeError("cannot establish complete open roadmap follow-up inventory")
+        pending = [pr for pr in open_prs if str(pr.get("headRefName", "")).startswith(
+            "automation/roadmap-sync/"
+        )]
+        if len(pending) > 1:
+            raise RuntimeError("multiple roadmap follow-up PRs require reconciliation")
+        if pending and pending[0].get("headRefName") != followup_branch:
+            prior = pending[0]
+            if (
+                prior.get("state") != "OPEN" or prior.get("baseRefName") != default_branch
+                or re.fullmatch(r"[0-9a-f]{40}", str(prior.get("headRefOid"))) is None
+                or _remote_branch_head(prior["headRefName"]) != prior["headRefOid"]
+            ):
+                raise RuntimeError("pending roadmap follow-up identity is invalid")
+            print(f"ROADMAP_FOLLOWUP_PENDING pr={prior['number']} branch={prior['headRefName']}")
+            return 3
+        probe = run(
+            ["git", "show-ref", "--verify", "--quiet", f"refs/heads/{followup_branch}"],
+            check=False, capture=True,
+        )
+        if probe.returncode not in {0, 1}:
+            raise RuntimeError("cannot prove local roadmap follow-up branch state")
+        remote_head = _remote_branch_head(followup_branch)
+        if remote_head:
+            run(["git", "fetch", "origin", f"refs/heads/{followup_branch}"])
+            if git("rev-parse", "FETCH_HEAD").strip() != remote_head:
+                raise RuntimeError("roadmap follow-up remote head changed during fetch")
+        if probe.returncode == 0:
+            run(["git", "switch", followup_branch])
+        else:
+            run(["git", "switch", "-c", followup_branch, remote_head or main_sha])
+        switched = True
+        followup_head = git("rev-parse", "HEAD").strip()
+        for ancestor in filter(None, (main_sha, remote_head)):
+            if run(
+                ["git", "merge-base", "--is-ancestor", ancestor, followup_head],
+                check=False, capture=True,
+            ).returncode:
+                raise RuntimeError("roadmap follow-up branch diverged; preserving it for recovery")
+        existing_paths = git(
+            "diff", "--no-ext-diff", "--no-renames", "--name-only", main_sha, "HEAD", "--"
+        ).splitlines()
+        if set(existing_paths) - {document}:
+            raise RuntimeError("existing roadmap follow-up contains files outside its exact scope")
+        # Probe the clean source before generation. publish repeats preflight
+        # against the committed final diff before qualification or any push.
+        if preflight_command(package_path, main_sha):
+            raise RuntimeError("roadmap follow-up preflight did not PASS")
+        if roadmap_sync():
+            raise RuntimeError("roadmap synchronization failed")
+        if roadmap_check(quiet=True):
+            raise RuntimeError("roadmap-sync did not converge")
+        generated_document = (ROOT / document).read_bytes()
+        changed = git(
+            "diff", "--no-ext-diff", "--no-renames", "--name-only", main_sha, "--"
+        ).splitlines()
+        untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+        if changed != [document] or untracked:
+            raise RuntimeError("generated roadmap follow-up must change exactly its declared document")
+        if _delivery_pr_work_item_marker(changed) != marker:
+            raise RuntimeError("generated roadmap follow-up changed its canonical work package")
+        prs = json.loads(output([
+            gh, "pr", "list", "--head", followup_branch, "--base", default_branch,
+            "--state", "all", "--limit", "2", "--json",
+            "number,state,headRefOid,baseRefName,headRefName",
+        ]))
+        if not isinstance(prs, list) or len(prs) > 1:
+            raise RuntimeError("roadmap follow-up PR identity is ambiguous")
+        if prs:
+            pr = prs[0]
+            if (
+                not isinstance(pr, dict) or pr.get("state") != "OPEN"
+                or pr.get("headRefName") != followup_branch
+                or pr.get("baseRefName") != default_branch
+                or pr.get("headRefOid") != followup_head
+                or remote_head != followup_head
+                or git("status", "--porcelain", "--untracked-files=all").strip()
+            ):
+                raise RuntimeError("existing roadmap follow-up PR is closed or has a different exact source")
+            print(f"ROADMAP_FOLLOWUP_PENDING pr={pr['number']} branch={followup_branch}")
+        else:
+            title = f"chore: synchronize roadmap after {main_sha[:12]}"
+            if deliver(default_branch, title, title):
+                raise RuntimeError("roadmap follow-up delivery incomplete; retained branch is resumable")
+            print(f"ROADMAP_FOLLOWUP_PENDING branch={followup_branch}")
+        result = 3
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        result = fail(str(exc))
+    finally:
+        if switched:
+            dirty = git("status", "--porcelain", "--untracked-files=all").strip()
+            if dirty and generated_document is not None:
+                changed = git("diff", "--name-only", "HEAD", "--").splitlines()
+                untracked = git("ls-files", "--others", "--exclude-standard").splitlines()
+                # Restore only this invocation's still-uncommitted generated
+                # bytes. Retained commits stay attached to the deterministic
+                # branch so interrupted publication resumes without a new one.
+                if (
+                    changed == [document] and not untracked
+                    and (ROOT / document).read_bytes() == generated_document
+                ):
+                    run(["git", "restore", "--staged", "--worktree", "--", document])
+                    dirty = git("status", "--porcelain", "--untracked-files=all").strip()
+            if dirty:
+                result = fail("roadmap follow-up left unexpected changes; preserved checkout for recovery")
+            else:
+                run(["git", "switch", default_branch])
+                if git("rev-parse", "HEAD").strip() != main_sha:
+                    result = fail("default branch changed during roadmap follow-up")
+    return result
 
 
 def git_sync() -> int:
@@ -13035,8 +13218,13 @@ def _delivery_pr_work_item_preflight(
             "PR/work-item/tracker relation invalid: "
             + "; ".join(relation.get("errors") or ["exact base/head readback changed"])
         )
+    import issue_completion
+
+    dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
+    if dependencies["status"] != "PASS":
+        raise RuntimeError("work package dependencies are not verified: "
+                           + "; ".join(dependencies.get("errors", [])))
     package_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-    policy = ruby_yaml("config/contracts/qualification-execution-policy.yaml")
     execution = package["execution"]
     preflight = delivery_preflight.run_preflight(
         ROOT,
@@ -13045,7 +13233,6 @@ def _delivery_pr_work_item_preflight(
         expected_branch=snapshot["head_branch"],
         required_capabilities=execution.get("required_capabilities", []),
         capability_parameters=execution.get("capability_parameters", {}),
-        policy=policy,
     )
     if (
         "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != package_digest
@@ -13243,6 +13430,91 @@ def _delivery_exact_bundle_gate(
     }
 
 
+def _delivery_risk_evidence_gate(
+    base_sha: str, head_sha: str, risk: dict, work_item: dict, bundle: dict,
+) -> dict:
+    """Enforce exact-base risk requirements independently of owner approval."""
+    import evidence_bundle
+    import runtime_authority
+
+    classification = risk.get("classification")
+    if classification in {"LOW_RISK", "SENSITIVE"}:
+        # Their existing contract-driven checks remain in the exact bundle gate.
+        return {"status": "PASS", "classification": classification,
+                "runtime": "CONTRACT_DRIVEN", "recovery": "CONTRACT_DRIVEN"}
+    if (
+        classification not in {"PRIVILEGED", "PRODUCTION"}
+        or risk.get("authority") != "repository-policy"
+        or risk.get("controller_source") != "exact-pr-base-sha"
+        or risk.get("policy_source") != "exact-pr-base-sha"
+        or risk.get("base_sha") != base_sha or risk.get("head_sha") != head_sha
+        or risk.get("requirements") != _RISK_CLASS_REQUIREMENTS[classification]
+    ):
+        raise RuntimeError("runtime/recovery requirements lack exact-base risk authority")
+    package, validation, _path = _delivery_package_input(
+        work_item["work_package"], issue=work_item["work_item_issue"],
+        milestone=work_item["milestone"],
+    )
+    if validation["status"] != "VALID":
+        raise RuntimeError("work package changed before risk evidence validation")
+    execution = package["execution"]
+    if execution.get("runtime_required") is not True or execution.get("recovery_required") is not True:
+        raise RuntimeError(
+            f"{classification} requires runtime_required=true and recovery_required=true"
+        )
+    runtime_paths = package["acceptance"].get("runtime_evidence")
+    if not isinstance(runtime_paths, list) or not runtime_paths:
+        raise RuntimeError(f"{classification} requires producer-validated runtime and recovery evidence")
+    manifest_relative = f".context/evidence/{head_sha}/manifest.json"
+    if bundle.get("status") != "PASS" or bundle.get("manifest") != manifest_relative:
+        raise RuntimeError("risk evidence requires the verified exact-SHA bundle")
+    tree_sha = git("rev-parse", "HEAD^{tree}").strip()
+    verified = evidence_bundle.verify_bundle(
+        ROOT, head_sha,
+        expected_identity={"base_sha": base_sha, "head_sha": head_sha, "tree_sha": tree_sha},
+    )
+    manifest_path = evidence_bundle._safe_file(ROOT, manifest_relative)
+    manifest_bytes = manifest_path.read_bytes()
+    if (
+        verified.get("status") != "PASS"
+        or verified.get("manifest_digest") != bundle.get("manifest_digest")
+        or evidence_bundle.digest_bytes(manifest_bytes) != bundle.get("manifest_digest")
+    ):
+        raise RuntimeError("risk evidence bundle changed after verification")
+    manifest = json.loads(manifest_bytes, object_pairs_hook=evidence_bundle._unique_object)
+    entries = {item["path"]: item["sha256"] for item in manifest["runtime_evidence"]}
+    verdicts = []
+    for relative in runtime_paths:
+        if relative not in entries:
+            raise RuntimeError(f"runtime/recovery proof is absent from exact bundle: {relative}")
+        verdict = runtime_authority.verify_runtime_proof(
+            ROOT, package["milestone"], head_sha, relative, recovery_required=True,
+        )
+        if verdict.get("status") != "PASS":
+            raise RuntimeError(
+                f"{classification} runtime/recovery producer validation failed: "
+                + str(verdict.get("reason") or "missing producer verdict")
+            )
+        if (
+            not verdict.get("producer") or verdict.get("head_sha") != head_sha
+            or verdict.get("head_tree_sha") != tree_sha
+            or verdict.get("evidence_path") != relative
+            or verdict.get("evidence_digest") != entries[relative]
+            or evidence_bundle.digest_file(evidence_bundle._safe_file(ROOT, relative)) != entries[relative]
+        ):
+            raise RuntimeError("runtime/recovery producer verdict differs from exact bundled bytes")
+        recovery = verdict.get("recovery")
+        if not isinstance(recovery, dict) or any(
+            recovery.get(phase) != "PASS" for phase in ("capture", "restore", "restore_verification")
+        ):
+            raise RuntimeError("producer-verified capture, restore and restore verification are required")
+        if classification == "PRODUCTION" and verdict.get("environment") != "production":
+            raise RuntimeError("production risk requires a production producer; host/lab proof is insufficient")
+        verdicts.append(verdict)
+    return {"status": "PASS", "classification": classification,
+            "runtime": "PASS", "recovery": "PASS", "producer_verdicts": verdicts}
+
+
 def finish_pr(base: str, *, json_output: bool = False) -> int:
     if json_output:
         return _finish_pr_json(base)
@@ -13424,6 +13696,10 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail("finish-pr bundle lacks independent CODE and SECURITY review references")
 
     risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    try:
+        _delivery_risk_evidence_gate(exact_pr["base_sha"], head, risk, work_item, bundle)
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr risk runtime/recovery gate failed: {exc}")
     owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
     print(
         "PASS finish-pr: deterministic merge risk "
@@ -13519,6 +13795,12 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr final work-item/evidence gate failed: {exc}")
     fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    try:
+        _delivery_risk_evidence_gate(
+            fresh_pr["base_sha"], head, fresh_risk, fresh_work_item, final_bundle
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr final risk runtime/recovery gate failed: {exc}")
     if risk["classification"] != fresh_risk["classification"]:
         return fail(
             "finish-pr risk classification changed during final revalidation; "
@@ -13551,6 +13833,15 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
 
     merge_method = str(policy["merge"]["method"])
     merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
+    try:
+        import post_merge_verify
+
+        post_merge_verify.write_pre_merge_witness(
+            ROOT, pr_number=number, snapshot=fresh_pr,
+            qualification=qualification_payload,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr cannot retain signed pre-merge witness: {exc}")
     merged = run(
         [
             gh,
@@ -13614,7 +13905,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     if cleanup_rc or roadmap_rc:
         phases = _FINISH_PR_PHASES.get()
         if phases is not None:
-            phases["post_merge_result"] = "PENDING" if roadmap_rc == 2 else "FAIL"
+            phases["post_merge_result"] = "PENDING" if roadmap_rc in (2, 3) else "FAIL"
         return fail(
             f"finish-pr merged PR #{number}, but post-merge cleanup or roadmap verification is incomplete"
         )
@@ -13670,7 +13961,7 @@ def _finish_pr_post_merge_tasks() -> tuple[int, int]:
     if phases is not None:
         phases["roadmap_result"] = (
             "PASS" if roadmap_rc == 0 else
-            "PENDING_ROADMAP_PR" if roadmap_rc == 2 else "FAIL"
+            "PENDING_ROADMAP_PR" if roadmap_rc in (2, 3) else "FAIL"
         )
     return cleanup_rc, roadmap_rc
 
@@ -13729,8 +14020,8 @@ def _finish_pr_json(base: str) -> int:
                         elif result["post_merge_result"] != "PASS" or finish_rc:
                             result["next_action"] = "VERIFY_POST_MERGE"
                         else:
-                            result["state"] = "DONE"
-                            result["next_action"] = "NONE"
+                            result["state"] = "VERIFIED"
+                            result["next_action"] = "CLOSE_WORK_ITEM"
                     else:
                         result["merge_result"] = "FAIL" if finish_rc else "UNKNOWN"
                         result["blockers"].append("GitHub does not confirm a merge at the exact initial head")
@@ -13740,7 +14031,7 @@ def _finish_pr_json(base: str) -> int:
             elif finish_rc:
                 result["merge_result"] = "UNKNOWN"
             _emit_pr_loop_result(result, json_output=True)
-            return 0 if finish_rc == 0 and result["post_merge_result"] == "PASS" else 1
+            return 0 if result["state"] == "DONE" else 1
     finally:
         _FINISH_PR_PHASES.reset(phases_token)
         _PR_LOOP_JSON_STDOUT.reset(stdout_token)
@@ -14654,7 +14945,9 @@ def _pr_loop_post_merge(
             result["roadmap_result"] = "FAIL"
             result["blockers"].append(f"roadmap follow-up raised: {exc}")
         else:
-            if roadmap_rc:
+            if roadmap_rc in (2, 3):
+                result["roadmap_result"] = "PENDING_ROADMAP_PR"
+            elif roadmap_rc:
                 result["roadmap_result"] = "FAIL"
             else:
                 actual_check = roadmap_check(quiet=True)
@@ -14671,12 +14964,8 @@ def _pr_loop_post_merge(
         import post_merge_verify
 
         fresh_snapshot = _github_pr_snapshot(gh, name_with_owner, snapshot["number"])
-        proof = post_merge_verify.read_post_merge_proof(
-            ROOT,
-            merge_commit,
-            expected_pr=snapshot["number"],
-            expected_head=snapshot["head_sha"],
-            snapshot=fresh_snapshot,
+        proof = post_merge_verify.recover_post_merge_proof(
+            ROOT, pr_number=snapshot["number"], snapshot=fresh_snapshot,
         )
         if (
             proof.get("status") != "PASS"
@@ -14716,12 +15005,17 @@ def _pr_loop_post_merge(
                 "work-item issue closure is unverified: "
                 + "; ".join(completion.get("errors") or [completion["status"]])
             )
-        if roadmap_check(quiet=True):
-            raise RuntimeError("milestone/roadmap re-evaluation did not PASS after issue closure")
     except (OSError, RuntimeError, ValueError, KeyError) as exc:
         result["state"] = "VERIFIED"
         result["next_action"] = "CLOSE_WORK_ITEM"
         result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if roadmap_check(quiet=True):
+        result["state"] = "VERIFIED"
+        result["roadmap_result"] = "FAIL"
+        result["next_action"] = "FIX_ROADMAP_SYNC"
+        result["blockers"].append("milestone/roadmap re-evaluation did not PASS after issue closure")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     result["state"] = "DONE"
@@ -15112,6 +15406,11 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 },
                 create=not dry_run,
             )
+            if all(_review_result_is_pass(result[kind]) for kind in ("code_review", "security_review")):
+                result["risk_evidence"] = _delivery_risk_evidence_gate(
+                    initial["base_sha"], initial_head_sha, result["risk"],
+                    work_item, result["evidence_bundle"],
+                )
         except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
             result["state"] = "BLOCKED"
             result["next_action"] = "FIX_EVIDENCE_BUNDLE"
@@ -15300,6 +15599,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
             before_merge["base_sha"], initial_head_sha
         )
         refresh_authorities(before_merge)
+        try:
+            result["risk_evidence"] = _delivery_risk_evidence_gate(
+                before_merge["base_sha"], initial_head_sha, result["risk"],
+                work_item, result["evidence_bundle"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            result["state"] = "BLOCKED"
+            result["next_action"] = "FIX_RUNTIME_RECOVERY_EVIDENCE"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         merge_requirements, details = _pr_loop_merge_requirements(
             gh,
             name_with_owner,
@@ -15566,8 +15876,18 @@ def preflight_command(package_arg: str, base_sha: str) -> int:
         )
         if status["status"] != "VALID":
             return _delivery_command_failure("; ".join(status["errors"]))
+        if package.get("dependencies"):
+            import issue_completion
+
+            gh = shutil.which("gh") or shutil.which("gh.exe")
+            if not gh:
+                raise RuntimeError("GitHub CLI required to verify dependencies")
+            _owner, repository = _github_repository_identity(gh)
+            dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
+            if dependencies["status"] != "PASS":
+                raise RuntimeError("work package dependencies are not verified: "
+                                   + "; ".join(dependencies.get("errors", [])))
         package_digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        policy = ruby_yaml("config/contracts/qualification-execution-policy.yaml")
         execution = package["execution"]
         result = delivery_preflight.run_preflight(
             ROOT,
@@ -15576,7 +15896,6 @@ def preflight_command(package_arg: str, base_sha: str) -> int:
             expected_branch=branch,
             required_capabilities=execution.get("required_capabilities", []),
             capability_parameters=execution.get("capability_parameters", {}),
-            policy=policy,
         )
         if (
             hashlib.sha256(path.read_bytes()).hexdigest() != package_digest
@@ -15660,7 +15979,7 @@ def evidence_bundle_command(
 
 
 def post_merge_verify_command(pr_number: int) -> int:
-    """Read a signed post-merge proof with a fresh GitHub PR snapshot."""
+    """Verify or recover a signed proof from a fresh GitHub PR snapshot."""
     import post_merge_verify
 
     try:
@@ -15673,13 +15992,8 @@ def post_merge_verify_command(pr_number: int) -> int:
         snapshot = _github_pr_snapshot(gh, repository, pr_number)
         if snapshot.get("state") != "MERGED":
             raise RuntimeError("GitHub PR is not merged")
-        merge_sha = snapshot.get("merge_commit_sha")
-        proof = post_merge_verify.read_post_merge_proof(
-            ROOT,
-            merge_sha,
-            expected_pr=pr_number,
-            expected_head=snapshot["head_sha"],
-            snapshot=snapshot,
+        proof = post_merge_verify.recover_post_merge_proof(
+            ROOT, pr_number=pr_number, snapshot=snapshot,
         )
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return _delivery_command_failure(f"post-merge verification failed: {exc}")

@@ -16,6 +16,7 @@ scope:
   - config/contracts/work-package-policy.yaml
   - config/work-packages/M7/**
   - docs/engineering/verified-delivery-chain.md
+  - docs/project/MASTER_EXECUTION_PLAN.md
   - scripts/architecture_authority.py
   - scripts/delivery_preflight.py
   - scripts/evidence_bundle.py
@@ -24,6 +25,7 @@ scope:
   - scripts/milestone_plan.py
   - scripts/post_merge_verify.py
   - scripts/repoctl.py
+  - scripts/pr_review_dispatch_transition.py
   - scripts/roadmap_sync.py
   - scripts/runtime_orchestration.py
   - scripts/runtime_authority.py
@@ -31,6 +33,7 @@ scope:
   - scripts/work_package.py
   - tests/test_delivery_preflight.py
   - tests/test_chatgpt_review_authority.py
+  - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
   - tests/test_delivery_supersession.py
   - tests/test_evidence_bundle.py
@@ -40,6 +43,7 @@ scope:
   - tests/test_milestone_plan.py
   - tests/test_post_merge_verify.py
   - tests/test_pr_loop.py
+  - tests/test_pr_review_dispatch_transition.py
   - tests/test_roadmap_sync.py
   - tests/test_runtime_orchestration.py
   - tests/test_runtime_authority.py
@@ -70,6 +74,7 @@ acceptance:
   tests:
   - tests/test_work_package.py
   - tests/test_chatgpt_review_authority.py
+  - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
   - tests/test_delivery_preflight.py
   - tests/test_evidence_bundle.py
@@ -79,6 +84,7 @@ acceptance:
   - tests/test_issue_lifecycle.py
   - tests/test_milestone_plan.py
   - tests/test_pr_loop.py
+  - tests/test_pr_review_dispatch_transition.py
   - tests/test_runtime_orchestration.py
   - tests/test_execution_properties.py
   - tests/test_delivery_supersession.py

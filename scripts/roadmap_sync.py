@@ -363,6 +363,13 @@ def _runtime_evidence_result(
 ) -> tuple[bool, str]:
     path = root / str(declaration["path"])
     relative = path.relative_to(root).as_posix()
+    if declaration.get("proof_type") == "persistent-deployment":
+        # A deployment claim has no authority until a canonical producer can
+        # independently revalidate the persistent runtime identity and state.
+        return False, (
+            "persistent deployment has no registered producer and state verifier: "
+            + relative
+        )
     if not path.is_file():
         return False, f"runtime evidence missing: {relative}"
     try:
@@ -386,12 +393,6 @@ def _runtime_evidence_result(
         return False, f"runtime evidence has wrong SHA or tree: {relative}"
     if evidence.get("environment") not in declaration["environments"]:
         return False, f"runtime evidence has wrong environment: {relative}"
-    if declaration.get("proof_type") == "persistent-deployment" and (
-        evidence.get("deployment_state") != "DEPLOYED"
-        or evidence.get("deployment_persistence") != "persistent"
-        or evidence.get("deployment_verified") is not True
-    ):
-        return False, f"persistent deployment was not verified: {relative}"
     identity = evidence.get("runtime_identity")
     if not isinstance(identity, dict) or any(
         not isinstance(identity.get(field), str) or not identity[field]
@@ -421,31 +422,45 @@ def _runtime_evidence_result(
     return True, relative
 
 
+def _fresh_post_merge_snapshot(pr_number: int) -> dict[str, Any]:
+    """Read GitHub for this invocation; a stored proof never supplies authority."""
+    import repoctl
+
+    gh = shutil.which("gh") or shutil.which("gh.exe")
+    if not gh:
+        raise RuntimeError("fresh post-merge verification requires GitHub CLI")
+    return repoctl._github_pr_snapshot(gh, github_name_with_owner(gh), pr_number)
+
+
 def _post_merge_evidence_result(root: Path, reference: str) -> tuple[bool, str]:
-    """Consume a post-merge verifier result without treating the issue as proof."""
-    path = root / reference
-    if not path.is_file() or path.is_symlink():
-        return False, f"post-merge evidence missing or unsafe: {reference}"
+    """Accept only the canonical signed proof after fresh external verification."""
+    import post_merge_verify
+
+    expected = Path(".context/evidence/post-merge")
+    relative = Path(reference)
+    if relative.parent != expected or re.fullmatch(r"[0-9a-f]{40}\.json", relative.name) is None:
+        return False, f"post-merge evidence reference is unsafe: {reference}"
     try:
-        evidence = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False, f"post-merge evidence malformed: {reference}"
-    if not isinstance(evidence, dict) or any(
-        not isinstance(evidence.get(field), str)
-        or re.fullmatch(r"[0-9a-f]{40}", evidence[field]) is None
-        for field in ("base_sha", "head_sha", "merge_sha", "merge_tree_sha")
-    ):
-        return False, f"post-merge evidence identity is invalid: {reference}"
-    if (
-        evidence["merge_sha"] != Path(reference).stem
-        or evidence.get("status") != "PASS"
-        or evidence.get("signature_verified") is not True
-        or evidence.get("main_contains_change") is not True
-        or evidence.get("qualified_tree_matches") is not True
-        or evidence.get("clean_worktree") is not True
-        or evidence.get("roadmap_sync") != "PASS"
-    ):
-        return False, f"post-merge verification is not PASS: {reference}"
+        # These untrusted fields only select the external PR to query. The
+        # canonical reader verifies the schema, detached signer, retained
+        # qualification/bundle, exact PR/Git identity and current ancestry.
+        hint = post_merge_verify._strict_json(root / relative, label="post-merge proof")
+        pr_number = hint.get("pr")
+        if type(pr_number) is not int or pr_number <= 0:
+            raise post_merge_verify.PostMergeError("post-merge proof PR number is invalid")
+        snapshot = _fresh_post_merge_snapshot(pr_number)
+        post_merge_verify.read_post_merge_proof(
+            root,
+            relative.stem,
+            expected_pr=pr_number,
+            expected_head=snapshot.get("head_sha"),
+            snapshot=snapshot,
+        )
+    except (
+        OSError, UnicodeError, RuntimeError, ValueError, TypeError, KeyError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return False, f"post-merge verification failed: {reference}: {exc}"
     return True, reference
 
 
@@ -837,13 +852,11 @@ def _write_projection(roadmap_policy: dict[str, Any], projection: dict[str, Any]
     return destination
 
 
-def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
-    roadmap_policy = policy()
+def _document_rendering(roadmap_policy: dict[str, Any]) -> tuple[Path, str]:
+    """Render policy-owned documentation without deriving proof status."""
     path = ROOT / str(roadmap_policy["document"])
     if not path.is_file():
         raise RuntimeError(f"roadmap document is missing: {path.relative_to(ROOT)}")
-    states = tracker_states(gh, roadmap_policy)
-    projection = _current_projection(roadmap_policy, states)
     documentation_statuses = {
         str(milestone["id"]): (
             str(milestone["fixed_status"])
@@ -855,6 +868,30 @@ def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any
     expected = render_document(
         path.read_text(encoding="utf-8"), roadmap_policy, documentation_statuses
     )
+    return path, expected
+
+
+def check_document(*, quiet: bool = False) -> int:
+    """Check rendering only, allowing proof verification without recursion.
+
+    This does not create an evidence projection or establish milestone status.
+    Full check/sync remains responsible for fetching GitHub and deriving proofs.
+    """
+    path, expected = _document_rendering(policy())
+    if path.read_text(encoding="utf-8") != expected:
+        if not quiet:
+            print("ROADMAP_DRIFT")
+        return 1
+    if not quiet:
+        print("PASS roadmap document rendering")
+    return 0
+
+
+def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
+    roadmap_policy = policy()
+    path, expected = _document_rendering(roadmap_policy)
+    states = tracker_states(gh, roadmap_policy)
+    projection = _current_projection(roadmap_policy, states)
     return path, expected, projection, roadmap_policy
 
 
@@ -909,7 +946,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["check", "sync"])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--document-only", action="store_true")
     args = parser.parse_args()
+    if args.document_only and args.action != "check":
+        parser.error("--document-only is available only with check")
+    if args.document_only:
+        try:
+            return check_document(quiet=args.quiet)
+        except (RuntimeError, KeyError, ValueError) as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 2
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
         print("FAIL roadmap synchronization requires GitHub CLI", file=sys.stderr)

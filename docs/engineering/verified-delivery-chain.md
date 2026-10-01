@@ -149,3 +149,60 @@ persistent deployment, or recovery cannot authorize a merge. Recovery-required
 work remains blocked until capture, restore and restored-state validation have
 a registered producer. Runtime evidence is kept outside Git and is linked to
 the exact source and bundle by digest.
+
+
+### Roadmap proof consumption and follow-up
+
+Roadmap post-merge references are accepted only through the canonical signed-proof
+reader with a fresh GitHub PR snapshot, the authorized detached signer, retained
+qualification and bundle, exact Git identities and current main ancestry. Stored
+PASS fields provide no authority. Persistent deployment remains incomplete until a
+registered producer can verify its runtime identity and persistent state. The M2.5
+lab producer continues to report `NOT_DEPLOYED`.
+
+The post-merge verifier checks policy-owned roadmap document rendering with
+`roadmap_sync.py check --document-only`, avoiding recursive proof derivation. This
+mode neither writes a projection nor establishes milestone status; the full roadmap
+check still evaluates the proof graph separately.
+
+A document drift may create one deterministic `automation/roadmap-sync/<main-sha>`
+branch. Its only generated change is `docs/project/MASTER_EXECUTION_PLAN.md`, covered
+by the M7 delivery-chain package and work-item #170. The canonical selector must
+resolve exactly one package before branch creation and again for the generated
+diff. Read-only preflight runs before generation, and normal `deliver` preflight
+checks the final committed source before qualification and publication. Publication
+returns `ROADMAP_FOLLOWUP_PENDING` (exit 3); completion waits for its reviewed merge.
+Interrupted delivery retains its named branch for idempotent resumption, restores
+main when the worktree is safe, and never creates a second follow-up for the same
+main. Unexpected changes are preserved and block recovery rather than discarded.
+
+
+When follow-up publication is reached from a trusted merge transition, a separate
+producer restarts from the newly signed current main. It loads the verifier from
+that immutable Git commit, checks the complete checkout against Git blobs and
+rechecks the local and remote main binding before importing publication code.
+Only the child drops the original merge context; the original transition keeps
+its base authority, and the publication child cannot issue a merge verdict. A
+previous open roadmap follow-up also prevents duplicate publication if main moves.
+
+
+### Recovery and external review handoff
+
+The trusted controller retains a detached-signed pre-merge witness before calling
+the forge merge operation. It binds the PR, base, head, tree, qualification identity,
+qualification bytes and evidence-bundle digest. A missing post-merge record can be
+rebuilt only from this authenticated witness and fresh GitHub/Git facts. Existing
+invalid or partial records are never silently overwritten. Parsed JSON, signatures
+and digests consume the same bounded regular-file snapshot.
+
+Historical proof readers can run from a clean feature checkout without executing
+that checkout's roadmap implementation. The initial post-merge writer still
+requires current main and the canonical document check. A successful merge and
+proof return `VERIFIED` / `CLOSE_WORK_ITEM`; only independently verified issue closure
+and roadmap re-evaluation can reach `DONE`.
+
+When external ChatGPT transport is absent, qualification remains `PASS` and the
+CLI preserves `CHATGPT_REVIEW_REQUIRED` with `CHATGPT_CODE_REVIEW`, then
+`CHATGPT_SECURITY_REVIEW` after authenticated CODE evidence. The non-authoritative
+outbox reports unavailable transport separately. No local ChatGPT client or synthetic
+review verdict is required; the exact-base controller remains the only verifier.

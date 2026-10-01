@@ -74,6 +74,7 @@ def controller(
         "head_branch": branch,
         "base": "main",
         "state": "CHATGPT_REVIEW_REQUIRED",
+        "next_action": f"CHATGPT_{kind}_REVIEW",
         "qualification": {"status": "PASS", "head_sha": head, "base_sha": base},
         "code_review": {"status": "MISSING", "head_sha": head},
         "security_review": {"status": "MISSING", "head_sha": head},
@@ -150,8 +151,13 @@ class PRReviewDispatchTransitionTest(TestCase):
                 dispatcher=dispatch,
                 marker_lookup=lambda *_: None,
             )
-        self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
         self.assertEqual("BLOCKED", result["review_dispatch"]["status"])
+        self.assertEqual("CHATGPT_CODE_REVIEW", result["next_action"])
+        self.assertEqual("PASS", result["qualification"]["status"])
+        self.assertEqual("MISSING", result["code_review"]["status"])
+        self.assertEqual("MISSING", result["security_review"]["status"])
+        self.assertFalse(result["review_request"]["verdict_authority"])
         self.assertFalse(result["review_dispatch"]["verdict_authority"])
         request = dispatch.call_args.args[0]
         self.assertEqual(self.binding.base_sha, request["base_sha"])
@@ -328,7 +334,7 @@ class PRReviewDispatchTransitionTest(TestCase):
         settled["qualification"]["source"] = "reused"
         blocked = {
             **settled,
-            "state": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+            "state": "CHATGPT_REVIEW_REQUIRED",
             "review_dispatch": {"status": "BLOCKED", "kind": "CODE"},
         }
         with (
@@ -348,8 +354,8 @@ class PRReviewDispatchTransitionTest(TestCase):
                 legacy_bootstrap_binding=self.legacy_binding_arg,
                 preflight=lambda *_: self.bootstrap_binding,
             )
-        self.assertEqual(1, rc)
-        self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+        self.assertEqual(0, rc)
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
         self.assertEqual(2, trusted.call_count)
         self.assertIs(settled, dispatch.call_args.args[0])
 
@@ -532,8 +538,8 @@ class PRReviewDispatchTransitionTest(TestCase):
                 169,
                 preflight=lambda *_: self.binding,
             )
-        self.assertEqual(1, rc)
-        self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+        self.assertEqual(0, rc)
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
         trusted.assert_called_once()
         dispatch_adapter.assert_called_once()
         self.assertIs(review, dispatch_adapter.call_args.args[0])
@@ -636,8 +642,8 @@ class PRReviewDispatchTransitionTest(TestCase):
                 169,
                 preflight=lambda *_: self.binding,
             )
-        self.assertEqual(1, rc)
-        self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+        self.assertEqual(0, rc)
+        self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
         self.assertEqual(2, trusted.call_count)
         self.assertEqual(
             ["CODE", "SECURITY"],
@@ -688,9 +694,7 @@ class PRReviewDispatchTransitionTest(TestCase):
             self.legacy_binding_arg,
             result["review_dispatch"]["legacy_bootstrap_binding"],
         )
-        self.assertEqual(
-            legacy_handoff, result["review_request"]["handoff"]
-        )
+        self.assertEqual(legacy_handoff, result["review_request"]["handoff"])
 
     def test_stale_bootstrap_opt_in_stops_before_controller_execution(self):
         with (
@@ -754,9 +758,9 @@ class PRReviewDispatchTransitionTest(TestCase):
                     preflight=lambda *_: self.bootstrap_binding,
                 )
             trusted.assert_called_once()
-            self.assertEqual(1, rc)
+            self.assertEqual(0, rc)
             self.assertEqual("PASS", result["qualification"]["status"])
-            self.assertEqual("BLOCKED_EXTERNAL_REVIEW_TRANSPORT", result["state"])
+            self.assertEqual("CHATGPT_REVIEW_REQUIRED", result["state"])
             record = json.loads(
                 Path(result["review_dispatch"]["outbox_path"]).read_text()
             )

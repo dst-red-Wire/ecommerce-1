@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read-only first-class preflight for one exact work item source identity.
 
-The capability registry is QualificationExecutionPolicy. Runtime probes reuse
+The exact base owns the capability registry and executable probe parameters.
+HEAD supplies capability IDs and bounded data only. Runtime probes reuse
 runtime_orchestration.capture/preflight; prepare/restore are never called here.
 """
 
@@ -11,15 +12,14 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
-import shutil
 import socket
 import stat
 import subprocess
 import sys
 import tempfile
-from typing import Mapping
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -32,11 +32,172 @@ except ImportError:
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _CAPACITY = frozenset({"cpu-capacity", "memory-capacity", "disk-capacity"})
+_POLICY_PATH = "config/contracts/qualification-execution-policy.yaml"
+_PARAMETER_TYPES = frozenset(
+    {
+        "positive-integer",
+        "tcp-port",
+        "nonempty-string",
+        "repository-relative-path",
+        "sha256-digest",
+        "pinned-version",
+        "virtualbox-backend",
+    }
+)
+_EXECUTABLE_PARAMETER_KEYS = frozenset(
+    {
+        "command",
+        "commands",
+        "handler",
+        "operations",
+        "requires",
+        "parameters",
+        "timeout_seconds",
+        "output_regex",
+        "environment",
+        "env",
+    }
+)
+_MAX_PARAMETER_INTEGER = 2**63 - 1
+_MAX_PARAMETER_STRING = 4096
+
+
+def load_base_policy(root: Path, expected_base_sha: str) -> dict:
+    """Load registry bytes from the exact base, never the target worktree.
+
+    Trusted wrappers bind their base checkout via the existing root/SHA pair.
+    An ordinary local diagnosis reads the same immutable Git object directly;
+    it creates no trusted execution or review authority.
+    """
+    if _SHA.fullmatch(expected_base_sha) is None:
+        raise ValueError("full exact policy base SHA required")
+    policy_root_value = os.environ.get("REPOCTL_TRUSTED_POLICY_ROOT", "").strip()
+    bound_base = os.environ.get("REPOCTL_TRUSTED_BASE_SHA", "").strip()
+    if any(
+        key.startswith("REPOCTL_TRUSTED_") and value.strip()
+        for key, value in os.environ.items()
+    ):
+        if not policy_root_value or bound_base != expected_base_sha:
+            raise ValueError("trusted policy root and exact base binding required")
+        policy_root = Path(policy_root_value)
+        if not policy_root.is_absolute() or ".." in policy_root.parts:
+            raise ValueError("trusted policy root must be canonical")
+        try:
+            from .capability_bootstrap import read_repository_text
+        except ImportError:
+            from capability_bootstrap import read_repository_text
+        content = read_repository_text(policy_root / _POLICY_PATH, root=policy_root)
+    else:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        }
+        environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_LITERAL_PATHSPECS="1")
+        command = [
+            "/usr/bin/git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(root),
+        ]
+        tree = subprocess.run(
+            [*command, "ls-tree", "-z", expected_base_sha, "--", _POLICY_PATH],
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        metadata, separator, name = tree.stdout.partition(b"\t")
+        fields = metadata.split()
+        if (
+            tree.returncode != 0
+            or not separator
+            or name != _POLICY_PATH.encode() + b"\0"
+            or len(fields) != 3
+            or fields[0] not in {b"100644", b"100755"}
+            or fields[1] != b"blob"
+        ):
+            raise ValueError("base capability policy must be a regular Git blob")
+        blob = subprocess.run(
+            [*command, "cat-file", "blob", fields[2].decode("ascii")],
+            env=environment,
+            capture_output=True,
+            check=False,
+            timeout=15,
+        )
+        if blob.returncode != 0 or len(blob.stdout) > 16 * 1024 * 1024:
+            raise ValueError("base capability policy is unavailable or too large")
+        content = blob.stdout.decode("utf-8")
+    policy = yaml.safe_load(content)
+    if not isinstance(policy, dict):
+        raise TypeError("base capability policy must be a mapping")
+    return policy
+
+
+def _validate_parameters(name: str, schema: object, supplied: object) -> None:
+    if not isinstance(schema, Mapping) or not isinstance(supplied, Mapping):
+        raise TypeError(f"{name}: capability schema and parameters must be mappings")
+    required = schema.get("required_parameters", [])
+    types = schema.get("parameter_types", {})
+    if (
+        not isinstance(required, list)
+        or any(not isinstance(key, str) or not key for key in required)
+        or len(required) != len(set(required))
+        or not isinstance(types, Mapping)
+        or set(types) != set(required)
+        or any(kind not in _PARAMETER_TYPES for kind in types.values())
+        or set(required) & _EXECUTABLE_PARAMETER_KEYS
+    ):
+        raise ValueError(f"{name}: base parameter schema invalid")
+    if set(supplied) != set(required):
+        raise ValueError(f"{name}: parameters differ from the base declaration")
+    for key, value in supplied.items():
+        kind = types[key]
+        if kind == "positive-integer":
+            if type(value) is not int or not 1 <= value <= _MAX_PARAMETER_INTEGER:
+                raise ValueError(f"{name}.{key}: bounded positive integer required")
+        elif kind == "tcp-port":
+            if type(value) is not int or not 1 <= value <= 65535:
+                raise ValueError(f"{name}.{key}: TCP port required")
+        else:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > _MAX_PARAMETER_STRING
+                or any(
+                    ord(character) < 32 or ord(character) == 127 for character in value
+                )
+            ):
+                raise ValueError(f"{name}.{key}: bounded nonempty string required")
+            if kind == "repository-relative-path" and (
+                "\\" in value
+                or PurePosixPath(value).is_absolute()
+                or any(part in ("", ".", "..") for part in value.split("/"))
+            ):
+                raise ValueError(f"{name}.{key}: repository-relative path required")
+            if kind == "sha256-digest" and _DIGEST.fullmatch(value) is None:
+                raise ValueError(f"{name}.{key}: SHA-256 digest required")
+            if (
+                kind == "pinned-version"
+                and re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", value) is None
+            ):
+                raise ValueError(f"{name}.{key}: pinned version required")
+            if kind == "virtualbox-backend" and value not in {"NEM", "NATIVE_VTX"}:
+                raise ValueError(f"{name}.{key}: known backend required")
 
 
 def _git(root: Path, *args: str) -> tuple[int, str]:
     proc = subprocess.run(
-        ["git", *args], cwd=root, text=True, capture_output=True, check=False, timeout=15,
+        ["git", *args],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
     )
     return proc.returncode, proc.stdout.strip()
 
@@ -53,7 +214,11 @@ def _safe_file(root: Path, relative: str) -> Path | None:
     if not isinstance(relative, str) or "\\" in relative or "\x00" in relative:
         return None
     parts = PurePosixPath(relative)
-    if parts.is_absolute() or not relative or any(part in ("", ".", "..") for part in relative.split("/")):
+    if (
+        parts.is_absolute()
+        or not relative
+        or any(part in ("", ".", "..") for part in relative.split("/"))
+    ):
         return None
     candidate = root.joinpath(*parts.parts)
     current = root
@@ -68,22 +233,32 @@ def _safe_file(root: Path, relative: str) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
-def _bounded_command(argv: list[str], timeout: int = 5) -> subprocess.CompletedProcess[str] | None:
+def _bounded_command(
+    argv: list[str], timeout: int = 5
+) -> subprocess.CompletedProcess[str] | None:
     try:
-        return subprocess.run(argv, check=False, text=True, capture_output=True, timeout=timeout)
+        return subprocess.run(
+            argv, check=False, text=True, capture_output=True, timeout=timeout
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return None
 
 
-def _probe_special(root: Path, name: str, parameters: Mapping[str, object], head_sha: str) -> tuple[bool, str]:
+def _probe_special(
+    root: Path, name: str, parameters: Mapping[str, object], head_sha: str
+) -> tuple[bool, str]:
     """Only read host state or verify existing bytes. Never prepare a resource."""
     if name == "packer-runtime":
         version = parameters.get("version")
-        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", version):
+        if not isinstance(version, str) or not re.fullmatch(
+            r"[0-9]+(?:\.[0-9]+){2}", version
+        ):
             return False, "pinned Packer version required"
         proc = _bounded_command(["packer", "version"])
         return (
-            proc is not None and proc.returncode == 0 and bool(re.search(rf"\b{re.escape(version)}\b", proc.stdout)),
+            proc is not None
+            and proc.returncode == 0
+            and bool(re.search(rf"\b{re.escape(version)}\b", proc.stdout)),
             "Packer version unavailable or differs from pin",
         )
     if name == "ssh-identity":
@@ -97,12 +272,19 @@ def _probe_special(root: Path, name: str, parameters: Mapping[str, object], head
         except OSError:
             return False, "SSH identity unavailable"
         return (
-            stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and info.st_mode & 0o077 == 0,
             "SSH identity ownership or permissions invalid",
         )
     if name == "network":
         host, port = parameters.get("host"), parameters.get("port")
-        if not isinstance(host, str) or not host or type(port) is not int or not 1 <= port <= 65535:
+        if (
+            not isinstance(host, str)
+            or not host
+            or type(port) is not int
+            or not 1 <= port <= 65535
+        ):
             return False, "network host and port required"
         try:
             with socket.create_connection((host, port), timeout=3):
@@ -112,7 +294,11 @@ def _probe_special(root: Path, name: str, parameters: Mapping[str, object], head
     if name == "toolchain-pinned":
         expected = parameters.get("sha256")
         path = _safe_file(root, "config/contracts/toolchain-lock.json")
-        if path is None or not isinstance(expected, str) or _DIGEST.fullmatch(expected) is None:
+        if (
+            path is None
+            or not isinstance(expected, str)
+            or _DIGEST.fullmatch(expected) is None
+        ):
             return False, "pinned toolchain digest required"
         if _digest(path) != expected:
             return False, "toolchain digest differs"
@@ -126,12 +312,22 @@ def _probe_special(root: Path, name: str, parameters: Mapping[str, object], head
                 return any(mutable(item) for item in value.values())
             if isinstance(value, list):
                 return any(mutable(item) for item in value)
-            return isinstance(value, str) and value.strip().lower() in {"latest", "main", "master", "*"}
+            return isinstance(value, str) and value.strip().lower() in {
+                "latest",
+                "main",
+                "master",
+                "*",
+            }
+
         return not mutable(document), "mutable toolchain version forbidden"
     if name == "artifact-available":
         relative, expected = parameters.get("path"), parameters.get("sha256")
         path = _safe_file(root, relative) if isinstance(relative, str) else None
-        if path is None or not isinstance(expected, str) or _DIGEST.fullmatch(expected) is None:
+        if (
+            path is None
+            or not isinstance(expected, str)
+            or _DIGEST.fullmatch(expected) is None
+        ):
             return False, "artifact path and digest required"
         return _digest(path) == expected, "artifact missing or digest mismatch"
     if name == "windows-admin":
@@ -144,13 +340,22 @@ def _probe_special(root: Path, name: str, parameters: Mapping[str, object], head
         if os.geteuid() == 0:
             return True, "root identity available"
         proc = _bounded_command(["sudo", "-n", "true"])
-        return proc is not None and proc.returncode == 0, "noninteractive sudo unavailable"
+        return (
+            proc is not None and proc.returncode == 0,
+            "noninteractive sudo unavailable",
+        )
     if name == "virtualbox-backend":
         relative, expected, backend = (
-            parameters.get("evidence_path"), parameters.get("sha256"), parameters.get("backend"),
+            parameters.get("evidence_path"),
+            parameters.get("sha256"),
+            parameters.get("backend"),
         )
         path = _safe_file(root, relative) if isinstance(relative, str) else None
-        if path is None or not isinstance(expected, str) or _DIGEST.fullmatch(expected) is None:
+        if (
+            path is None
+            or not isinstance(expected, str)
+            or _DIGEST.fullmatch(expected) is None
+        ):
             return False, "backend probe evidence and digest required"
         if backend not in {"NEM", "NATIVE_VTX"} or _digest(path) != expected:
             return False, "backend proof digest or requested backend invalid"
@@ -179,12 +384,10 @@ def run_preflight(
     expected_branch: str,
     required_capabilities: list[str],
     capability_parameters: Mapping[str, Mapping[str, object]] | None = None,
-    policy: Mapping[str, object],
     driver: runtime.CapabilityDriver | None = None,
-    base_ref: str = "origin/main",
 ) -> dict:
     """Return PASS, BLOCKED_RUNTIME, or FAIL without any machine mutation."""
-    parameters = dict(capability_parameters or {})
+    parameters = capability_parameters if capability_parameters is not None else {}
     result = {
         "schema_version": 1,
         "status": "FAIL",
@@ -198,33 +401,53 @@ def run_preflight(
         "reason": "",
         "mutation_performed": False,
     }
-    if any(not isinstance(value, str) or _SHA.fullmatch(value) is None for value in (expected_head_sha, expected_base_sha)):
+    if any(
+        not isinstance(value, str) or _SHA.fullmatch(value) is None
+        for value in (expected_head_sha, expected_base_sha)
+    ):
         result["reason"] = "full exact source and base SHA required"
         return result
-    if not isinstance(expected_branch, str) or not expected_branch or expected_branch in {"main", "master"}:
+    if (
+        not isinstance(expected_branch, str)
+        or not expected_branch
+        or expected_branch in {"main", "master"}
+    ):
         result["reason"] = "exact feature branch required"
         return result
-    if not isinstance(required_capabilities, list) or len(required_capabilities) != len(set(required_capabilities)):
+    if (
+        not isinstance(required_capabilities, list)
+        or len(required_capabilities) > 128
+        or any(
+            not isinstance(name, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,127}", name) is None
+            for name in required_capabilities
+        )
+        or len(required_capabilities) != len(set(required_capabilities))
+        or not isinstance(parameters, Mapping)
+    ):
         result["reason"] = "unique required capabilities list required"
         return result
     root = root.resolve()
     source_checks = {
         "head": (_git(root, "rev-parse", "HEAD"), expected_head_sha),
-        "base": (_git(root, "rev-parse", base_ref), expected_base_sha),
+        "base": (_git(root, "rev-parse", "origin/main"), expected_base_sha),
         "branch": (_git(root, "branch", "--show-current"), expected_branch),
         "worktree": (_git(root, "status", "--porcelain", "--untracked-files=all"), ""),
     }
     for name, ((code, observed), expected) in source_checks.items():
-        result["checks"][name] = "PASS" if code == 0 and observed == expected else "FAIL"
+        result["checks"][name] = (
+            "PASS" if code == 0 and observed == expected else "FAIL"
+        )
     if any(result["checks"][name] != "PASS" for name in source_checks):
         result["reason"] = "source identity or clean worktree mismatch"
         return result
     try:
+        policy = load_base_policy(root, expected_base_sha)
         runtime_policy = policy["runtime_orchestration"]
         additional = policy["work_item_preflight"]["additional_capabilities"]
         planner = runtime.RuntimePlanner(runtime_policy)
         if not isinstance(additional, dict):
-            raise ValueError("additional capability registry invalid")
+            raise TypeError("additional capability registry invalid")
         allowed = set(planner.specs) | set(additional)
         if any(name not in allowed for name in required_capabilities):
             raise ValueError("unknown required capability")
@@ -233,43 +456,22 @@ def run_preflight(
         schemas = {**runtime_policy["capabilities"], **additional}
         for name in required_capabilities:
             supplied = parameters.get(name, {})
-            if not isinstance(supplied, Mapping):
-                raise ValueError(f"{name}: capability parameters must be a mapping")
-            schema = schemas[name]
-            required = schema.get("required_parameters", [])
-            types = schema.get("parameter_types", {})
-            if not isinstance(required, list) or not isinstance(types, dict):
-                raise ValueError(f"{name}: parameter schema invalid")
-            if set(supplied) != set(required):
-                raise ValueError(f"{name}: required parameters differ from declaration")
-            for key, value in supplied.items():
-                kind = types.get(key)
-                if kind == "positive-integer" and (type(value) is not int or value < 1):
-                    raise ValueError(f"{name}.{key}: positive integer required")
-                if kind == "tcp-port" and (type(value) is not int or not 1 <= value <= 65535):
-                    raise ValueError(f"{name}.{key}: TCP port required")
-                if kind in {"nonempty-string", "repository-relative-path"} and (not isinstance(value, str) or not value):
-                    raise ValueError(f"{name}.{key}: nonempty string required")
-                if kind == "repository-relative-path" and _safe_file(root, value) is None:
-                    # An unavailable artifact/backend proof blocks runtime later;
-                    # its path syntax still has to be safe here.
-                    if (not isinstance(value, str) or "\\" in value or
-                            PurePosixPath(value).is_absolute() or
-                            any(part in ("", ".", "..") for part in value.split("/"))):
-                        raise ValueError(f"{name}.{key}: repository-relative path required")
-                if kind == "sha256-digest" and (not isinstance(value, str) or _DIGEST.fullmatch(value) is None):
-                    raise ValueError(f"{name}.{key}: SHA-256 digest required")
-                if kind == "pinned-version" and (not isinstance(value, str) or
-                        re.fullmatch(r"[0-9]+(?:\.[0-9]+){2}", value) is None):
-                    raise ValueError(f"{name}.{key}: pinned version required")
-                if kind == "virtualbox-backend" and value not in {"NEM", "NATIVE_VTX"}:
-                    raise ValueError(f"{name}.{key}: known backend required")
+            _validate_parameters(name, schemas[name], supplied)
         requests = [
             runtime.CapabilityRequest(name, parameters.get(name, {}))
-            for name in required_capabilities if name in planner.specs
+            for name in required_capabilities
+            if name in planner.specs
         ]
         plan = planner.resolve(requests)
-    except (KeyError, TypeError, ValueError, runtime.RuntimePolicyError) as exc:
+    except (
+        KeyError,
+        OSError,
+        TypeError,
+        ValueError,
+        subprocess.TimeoutExpired,
+        yaml.YAMLError,
+        runtime.RuntimePolicyError,
+    ) as exc:
         result["reason"] = str(exc)
         return result
     probe = driver or runtime.BuiltinCapabilityDriver()
@@ -284,10 +486,14 @@ def run_preflight(
             blocked.append(f"{capability.spec.name}: {exc}")
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             result["checks"][capability.spec.name] = "FAIL"
-            result["reason"] = f"{capability.spec.name}: probe failed: {type(exc).__name__}"
+            result["reason"] = (
+                f"{capability.spec.name}: probe failed: {type(exc).__name__}"
+            )
     for name in sorted(set(required_capabilities) & set(additional)):
         try:
-            passed, reason = _probe_special(root, name, parameters.get(name, {}), expected_head_sha)
+            passed, reason = _probe_special(
+                root, name, parameters.get(name, {}), expected_head_sha
+            )
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             passed, reason = False, f"probe error: {type(exc).__name__}"
         result["checks"][name] = "PASS" if passed else "BLOCKED_RUNTIME"
@@ -296,14 +502,23 @@ def run_preflight(
     statuses = list(result["checks"].values())
     capacity_names = set(required_capabilities) & _CAPACITY
     result["capacity"] = (
-        "BLOCKED_RUNTIME" if any(result["checks"].get(name) == "BLOCKED_RUNTIME" for name in capacity_names)
-        else "FAIL" if any(result["checks"].get(name) == "FAIL" for name in capacity_names)
+        "BLOCKED_RUNTIME"
+        if any(
+            result["checks"].get(name) == "BLOCKED_RUNTIME" for name in capacity_names
+        )
+        else "FAIL"
+        if any(result["checks"].get(name) == "FAIL" for name in capacity_names)
         else "PASS"
     )
     environment_names = set(required_capabilities) - _CAPACITY
     result["environment"] = (
-        "BLOCKED_RUNTIME" if any(result["checks"].get(name) == "BLOCKED_RUNTIME" for name in environment_names)
-        else "FAIL" if any(result["checks"].get(name) == "FAIL" for name in environment_names)
+        "BLOCKED_RUNTIME"
+        if any(
+            result["checks"].get(name) == "BLOCKED_RUNTIME"
+            for name in environment_names
+        )
+        else "FAIL"
+        if any(result["checks"].get(name) == "FAIL" for name in environment_names)
         else "PASS"
     )
     if "FAIL" in statuses or result["reason"]:
@@ -317,9 +532,12 @@ def run_preflight(
 
 
 def _evidence_digest(payload: Mapping[str, object]) -> str:
-    return "sha256:" + hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    return (
+        "sha256:"
+        + hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+    )
 
 
 def _evidence_directory(root: Path, *parts: str) -> Path:
@@ -330,7 +548,9 @@ def _evidence_directory(root: Path, *parts: str) -> Path:
             raise ValueError(f"symlink preflight evidence directory: {current}")
         current.mkdir(exist_ok=True)
         if not current.is_dir():
-            raise ValueError(f"preflight evidence directory is not a directory: {current}")
+            raise ValueError(
+                f"preflight evidence directory is not a directory: {current}"
+            )
     return current
 
 
@@ -406,15 +626,20 @@ def verify_preflight(
 ) -> dict:
     """Verify a persisted PASS against current source and work package identity."""
     for label, value in (
-        ("head SHA", expected_head_sha), ("base SHA", expected_base_sha),
+        ("head SHA", expected_head_sha),
+        ("base SHA", expected_base_sha),
     ):
         if not isinstance(value, str) or _SHA.fullmatch(value) is None:
             raise ValueError(f"full exact {label} required")
     if (
-        not isinstance(expected_branch, str) or not expected_branch
-        or not isinstance(expected_package_id, str) or not expected_package_id
-        or not isinstance(expected_milestone, str) or not expected_milestone
-        or type(expected_issue) is not int or expected_issue < 1
+        not isinstance(expected_branch, str)
+        or not expected_branch
+        or not isinstance(expected_package_id, str)
+        or not expected_package_id
+        or not isinstance(expected_milestone, str)
+        or not expected_milestone
+        or type(expected_issue) is not int
+        or expected_issue < 1
         or not isinstance(expected_package_digest, str)
         or _DIGEST.fullmatch(expected_package_digest) is None
     ):
@@ -431,13 +656,18 @@ def verify_preflight(
     if path is None:
         raise ValueError("exact-HEAD preflight evidence missing or unsafe")
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+        payload = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("preflight evidence is not valid JSON") from exc
     if not isinstance(payload, dict):
-        raise ValueError("preflight evidence must be a JSON object")
+        raise ValueError("preflight evidence must be a JSON object")  # noqa: TRY004 -- persisted evidence has one validation error contract
     declared_digest = payload.get("evidence_digest")
-    if not isinstance(declared_digest, str) or _DIGEST.fullmatch(declared_digest) is None:
+    if (
+        not isinstance(declared_digest, str)
+        or _DIGEST.fullmatch(declared_digest) is None
+    ):
         raise ValueError("preflight evidence digest is missing or malformed")
     unsigned = dict(payload)
     del unsigned["evidence_digest"]
@@ -471,7 +701,9 @@ def verify_preflight(
     if (
         not isinstance(checks, dict)
         or not required_checks.issubset(checks)
-        or any(not isinstance(key, str) or value != "PASS" for key, value in checks.items())
+        or any(
+            not isinstance(key, str) or value != "PASS" for key, value in checks.items()
+        )
     ):
         raise ValueError("preflight evidence checks are incomplete or not PASS")
     for label, args, observed in (
@@ -484,34 +716,48 @@ def verify_preflight(
             raise ValueError(f"preflight current {label} differs from verified source")
     if _git(root, "cat-file", "-e", expected_base_sha + "^{commit}")[0] != 0:
         raise ValueError("preflight exact base commit is missing")
-    if _git(root, "merge-base", "--is-ancestor", expected_base_sha, expected_head_sha)[0] != 0:
+    if (
+        _git(root, "merge-base", "--is-ancestor", expected_base_sha, expected_head_sha)[
+            0
+        ]
+        != 0
+    ):
         raise ValueError("preflight exact base is not an ancestor of HEAD")
     return payload
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument(
+        "--root", type=Path, default=Path(__file__).resolve().parents[1]
+    )
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--branch", required=True)
     parser.add_argument("--capability", action="append", default=[])
     parser.add_argument("--parameters-json", default="{}")
-    parser.add_argument("--base-ref", default="origin/main")
     args = parser.parse_args(argv)
     try:
         parameters = json.loads(args.parameters_json)
-        policy = yaml.safe_load((args.root / "config/contracts/qualification-execution-policy.yaml").read_text(encoding="utf-8"))
         result = run_preflight(
-            args.root, expected_head_sha=args.head_sha, expected_base_sha=args.base_sha,
-            expected_branch=args.branch, required_capabilities=args.capability,
-            capability_parameters=parameters, policy=policy, base_ref=args.base_ref,
+            args.root,
+            expected_head_sha=args.head_sha,
+            expected_base_sha=args.base_sha,
+            expected_branch=args.branch,
+            required_capabilities=args.capability,
+            capability_parameters=parameters,
         )
         write_preflight(args.root, result)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         result = {"status": "FAIL", "reason": str(exc), "mutation_performed": False}
     print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "PASS" else 3 if result["status"] == "BLOCKED_RUNTIME" else 1
+    return (
+        0
+        if result["status"] == "PASS"
+        else 3
+        if result["status"] == "BLOCKED_RUNTIME"
+        else 1
+    )
 
 
 if __name__ == "__main__":
