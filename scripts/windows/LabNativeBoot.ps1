@@ -1701,6 +1701,79 @@ function Invoke-Watchdog {
     Request-NormalReturn -Id $Id -Sha $Sha -RunStatus 'FAIL' -ErrorText 'Native Resume exceeded the watchdog deadline'
 }
 
+function Get-NativeRecoverySnapshot {
+    param([string]$Id, [string]$Sha, [string]$VmId)
+    $observed = [DateTime]::UtcNow.ToString('o')
+    $bcd = [ordered]@{}
+    foreach ($entry in @(
+        @('current_stdout','{current}'), @('bootmgr_stdout','{bootmgr}'), @('all_stdout','all')
+    )) {
+        $result = Invoke-BoundedProcess -FilePath (Join-Path $env:SystemRoot 'System32\bcdedit.exe') -Arguments @('/enum',$entry[1],'/v') -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+        Assert-ProcessSuccess -Result $result -Operation "recovery observation bcdedit $($entry[1])"
+        $bcd[$entry[0]] = [string]$result.StdOut
+    }
+    $vm = Invoke-BoundedProcess -FilePath 'C:\Program Files\Oracle\VirtualBox\VBoxManage.exe' -Arguments @('showvminfo',$VmId,'--machinereadable') -TimeoutSeconds 60 -WorkingDirectory $env:SystemRoot
+    Assert-ProcessSuccess -Result $vm -Operation 'recovery observation retained VM'
+    # Enumerate with Stop: access denial must never become evidence of absence.
+    $tasks = @(Get-ScheduledTask -TaskPath '\' -ErrorAction Stop | Where-Object {
+        $_.TaskName -in @($ResumeTaskName,$WatchdogTaskName,$ProbeTaskName)
+    } | ForEach-Object { [string]$_.TaskName } | Sort-Object)
+    $identity = Join-Path (Get-NativeShadowRoot -Id $Id -Sha $Sha) 'identity'
+    $key = Get-OptionalShadowItem -Path (Join-Path $identity 'id_ed25519')
+    if ($null -ne $key) { [void](Assert-RegularLabPath -Path $key.FullName -Directory $false) }
+    return [ordered]@{
+        observed_at=$observed; completed_at=[DateTime]::UtcNow.ToString('o')
+        bcd=$bcd; vbox_stdout=[string]$vm.StdOut; native_tasks=@($tasks)
+        private_key_present=($null -ne $key)
+    }
+}
+
+function New-NativeRecoveryRecord {
+    param([string]$Phase, [string]$Id, [string]$Sha, $Binding)
+    return [ordered]@{
+        schema_version=1; phase=$Phase; campaign_id=$Id; source_sha=$Sha
+        source_tree_sha=$Binding.source_tree_sha; vm_id=$Binding.vm_id; vm_name=$Binding.vm_name
+        box_sha256=$Binding.box_sha256; runner_manifest_sha256=$Binding.runner_manifest_sha256
+        shadow_root=(Get-NativeShadowRoot -Id $Id -Sha $Sha)
+    }
+}
+
+function Write-NativeRecoveryRecord {
+    param([ValidateSet('capture','restore','verification')][string]$Name, $Record)
+    Assert-ShadowBoundary
+    $directory = Join-Path $script:SmokeRoot 'recovery'
+    Ensure-ShadowDirectory -Path $directory
+    $path = Join-Path $directory "$Name.json"
+    if ($null -ne (Get-OptionalShadowItem -Path $path)) {
+        throw "Native recovery observation is write-once: $Name"
+    }
+    Write-ProtectedNativeJson -InputObject $Record -Path $path -GovernedRoot $script:SmokeRoot
+    return Get-FileSha256 -Path $path
+}
+
+function Get-NativeRecoveryCapture {
+    param($State)
+    if ($State.PSObject.Properties.Name -notcontains 'recovery_capture_sha256') {
+        # Historical states have no prospective capture; never backfill them.
+        return $null
+    }
+    $path = Join-Path $script:SmokeRoot 'recovery\capture.json'
+    [void](Assert-RegularLabPath -Path $path -Directory $false)
+    Assert-ProtectedLabAcl -Acl (Get-Acl -LiteralPath $path) -Directory $false -Path $path
+    if ([string]$State.recovery_capture_sha256 -notmatch '^[0-9a-f]{64}$' -or
+        (Get-FileSha256 -Path $path) -cne [string]$State.recovery_capture_sha256) {
+        throw 'Native recovery capture differs from its protected state binding'
+    }
+    $capture = Read-JsonFile $path
+    if ($capture.schema_version -ne 1 -or $capture.phase -cne 'capture' -or
+        $capture.campaign_id -cne $State.campaign_id -or $capture.source_sha -cne $State.source_sha -or
+        $capture.source_tree_sha -cne $State.source_tree_sha -or $capture.vm_id -ine $State.vm_id -or
+        $capture.shadow_root -ine $script:SmokeRoot) {
+        throw 'Native recovery capture identity differs from its protected state'
+    }
+    return $capture
+}
+
 function Invoke-Prepare {
     param([string]$Id, [string]$Sha)
     if ($ExpectedVmId -notmatch '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
@@ -1722,12 +1795,30 @@ function Invoke-Prepare {
             throw "An existing native smoke task requires inspection: $name"
         }
     }
+    $baseline = Get-NativeRecoverySnapshot -Id $Id -Sha $Sha -VmId $campaign.vm_id
+    $shadowInitializationStarted = [DateTime]::UtcNow.ToString('o')
     $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     $script:PrepareShadowCreated = $false
     try {
         # Create fresh inodes under a historically protected Windows parent. Old
         # write handles on the diagnostic stage cannot mutate these task inputs.
         $campaign = Initialize-NativeShadow -Id $Id -Sha $Sha -OriginalCampaign $campaign
+        $backupDir = Join-Path $script:SmokeRoot 'bcd'
+        New-ShadowDirectory -Path $backupDir
+        $backup = Join-Path $backupDir "before-$Id-$Sha-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')).bak"
+        if (Test-Path -LiteralPath $backup) { throw 'Campaign BCD backup already exists' }
+        [void](Invoke-Bcd -Arguments @('/export',$backup))
+        if (-not (Test-Path -LiteralPath $backup -PathType Leaf) -or (Get-Item -LiteralPath $backup).Length -lt 1024) {
+            throw 'BCD backup is absent or unexpectedly small'
+        }
+        $backupDigest = Get-FileSha256 -Path $backup
+        $capture = New-NativeRecoveryRecord -Phase 'capture' -Id $Id -Sha $Sha -Binding $campaign
+        $capture.observation = $baseline
+        $capture.shadow_initialization_started_at = $shadowInitializationStarted
+        $capture.bcd_backup = [ordered]@{ path=$backup; sha256=$backupDigest }
+        $capture.sealed_at = [DateTime]::UtcNow.ToString('o')
+        $captureDigest = Write-NativeRecoveryRecord -Name 'capture' -Record $capture
+        $mutationStarted = [DateTime]::UtcNow.ToString('o')
         Invoke-S4UProbeTask -Campaign $campaign -Id $Id -Sha $Sha -OwnerSid $ownerSid
         Protect-NativeInputs -Id $Id
         Assert-ProtectedNativeInputs -Id $Id
@@ -1738,10 +1829,6 @@ function Invoke-Prepare {
             throw 'Retained VM, runner or box changed after the S4U probe'
         }
         $probeDigest = Get-FileSha256 -Path (Join-Path $script:SmokeRoot "s4u-probe-$Id-$Sha.json")
-        $backupDir = Join-Path $script:SmokeRoot 'bcd'
-        New-ShadowDirectory -Path $backupDir
-        $backup = Join-Path $backupDir "before-$Id-$Sha-$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ')).bak"
-        if (Test-Path -LiteralPath $backup) { throw 'Campaign BCD backup already exists' }
     }
     catch {
         $failure = $_.Exception.Message
@@ -1756,11 +1843,6 @@ function Invoke-Prepare {
     $nativeId = ''
     $vsmStatus = 'UNSUPPORTED'
     try {
-        [void](Invoke-Bcd -Arguments @('/export',$backup))
-        if (-not (Test-Path -LiteralPath $backup -PathType Leaf) -or (Get-Item -LiteralPath $backup).Length -lt 1024) {
-            throw 'BCD backup is absent or unexpectedly small'
-        }
-        $backupDigest = Get-FileSha256 -Path $backup
         $copy = Invoke-Bcd -Arguments @('/copy',$boot.current,'/d',$EntryName)
         $match = [regex]::Match($copy, '\{[0-9a-fA-F-]{36}\}')
         if (-not $match.Success) { throw 'Cannot parse copied native BCD entry ID' }
@@ -1791,6 +1873,8 @@ function Invoke-Prepare {
             runner_manifest_sha256=$campaign.runner_manifest_sha256
             vsmlaunchtype=$vsmStatus
             bcd_backup=$backup; bcd_backup_sha256=$backupDigest
+            recovery_capture_sha256=$captureDigest
+            shadow_initialization_started_at=$shadowInitializationStarted; mutation_started_at=$mutationStarted
             boot_attempts=0; prepared_at=[DateTime]::UtcNow.ToString('o')
         }
         Write-NativeBootState -State $state
@@ -1841,6 +1925,8 @@ function Invoke-Prepare {
                     runner_manifest_sha256=$campaign.runner_manifest_sha256
                     vsmlaunchtype=if ($vsmStatus) { $vsmStatus } else { 'UNSUPPORTED' }
                     bcd_backup=$backup; bcd_backup_sha256=if (Test-Path -LiteralPath $backup) { Get-FileSha256 -Path $backup } else { '' }
+                    recovery_capture_sha256=$captureDigest
+                    shadow_initialization_started_at=$shadowInitializationStarted; mutation_started_at=$mutationStarted
                     boot_attempts=0; error=$failure; failed_at=[DateTime]::UtcNow.ToString('o')
                 })
             }
@@ -1917,7 +2003,8 @@ function Invoke-Recover {
             $already.default -ne [string]$state.normal_boot_id -or $already.sequence -ne '' -or
             @(Get-OwnedEntries).Count -ne 0 -or
             $null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $ResumeTaskName -ErrorAction SilentlyContinue) -or
-            $null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue)) {
+            $null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue) -or
+            $null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $ProbeTaskName -ErrorAction SilentlyContinue)) {
             throw 'Previously recovered native smoke boot no longer has a clean normal BCD state'
         }
         Assert-NativeRecoveredProof -State $state
@@ -1930,6 +2017,27 @@ function Invoke-Recover {
     }
     $expectedPhase = [string]$state.phase
     Assert-StateBinding -State $state -ExpectedPhase $expectedPhase
+    $restore = $null
+    try {
+        $capture = Get-NativeRecoveryCapture -State $state
+        if ($null -ne $capture) {
+            foreach ($name in @('restore','verification')) {
+                if ($null -ne (Get-OptionalShadowItem -Path (Join-Path $script:SmokeRoot "recovery\$name.json"))) {
+                    throw 'Native recovery receipt already exists; refusing to rewrite it'
+                }
+            }
+            $restore = New-NativeRecoveryRecord -Phase 'restore' -Id $state.campaign_id -Sha $state.source_sha -Binding $state
+            $restore.capture_sha256 = [string]$state.recovery_capture_sha256
+            $restore.started_at = [DateTime]::UtcNow.ToString('o')
+            $restore.observation = Get-NativeRecoverySnapshot -Id $state.campaign_id -Sha $state.source_sha -VmId $state.vm_id
+        }
+    }
+    catch {
+        # Evidence availability must not prevent the original owned-resource
+        # cleanup. Missing receipts still fail producer validation.
+        $restore = $null
+        $state | Add-Member -NotePropertyName recovery_evidence_error -NotePropertyValue $_.Exception.Message -Force
+    }
     if ((Get-FileSha256 -Path ([string]$state.bcd_backup)) -ne [string]$state.bcd_backup_sha256) {
         throw 'Owned BCD backup digest differs; recovery requires manual inspection'
     }
@@ -1956,15 +2064,24 @@ function Invoke-Recover {
         Assert-NativeTaskIdentity -Task $watchdogTask -Name $WatchdogTaskName -Runner $runner -Mode 'Watchdog' -Id $state.campaign_id -Sha $state.source_sha -Sid 'S-1-5-18' -LogonType 'ServiceAccount'
         Assert-NativeTaskSecurity -Name $WatchdogTaskName
     }
+    $sequenceRemoved = $false
+    $loaderRemoved = $false
     if ($boot.sequence -ne '') {
         [void](Invoke-Bcd -Arguments @('/deletevalue','{bootmgr}','bootsequence'))
+        $sequenceRemoved = $true
     }
-    if ($entries.Count -eq 1) { [void](Invoke-Bcd -Arguments @('/delete',[string]$state.native_boot_id,'/f')) }
+    if ($entries.Count -eq 1) {
+        [void](Invoke-Bcd -Arguments @('/delete',[string]$state.native_boot_id,'/f'))
+        $loaderRemoved = $true
+    }
     $after = Get-BootContext
     if ($after.current -ne [string]$state.normal_boot_id -or $after.default -ne [string]$state.normal_boot_id -or
         $after.sequence -ne '' -or @(Get-OwnedEntries).Count -ne 0) {
         throw 'Native smoke recovery BCD postcondition failed'
     }
+    $removedTasks = @()
+    if ($null -ne $resumeTask) { $removedTasks += $ResumeTaskName }
+    if ($null -ne $watchdogTask) { $removedTasks += $WatchdogTaskName }
     Remove-NativeTasks -State $state
     if ($null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $ResumeTaskName -ErrorAction SilentlyContinue) -or
         $null -ne (Get-ScheduledTask -TaskPath '\' -TaskName $WatchdogTaskName -ErrorAction SilentlyContinue)) {
@@ -1976,10 +2093,42 @@ function Invoke-Recover {
         $state | Add-Member -NotePropertyName run_error -NotePropertyValue ("Protected native proof failed recovery validation: $($_.Exception.Message)") -Force
         $state | Add-Member -NotePropertyName result_sha256 -NotePropertyValue '' -Force
     }
-    [void](Remove-NativeShadowPrivateKey -Id ([string]$state.campaign_id) -Sha ([string]$state.source_sha))
+    $keyRemoved = Remove-NativeShadowPrivateKey -Id ([string]$state.campaign_id) -Sha ([string]$state.source_sha)
+    if ($null -ne $restore) {
+        try {
+            $restore.operations = [ordered]@{
+                bootsequence_removed=$sequenceRemoved; native_loader_removed=$loaderRemoved
+                tasks_removed=@($removedTasks | Sort-Object); private_key_removed=[bool]$keyRemoved
+            }
+            $restore.completed_at = [DateTime]::UtcNow.ToString('o')
+            $restoreDigest = Write-NativeRecoveryRecord -Name 'restore' -Record $restore
+        }
+        catch {
+            $restore = $null
+            $state | Add-Member -NotePropertyName recovery_evidence_error -NotePropertyValue $_.Exception.Message -Force
+        }
+    }
     $state.phase = 'RECOVERED'
     $state | Add-Member -NotePropertyName recovered_at -NotePropertyValue ([DateTime]::UtcNow.ToString('o')) -Force
     Write-NativeBootState -State $state
+    if ($null -ne $restore) {
+        try {
+            $verification = New-NativeRecoveryRecord -Phase 'restore_verification' -Id $state.campaign_id -Sha $state.source_sha -Binding $state
+            $verification.capture_sha256 = [string]$state.recovery_capture_sha256
+            $verification.restore_sha256 = $restoreDigest
+            $verification.native_boot_sha256 = Get-FileSha256 -Path $script:StatePath
+            # New read-only observations follow the finalized state and cleanup.
+            $verification.observation = Get-NativeRecoverySnapshot -Id $state.campaign_id -Sha $state.source_sha -VmId $state.vm_id
+            $verification.observed_at = $verification.observation.observed_at
+            [void](Write-NativeRecoveryRecord -Name 'verification' -Record $verification)
+        }
+        catch {
+            # Keep cleanup RECOVERED, but invalidate any incomplete observation
+            # chain by recording the failure in the final protected state.
+            $state | Add-Member -NotePropertyName recovery_evidence_error -NotePropertyValue $_.Exception.Message -Force
+            Write-NativeBootState -State $state
+        }
+    }
     [Console]::WriteLine("PASS lab-native-boot-recover campaign=$($state.campaign_id) native-entry-removed=true")
 }
 

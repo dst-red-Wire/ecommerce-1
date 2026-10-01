@@ -2,10 +2,20 @@ id: m25-native-shadow-selection
 milestone: M2.5
 tracker_issue: 32
 work_item_issue: 180
-objective: Select one protected native campaign generation after recovery while retaining the original VM, box, and historical shadow evidence.
+objective: Select one protected native campaign generation and derive exact-source host recovery evidence from prospective protected observations while retaining the original VM, box, and historical shadows.
 scope:
   allowed_paths:
     - scripts/repoctl.py
+    - scripts/native_recovery_evidence.py
+    - scripts/runtime_authority.py
+    - scripts/issue_completion.py
+    - scripts/windows/LabNativeBoot.ps1
+    - docs/engineering/native-recovery-evidence.md
+    - tests/test_native_recovery_evidence.py
+    - tests/test_native_recovery_observations.py
+    - tests/test_runtime_authority.py
+    - tests/test_verified_pr_integration.py
+    - tests/test_issue_completion.py
     - tests/test_native_boot_bootstrap.py
     - tests/test_native_network_status.py
     - tests/test_native_shadow_import.py
@@ -15,20 +25,27 @@ dependencies: [m25-native-bootstrap-manifest-count]
 acceptance:
   contracts:
     - config/contracts/review-policy.yaml
+    - config/contracts/execution-properties-policy.yaml
     - config/contracts/work-package-policy.yaml
     - config/contracts/qualification-execution-policy.yaml
   qualification_gates: [governance, contracts, automation, security, system]
-  runtime_evidence: []
+  runtime_evidence:
+    - .context/evidence/native-recovery/current.json
   tests:
     - tests/test_native_boot_bootstrap.py
     - tests/test_native_network_status.py
     - tests/test_native_shadow_import.py
     - tests/test_work_package.py
+    - tests/test_native_recovery_evidence.py
+    - tests/test_native_recovery_observations.py
+    - tests/test_runtime_authority.py
+    - tests/test_verified_pr_integration.py
+    - tests/test_issue_completion.py
   qce_capabilities: []
 execution:
   preflight_required: true
-  runtime_required: false
-  recovery_required: false
+  runtime_required: true
+  recovery_required: true
   required_capabilities: [toolchain-pinned]
   capability_parameters:
     toolchain-pinned:
@@ -46,4 +63,7 @@ exit_criteria:
   - Status from the target checkout cannot show historical PASS as the new run; completed status and import bind the current exact head.
   - The original campaign, retained VM, verified box, and historical protected evidence remain intact.
   - Exact-head FULL qualification, CODE and SECURITY reviews, owner authorization, and merge checks pass.
+  - The registered producer derives capture, restoration, and independent restoration verification from exact-source protected observations and immutable digests.
+  - Missing prospective observations, failed native execution, caller-declared recovery, ambiguous identities, or changed bytes block runtime acceptance.
+  - The deterministic risk remains PRIVILEGED with host-runtime-before-mutation and capture-restore-verify requirements.
   - No Hetzner provisioning or paid resource mutation occurs.
