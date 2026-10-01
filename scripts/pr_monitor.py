@@ -4,33 +4,56 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 import copy
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
 import tempfile
 import time
-from typing import Any
 import urllib.error
 import urllib.request
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+if __package__:
+    from .exact_pr_binding import (
+        ExactPRBindingChanged,
+        ExactPRBindingError,
+        resolve_exact_open_pr,
+        revalidate_exact_open_pr,
+    )
+    from .managed_gh import resolve_managed_gh
+else:
+    from exact_pr_binding import (
+        ExactPRBindingChanged,
+        ExactPRBindingError,
+        resolve_exact_open_pr,
+        revalidate_exact_open_pr,
+    )
+    from managed_gh import resolve_managed_gh
 
 ROOT = Path(__file__).resolve().parents[1]
 PROMPT_BUDGET_BYTES = int(
-    json.loads((ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8"))[
-        "review_handoff_max_bytes"
-    ]
+    json.loads(
+        (ROOT / "config/contracts/codex-token-budget.json").read_text(encoding="utf-8")
+    )["review_handoff_max_bytes"]
 )
-GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String){repository(owner:$owner,name:$repo){owner{login} pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid comments(last:100){nodes{id createdAt body author{login}}} reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
+GRAPHQL_QUERY = """query PRMonitor($owner:String!,$repo:String!,$number:Int!,$threadCursor:String,$commentCursor:String){repository(owner:$owner,name:$repo){owner{login} pullRequest(number:$number){state merged mergeable mergeStateStatus isDraft reviewDecision updatedAt headRefOid comments(first:100,after:$commentCursor){pageInfo{hasNextPage endCursor} nodes{id createdAt updatedAt authorAssociation body author{login}}} reviews(last:100){nodes{id state submittedAt author{login}}} reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}} commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{id name status conclusion} ... on StatusContext{id context state}}}}}}}}}}"""
+COMMENTS_QUERY = """query PRMonitorComments($owner:String!,$repo:String!,$number:Int!,$commentCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){comments(first:100,after:$commentCursor){pageInfo{hasNextPage endCursor} nodes{id createdAt updatedAt authorAssociation body author{login}}}}}}"""
 THREADS_QUERY = """query PRMonitorThreads($owner:String!,$repo:String!,$number:Int!,$threadCursor:String!){repository(owner:$owner,name:$repo){pullRequest(number:$number){reviewThreads(first:100,after:$threadCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{id updatedAt path line originalLine body author{login}}}}}}}}"""
 
 
 class TransientGitHubError(RuntimeError):
     """A polling error that should be retried without losing monitor state."""
+
+
+class SupersededHeadError(RuntimeError):
+    """The local PR checkout cannot safely follow the exact GitHub HEAD."""
 
 
 def github_request(
@@ -56,20 +79,35 @@ def github_request(
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
-            return response.status, json.loads(response.read()), response.headers.get("ETag", etag)
+            return (
+                response.status,
+                json.loads(response.read()),
+                response.headers.get("ETag", etag),
+            )
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return 304, None, etag
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        rate_limited = exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0"
+        rate_limited = (
+            exc.code == 403 and (exc.headers or {}).get("X-RateLimit-Remaining") == "0"
+        )
         if exc.code == 429 or exc.code >= 500 or rate_limited:
-            raise TransientGitHubError(f"GitHub transient HTTP {exc.code}: {detail}") from exc
+            raise TransientGitHubError(
+                f"GitHub transient HTTP {exc.code}: {detail}"
+            ) from exc
         raise RuntimeError(f"GitHub returned HTTP {exc.code}: {detail}") from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise TransientGitHubError(f"GitHub request failed transiently: {exc}") from exc
 
 
-def _graphql_body(query: str, owner: str, repo: str, number: int, cursor: str | None = None) -> bytes:
+def _graphql_body(
+    query: str,
+    owner: str,
+    repo: str,
+    number: int,
+    cursor: str | None = None,
+    comment_cursor: str | None = None,
+) -> bytes:
     return json.dumps(
         {
             "query": query,
@@ -78,6 +116,7 @@ def _graphql_body(query: str, owner: str, repo: str, number: int, cursor: str | 
                 "repo": repo,
                 "number": number,
                 "threadCursor": cursor,
+                "commentCursor": comment_cursor,
             },
         }
     ).encode()
@@ -91,7 +130,9 @@ def _graphql_pr(payload: dict[str, Any], number: int) -> dict[str, Any]:
     if pr is None:
         raise RuntimeError(f"pull request #{number} not found")
     result = dict(pr)
-    result["_repository_owner_login"] = ((repository.get("owner") or {}).get("login") or "")
+    result["_repository_owner_login"] = (repository.get("owner") or {}).get(
+        "login"
+    ) or ""
     return result
 
 
@@ -124,60 +165,201 @@ def paginate_review_threads(
     return result
 
 
+def paginate_comments(
+    pr: dict[str, Any],
+    *,
+    owner: str,
+    repo: str,
+    number: int,
+    token: str,
+) -> dict[str, Any]:
+    connection = pr.get("comments") or {}
+    nodes = list(connection.get("nodes") or [])
+    page_info = connection.get("pageInfo") or {}
+    seen_cursors: set[str] = set()
+    while page_info.get("hasNextPage"):
+        cursor = page_info.get("endCursor")
+        if not cursor or cursor in seen_cursors or len(seen_cursors) >= 99:
+            raise RuntimeError("PR comment pagination is invalid or exceeds 100 pages")
+        seen_cursors.add(cursor)
+        _, payload, _ = github_request(
+            "https://api.github.com/graphql",
+            token,
+            body=_graphql_body(
+                COMMENTS_QUERY, owner, repo, number, comment_cursor=cursor
+            ),
+        )
+        page_pr = _graphql_pr(payload, number)
+        page = page_pr.get("comments") or {}
+        nodes.extend(page.get("nodes") or [])
+        if len(nodes) > 10_000:
+            raise RuntimeError("PR comment pagination exceeds 10000 comments")
+        page_info = page.get("pageInfo") or {}
+    result = dict(pr)
+    result["comments"] = {"nodes": nodes, "pageInfo": page_info}
+    return result
+
+
 CHATGPT_REVIEW_MARKER_RE = re.compile(
     r"<!--\s*chatgpt-exact-sha-review:v1\s+(\{[^\n]*\})\s*-->"
 )
 
 
+def _unique_marker_fields(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate marker field")
+        result[key] = value
+    return result
+
+
 def _latest_chatgpt_review(pr: dict[str, Any]) -> dict[str, Any]:
-    head_sha = str(pr.get("headRefOid") or "")
-    owner_login = str(pr.get("_repository_owner_login") or "")
-    latest: dict[str, dict[str, Any]] = {}
-    comments = list(((pr.get("comments") or {}).get("nodes") or []))
-    comments.sort(key=lambda item: (str(item.get("createdAt") or ""), str(item.get("id") or "")))
-    for comment in comments:
-        if owner_login and str((comment.get("author") or {}).get("login") or "") != owner_login:
+    head = str(pr.get("headRefOid") or "")
+    owner = str(pr.get("_repository_owner_login") or "")
+    latest: dict[str, tuple[str, int, dict[str, Any]]] = {}
+    for index, comment in enumerate((pr.get("comments") or {}).get("nodes") or []):
+        if (comment.get("author") or {}).get("login") != owner or not owner:
             continue
-        for raw in CHATGPT_REVIEW_MARKER_RE.findall(str(comment.get("body") or "")):
-            try:
-                proof = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            kind = str(proof.get("kind") or "")
-            if (
-                proof.get("provider") == "ChatGPT"
-                and proof.get("head_sha") == head_sha
-                and kind in {"code", "security"}
-            ):
-                latest[kind] = proof
-    code = latest.get("code")
-    security = latest.get("security")
+        lines = [
+            line
+            for line in str(comment.get("body") or "").splitlines()
+            if "chatgpt-exact-sha-review:v1" in line
+        ]
+        if not lines:
+            continue
+        if len(lines) != 1:
+            return {
+                "head_sha": head,
+                "verdict": "BLOCKED",
+                "reason": "AMBIGUOUS_OWNER_MARKER",
+            }
+        match = CHATGPT_REVIEW_MARKER_RE.fullmatch(lines[0])
+        try:
+            proof = (
+                json.loads(match.group(1), object_pairs_hook=_unique_marker_fields)
+                if match
+                else None
+            )
+        except ValueError:
+            proof = None
+        if (
+            not isinstance(proof, dict)
+            or set(proof)
+            != {"provider", "kind", "head_sha", "status", "blocking_findings"}
+            or proof.get("provider") != "ChatGPT"
+            or proof.get("kind") not in {"code", "security"}
+            or re.fullmatch(r"[0-9a-f]{40}", str(proof.get("head_sha") or "")) is None
+            or type(proof.get("blocking_findings")) is not int
+            or not (
+                (proof.get("status") == "PASS" and proof["blocking_findings"] == 0)
+                or (
+                    proof.get("status") in {"BLOCKED", "FAIL"}
+                    and proof["blocking_findings"] > 0
+                )
+            )
+        ):
+            return {
+                "head_sha": head,
+                "verdict": "BLOCKED",
+                "reason": "INVALID_OWNER_MARKER",
+            }
+        if proof["head_sha"] != head:
+            continue
+        if (
+            comment.get("authorAssociation") != "OWNER"
+            or not isinstance(comment.get("createdAt"), str)
+            or comment.get("createdAt") != comment.get("updatedAt")
+        ):
+            return {
+                "head_sha": head,
+                "verdict": "BLOCKED",
+                "reason": "EDITED_OR_NONOWNER_MARKER",
+            }
+        kind = proof["kind"]
+        key = (comment["createdAt"], index)
+        value = {
+            **proof,
+            "created_at": key[0],
+            "comment_id": comment.get("id"),
+            "sequence": index,
+        }
+        if kind not in latest or key > latest[kind][:2]:
+            latest[kind] = (key[0], key[1], value)
+    code = latest.get("code", ("", "", {}))[2]
+    security = latest.get("security", ("", "", {}))[2]
     if not code and not security:
         return {}
     ready = bool(
         code
         and security
-        and code.get("status") == "PASS"
-        and security.get("status") == "PASS"
-        and code.get("blocking_findings") == 0
-        and security.get("blocking_findings") == 0
+        and code["status"] == "PASS"
+        and security["status"] == "PASS"
+        and (security["created_at"], security["sequence"])
+        > (code["created_at"], code["sequence"])
     )
     return {
-        "head_sha": head_sha,
+        "head_sha": head,
         "verdict": "READY" if ready else "BLOCKED",
-        "code": code or {},
-        "security": security or {},
+        "code": code,
+        "security": security,
+    }
+
+
+def _latest_owner_authorization(pr: dict[str, Any]) -> dict[str, Any]:
+    owner = str(pr.get("_repository_owner_login") or "")
+    number = pr.get("_number")
+    head = str(pr.get("headRefOid") or "")
+    if not owner or type(number) is not int:
+        return {}
+    scope = f"scope=pr-{number}"
+    candidates = [
+        item
+        for item in ((pr.get("comments") or {}).get("nodes") or [])
+        if (item.get("author") or {}).get("login") == owner
+        and "/owner-authorization" in str(item.get("body") or "")
+        and re.search(
+            r"(?<!\S)" + re.escape(scope) + r"(?=\s|$)", str(item.get("body") or "")
+        )
+    ]
+    if not candidates:
+        return {}
+    latest = max(
+        enumerate(candidates),
+        key=lambda pair: (str(pair[1].get("createdAt") or ""), pair[0]),
+    )[1]
+    expected = f"/owner-authorization approve {scope} sha={head}"
+    valid = (
+        latest.get("body") == expected
+        and latest.get("authorAssociation") == "OWNER"
+        and isinstance(latest.get("createdAt"), str)
+        and latest.get("createdAt") == latest.get("updatedAt")
+    )
+    return {
+        "status": "PASS" if valid else "BLOCKED",
+        "head_sha": head,
+        "comment_id": latest.get("id"),
     }
 
 
 def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]:
     chatgpt_review = _latest_chatgpt_review(pr)
+    owner_authorization = _latest_owner_authorization(pr)
     nodes = (pr.get("commits") or {}).get("nodes") or []
-    rollup = ((nodes[-1].get("commit") or {}).get("statusCheckRollup") or {}) if nodes else {}
+    rollup = (
+        ((nodes[-1].get("commit") or {}).get("statusCheckRollup") or {})
+        if nodes
+        else {}
+    )
     checks = {}
     for check in (rollup.get("contexts") or {}).get("nodes") or []:
         key = str(check.get("id") or check.get("name") or check.get("context"))
-        checks[key] = str(check.get("conclusion") or check.get("status") or check.get("state") or "UNKNOWN")
+        checks[key] = str(
+            check.get("conclusion")
+            or check.get("status")
+            or check.get("state")
+            or "UNKNOWN"
+        )
     reviews = {
         str(review["id"]): {
             "state": review.get("state"),
@@ -209,6 +391,7 @@ def snapshot(pr: dict[str, Any], *, etag: str, timestamp: int) -> dict[str, Any]
         "open_findings_count": len(findings),
         "open_findings": findings,
         "chatgpt_review": chatgpt_review,
+        "owner_authorization": owner_authorization,
         "validated_verdict": (chatgpt_review.get("verdict") or ""),
         "mergeable": pr.get("mergeable"),
         "merge_state_status": pr.get("mergeStateStatus"),
@@ -229,6 +412,7 @@ MEANINGFUL = (
     "open_findings_count",
     "open_findings",
     "chatgpt_review",
+    "owner_authorization",
     "mergeable",
     "merge_state_status",
     "is_draft",
@@ -245,8 +429,12 @@ def meaningful(state: dict[str, Any]) -> dict[str, Any]:
 def _collection_delta(before: Any, after: Any) -> dict[str, Any]:
     before_map = before if isinstance(before, dict) else {}
     after_map = after if isinstance(after, dict) else {}
-    added = {key: after_map[key] for key in sorted(after_map.keys() - before_map.keys())}
-    removed = {key: before_map[key] for key in sorted(before_map.keys() - after_map.keys())}
+    added = {
+        key: after_map[key] for key in sorted(after_map.keys() - before_map.keys())
+    }
+    removed = {
+        key: before_map[key] for key in sorted(before_map.keys() - after_map.keys())
+    }
     modified = {
         key: {"before": before_map[key], "after": after_map[key]}
         for key in sorted(before_map.keys() & after_map.keys())
@@ -285,7 +473,9 @@ def changed_files(owner: str, repo: str, old: str, new: str, token: str) -> list
         f"https://api.github.com/repos/{owner}/{repo}/compare/{old}...{new}",
         token,
     )
-    return [item["filename"] for item in payload.get("files", []) if item.get("filename")]
+    return [
+        item["filename"] for item in payload.get("files", []) if item.get("filename")
+    ]
 
 
 def _truncate(value: Any, *, string_limit: int = 1000) -> Any:
@@ -296,7 +486,10 @@ def _truncate(value: Any, *, string_limit: int = 1000) -> Any:
     if isinstance(value, list):
         return [_truncate(item, string_limit=string_limit) for item in value]
     if isinstance(value, dict):
-        return {key: _truncate(item, string_limit=string_limit) for key, item in value.items()}
+        return {
+            key: _truncate(item, string_limit=string_limit)
+            for key, item in value.items()
+        }
     return value
 
 
@@ -304,7 +497,9 @@ def _encode_payload(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True)
 
 
-def bounded_payload(payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTES) -> str:
+def bounded_payload(
+    payload: dict[str, Any], *, budget: int = PROMPT_BUDGET_BYTES
+) -> str:
     reduced = _truncate(copy.deepcopy(payload))
     encoded = _encode_payload(reduced)
     if len(encoded.encode()) <= budget:
@@ -409,7 +604,9 @@ def chatgpt_review_handoff(
         "changed_files": files,
         "exact_head_verified": bool(current.get("exact_head_verified")),
     }
-    encoded = bounded_payload(payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode()))
+    encoded = bounded_payload(
+        payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode())
+    )
     return instruction + encoded
 
 
@@ -471,7 +668,9 @@ def _changed_paths(value: object) -> list[str]:
             or str(PurePosixPath(path)) != path
             or path in seen
         ):
-            raise ReviewHandoffError("changed_files contains an unsafe or duplicate path")
+            raise ReviewHandoffError(
+                "changed_files contains an unsafe or duplicate path"
+            )
         seen.add(path)
         paths.append(path)
     return sorted(paths)
@@ -489,9 +688,13 @@ def _delta_counts(value: object, changed_file_count: int) -> dict[str, int]:
     counts = {"changed_file_count": changed_file_count}
     for key, count in supplied.items():
         if type(count) is not int or not 0 <= count <= MAX_DELTA_COUNT:
-            raise ReviewHandoffError("delta counts must be bounded nonnegative integers")
+            raise ReviewHandoffError(
+                "delta counts must be bounded nonnegative integers"
+            )
         if key == "changed_file_count" and count != changed_file_count:
-            raise ReviewHandoffError("delta changed_file_count disagrees with changed_files")
+            raise ReviewHandoffError(
+                "delta changed_file_count disagrees with changed_files"
+            )
         counts[key] = count
     return counts
 
@@ -536,13 +739,12 @@ def build_handoff(
     paths = _changed_paths(changed_files)
     if previous_head is not None:
         _require_sha("previous_head", previous_head)
-    if previous_validated_verdict is not None:
-        if (
-            type(previous_validated_verdict) is not str
-            or previous_validated_verdict not in _PRIOR_VERDICTS
-            or previous_head is None
-        ):
-            raise ReviewHandoffError("previous verdict requires a validated prior head")
+    if previous_validated_verdict is not None and (
+        type(previous_validated_verdict) is not str
+        or previous_validated_verdict not in _PRIOR_VERDICTS
+        or previous_head is None
+    ):
+        raise ReviewHandoffError("previous verdict requires a validated prior head")
     if review_kind == "SECURITY" and (
         previous_validated_verdict != "CODE_PASS" or previous_head != head
     ):
@@ -616,7 +818,9 @@ def compact_status_lines(
     ]
 
 
-def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    command: list[str], *, cwd: Path, input_text: str | None = None
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=cwd,
@@ -625,6 +829,101 @@ def _run(command: list[str], *, cwd: Path, input_text: str | None = None) -> sub
         capture_output=True,
         check=True,
     )
+
+
+def _git_value(*arguments: str) -> str:
+    return _run(["git", *arguments], cwd=ROOT).stdout.strip()
+
+
+def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
+    """Fast-forward a clean local PR branch only to its revalidated GitHub HEAD."""
+    if (
+        f"{args.owner}/{args.repo}" != REPOSITORY
+        or type(args.pr) is not int
+        or args.pr < 1
+        or type(head_sha) is not str
+        or _SHA.fullmatch(head_sha) is None
+    ):
+        raise SupersededHeadError("SUPERSEDED: invalid exact PR HEAD binding")
+    try:
+        gh, _, _ = resolve_managed_gh(ROOT)
+        branch = _git_value("branch", "--show-current")
+        local_head = _git_value("rev-parse", "HEAD")
+        dirty = _git_value("status", "--porcelain", "--untracked-files=all")
+    except (ValueError, OSError, subprocess.CalledProcessError) as exc:
+        raise SupersededHeadError("SUPERSEDED: local checkout is unavailable") from exc
+    if not branch or dirty or _SHA.fullmatch(local_head) is None:
+        raise SupersededHeadError("SUPERSEDED: local PR branch is not clean")
+    try:
+        binding = resolve_exact_open_pr(REPOSITORY, head_sha, branch, "main", gh=gh)
+    except ExactPRBindingError as exc:
+        if "GitHub API request failed" in str(exc):
+            raise TransientGitHubError(
+                "GitHub API unavailable before local synchronization"
+            ) from exc
+        raise SupersededHeadError(
+            "SUPERSEDED: exact GitHub PR HEAD binding is unavailable"
+        ) from exc
+    if binding.pr_number != args.pr:
+        raise SupersededHeadError("SUPERSEDED: GitHub PR number differs")
+
+    def verify_github() -> None:
+        try:
+            if revalidate_exact_open_pr(binding, gh=gh) != binding:
+                raise ExactPRBindingChanged("PR_CHANGED")
+        except ExactPRBindingChanged as exc:
+            if exc.reason == "HEAD_CHANGED":
+                raise TransientGitHubError(
+                    "exact GitHub PR HEAD changed during local synchronization"
+                ) from exc
+            raise SupersededHeadError(
+                "SUPERSEDED: exact PR base or branch changed"
+            ) from exc
+        except ExactPRBindingError as exc:
+            if "GitHub API request failed" in str(exc):
+                raise TransientGitHubError(
+                    "GitHub API unavailable during local synchronization"
+                ) from exc
+            raise SupersededHeadError(
+                "SUPERSEDED: exact GitHub PR revalidation failed"
+            ) from exc
+
+    verify_github()
+    if local_head == head_sha:
+        return
+    try:
+        _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=ROOT)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise TransientGitHubError("git fetch failed for exact GitHub PR HEAD") from exc
+    try:
+        fetched = _git_value("rev-parse", "FETCH_HEAD")
+        if fetched != head_sha:
+            raise SupersededHeadError("SUPERSEDED: fetched HEAD differs from GitHub")
+        _run(["git", "merge-base", "--is-ancestor", local_head, head_sha], cwd=ROOT)
+        if (
+            _git_value("branch", "--show-current") != branch
+            or _git_value("rev-parse", "HEAD") != local_head
+            or _git_value("status", "--porcelain", "--untracked-files=all")
+        ):
+            raise SupersededHeadError(
+                "SUPERSEDED: local checkout changed before fast-forward"
+            )
+        verify_github()
+        _run(
+            ["git", "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", head_sha],
+            cwd=ROOT,
+        )
+        if (
+            _git_value("branch", "--show-current") != branch
+            or _git_value("rev-parse", "HEAD") != head_sha
+            or _git_value("status", "--porcelain", "--untracked-files=all")
+        ):
+            raise SupersededHeadError("SUPERSEDED: local fast-forward is not exact")
+        verify_github()
+    except subprocess.CalledProcessError as exc:
+        raise SupersededHeadError(
+            "SUPERSEDED: local PR branch cannot fast-forward to GitHub HEAD"
+        ) from exc
 
 
 @contextmanager
@@ -637,11 +936,18 @@ def exact_head_worktree(head_sha: str):
         try:
             _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=repo_root)
         except subprocess.CalledProcessError as exc:
-            raise TransientGitHubError(f"git fetch failed transiently for {head_sha}") from exc
+            raise TransientGitHubError(
+                f"git fetch failed transiently for {head_sha}"
+            ) from exc
         fetched = _run(["git", "rev-parse", "FETCH_HEAD"], cwd=repo_root).stdout.strip()
         if fetched != head_sha:
-            raise RuntimeError(f"fetched head mismatch: expected {head_sha}, got {fetched}")
-        _run(["git", "worktree", "add", "--detach", str(worktree), head_sha], cwd=repo_root)
+            raise RuntimeError(
+                f"fetched head mismatch: expected {head_sha}, got {fetched}"
+            )
+        _run(
+            ["git", "worktree", "add", "--detach", str(worktree), head_sha],
+            cwd=repo_root,
+        )
         try:
             yield worktree
         finally:
@@ -670,11 +976,160 @@ def is_terminal(state: dict[str, Any], abandoned: bool) -> bool:
 
 def _write_state(state_path: Path, state: dict[str, Any]) -> None:
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state_path.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
 
 
-def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[bool, int]:
-    previous = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
+MAX_TRANSIENT_RESUME_RETRIES = 3
+TRANSIENT_DISPATCH_REASONS = frozenset(
+    {"BLOCKED_EXTERNAL_REVIEW_TRANSPORT", "AWAITING_OWNER_MARKER"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeOutcome:
+    pending: bool
+    transient_error: bool = False
+
+
+def _record_resume_outcome(
+    state: dict[str, Any],
+    outcome: ResumeOutcome,
+    *,
+    prior_count: int,
+) -> None:
+    if type(prior_count) is not int or prior_count < 0:
+        raise RuntimeError("monitor retry checkpoint is malformed")
+    if outcome.transient_error:
+        count = prior_count + 1
+        state["resume_retry_count"] = count
+        state["resume_pending"] = count < MAX_TRANSIENT_RESUME_RETRIES
+        if not state["resume_pending"]:
+            print("TRANSIENT_REVIEW_RETRY_EXHAUSTED", flush=True)
+    else:
+        state["resume_retry_count"] = 0
+        state["resume_pending"] = outcome.pending
+
+
+def resume_trusted_transition(
+    args: argparse.Namespace, *, poll_existing_only: bool = False
+) -> ResumeOutcome:
+    """Advance the trusted adapter; timers may poll only an existing submission."""
+    trusted_root = getattr(args, "trusted_root", None)
+    if trusted_root is None:
+        return ResumeOutcome(False)
+    if f"{args.owner}/{args.repo}" != REPOSITORY:
+        raise RuntimeError("trusted monitor requires the canonical repository")
+    command = [
+        sys.executable,
+        str(ROOT / "scripts/pr_review_dispatch_transition.py"),
+        "--trusted-root",
+        str(Path(trusted_root).resolve()),
+        "--target-root",
+        str(ROOT),
+        "--pr",
+        str(args.pr),
+        "--json",
+    ]
+    authorization_binding = getattr(args, "owner_authorization_binding", None)
+    if authorization_binding is not None:
+        command += ["--owner-authorization-binding", authorization_binding]
+    if poll_existing_only:
+        command.append("--poll-existing-only")
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=3600,
+        )
+        result = json.loads(completed.stdout)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("trusted PR transition returned no valid JSON") from exc
+    if not isinstance(result, dict) or result.get("pr") != args.pr:
+        raise RuntimeError("trusted PR transition identity is invalid")
+    dispatch = result.get("review_dispatch")
+    submitted = (
+        isinstance(dispatch, dict)
+        and type(dispatch.get("submission_id")) is str
+        and bool(dispatch["submission_id"])
+    )
+    if (
+        isinstance(dispatch, dict)
+        and dispatch.get("status") in {"REQUESTED", "RUNNING"}
+        and not submitted
+    ):
+        raise RuntimeError("trusted transition omitted submitted review ID")
+    exact_request = (
+        completed.returncode == 0
+        and result.get("state") == "CHATGPT_REVIEW_REQUIRED"
+        and isinstance(dispatch, dict)
+        and type(result.get("head_sha")) is str
+        and _SHA.fullmatch(result["head_sha"]) is not None
+        and dispatch.get("head_sha") == result["head_sha"]
+        and dispatch.get("pr") == args.pr
+    )
+    active = (
+        exact_request
+        and submitted
+        and dispatch.get("status") in {"REQUESTED", "RUNNING"}
+    )
+    transient = (
+        exact_request
+        and submitted
+        and dispatch.get("status") == "BLOCKED"
+        and dispatch.get("reason") in TRANSIENT_DISPATCH_REASONS
+    )
+    outcome = ResumeOutcome(bool(active or transient), bool(transient))
+    print(
+        f"TRUSTED_PR_LOOP state={result.get('state')} pending={outcome.pending}",
+        flush=True,
+    )
+    return outcome
+
+
+def _proof_events(previous: dict[str, Any], current: dict[str, Any]) -> list[str]:
+    events: list[str] = []
+    if previous.get("head_sha") != current.get("head_sha"):
+        events.append("HEAD_CHANGED")
+    before = previous.get("chatgpt_review") or {}
+    after = current.get("chatgpt_review") or {}
+    for kind in ("code", "security"):
+        old = before.get(kind) if isinstance(before, dict) else None
+        new = after.get(kind) if isinstance(after, dict) else None
+        if (
+            isinstance(new, dict)
+            and new.get("status") == "PASS"
+            and new.get("comment_id")
+            and new.get("comment_id")
+            != (old.get("comment_id") if isinstance(old, dict) else None)
+        ):
+            events.append(kind.upper() + "_MARKER_APPEARED")
+    old_auth = previous.get("owner_authorization") or {}
+    new_auth = current.get("owner_authorization") or {}
+    if (
+        isinstance(new_auth, dict)
+        and new_auth.get("status") == "PASS"
+        and new_auth.get("comment_id")
+        and new_auth.get("comment_id")
+        != (old_auth.get("comment_id") if isinstance(old_auth, dict) else None)
+    ):
+        events.append("OWNER_AUTH_APPEARED")
+    return events
+
+
+def poll_once(
+    args: argparse.Namespace, state_path: Path, token: str, *, bootstrap: bool = False
+) -> tuple[bool, int]:
+    previous = (
+        json.loads(state_path.read_text(encoding="utf-8"))
+        if state_path.exists()
+        else {}
+    )
     status, payload, etag = github_request(
         "https://api.github.com/graphql",
         token,
@@ -686,6 +1141,17 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
         updated = dict(previous)
         updated["unchanged_polls"] = unchanged
         updated["polled_at"] = int(time.time())
+        if (
+            getattr(args, "trusted_root", None)
+            and not is_terminal(previous, args.abandoned)
+            and (bootstrap or previous.get("resume_pending"))
+        ):
+            outcome = resume_trusted_transition(args, poll_existing_only=not bootstrap)
+            _record_resume_outcome(
+                updated,
+                outcome,
+                prior_count=(0 if bootstrap else previous.get("resume_retry_count", 0)),
+            )
         _write_state(state_path, updated)
         print("NO_CHANGE", flush=True)
         return is_terminal(previous, args.abandoned), unchanged
@@ -698,15 +1164,11 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
         number=args.pr,
         token=token,
     )
+    pr = paginate_comments(
+        pr, owner=args.owner, repo=args.repo, number=args.pr, token=token
+    )
+    pr["_number"] = args.pr
     current = snapshot(pr, etag=etag, timestamp=int(time.time()))
-    if (
-        previous
-        and current.get("head_sha") == previous.get("head_sha")
-        and not current.get("validated_verdict")
-        and previous.get("validated_verdict")
-    ):
-        current["validated_verdict"] = previous["validated_verdict"]
-        current["chatgpt_review"] = previous.get("chatgpt_review", {})
     current["exact_head_verified"] = bool(
         previous
         and current.get("head_sha") == previous.get("head_sha")
@@ -716,7 +1178,12 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
     unchanged = 0 if changes else int(previous.get("unchanged_polls", 0)) + 1
     current["unchanged_polls"] = unchanged
 
-    if previous and changes:
+    handoff_changes = {
+        key: value
+        for key, value in changes.items()
+        if key not in {"chatgpt_review", "owner_authorization"}
+    }
+    if previous and handoff_changes:
         if not current["exact_head_verified"]:
             with exact_head_worktree(str(current.get("head_sha") or "")):
                 pass
@@ -728,7 +1195,9 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
             current.get("head_sha", ""),
             token,
         )
-        handoff = chatgpt_review_handoff(args.pr, previous, current, changes, files)
+        handoff = chatgpt_review_handoff(
+            args.pr, previous, current, handoff_changes, files
+        )
         current["chatgpt_review_handoff"] = handoff
         print("CHATGPT_REVIEW_REQUIRED", flush=True)
         for line in compact_status_lines(args.pr, previous, current, changes):
@@ -737,6 +1206,28 @@ def poll_once(args: argparse.Namespace, state_path: Path, token: str) -> tuple[b
     else:
         print("NO_CHANGE", flush=True)
 
+    events = _proof_events(previous, current) if previous else []
+    for event in events:
+        print(event, flush=True)
+    current["resume_retry_count"] = previous.get("resume_retry_count", 0)
+    if getattr(args, "trusted_root", None) and not is_terminal(current, args.abandoned):
+        if "HEAD_CHANGED" in events:
+            sync_exact_pr_head(args, current["head_sha"])
+        if bootstrap or events or previous.get("resume_pending"):
+            outcome = resume_trusted_transition(
+                args, poll_existing_only=not (bootstrap or events)
+            )
+            _record_resume_outcome(
+                current,
+                outcome,
+                prior_count=(
+                    0 if bootstrap or events else previous.get("resume_retry_count", 0)
+                ),
+            )
+        else:
+            current["resume_pending"] = False
+    else:
+        current["resume_pending"] = False
     # Persist only after all delta processing succeeds. A failed review is retried.
     _write_state(state_path, current)
     return is_terminal(current, args.abandoned), unchanged
@@ -761,6 +1252,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=int, default=900)
     parser.add_argument("--max-interval", type=int, default=3600)
     parser.add_argument("--state")
+    parser.add_argument("--trusted-root", type=Path)
+    parser.add_argument("--owner-authorization-binding")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--abandoned", action="store_true")
     args = parser.parse_args()
@@ -771,23 +1264,49 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     if not token:
-        print("GITHUB_TOKEN is required", file=sys.stderr)
+        try:
+            result = subprocess.run(
+                ["gh", "auth", "token"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            if result.returncode == 0:
+                token = result.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not token:
+        print("GitHub authentication is unavailable", file=sys.stderr)
         return 2
-    state_path = Path(args.state) if args.state else default_state_path(args.owner, args.repo, args.pr)
+    state_path = (
+        Path(args.state)
+        if args.state
+        else default_state_path(args.owner, args.repo, args.pr)
+    )
     transient_failures = 0
+    bootstrap = True
     while True:
         try:
-            terminal, unchanged = poll_once(args, state_path, token)
+            terminal, unchanged = poll_once(
+                args, state_path, token, bootstrap=bootstrap
+            )
+            bootstrap = False
             transient_failures = 0
+        except SupersededHeadError as exc:
+            print(str(exc), file=sys.stderr, flush=True)
+            return 2
         except TransientGitHubError as exc:
             transient_failures += 1
             delay = min(
                 max(args.interval, 60 * (2 ** min(transient_failures - 1, 6))),
                 args.max_interval,
             )
-            print(f"TRANSIENT_ERROR retry_in={delay}s: {exc}", file=sys.stderr, flush=True)
+            print(
+                f"TRANSIENT_ERROR retry_in={delay}s: {exc}", file=sys.stderr, flush=True
+            )
             if args.once:
                 return 3
             time.sleep(delay)

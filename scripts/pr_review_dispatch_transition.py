@@ -26,6 +26,7 @@ if __package__:
         github_owner_marker_lookup,
         validate_legacy_bootstrap_binding,
     )
+    from .chatgpt_review_transport import resolve_review_transport
     from .exact_pr_binding import (
         CANONICAL_REPOSITORY,
         ExactPRBinding,
@@ -34,6 +35,12 @@ if __package__:
         revalidate_exact_open_pr,
     )
     from .managed_gh import resolve_managed_gh
+    from .pr_review_convergence import (
+        ReviewConvergenceError,
+        publish_owner_authorization,
+        reconcile_post_rerun,
+        rerun_after_review_marker,
+    )
 else:
     from chatgpt_review_dispatcher import (
         ReviewDispatchError,
@@ -43,6 +50,7 @@ else:
         github_owner_marker_lookup,
         validate_legacy_bootstrap_binding,
     )
+    from chatgpt_review_transport import resolve_review_transport
     from exact_pr_binding import (
         CANONICAL_REPOSITORY,
         ExactPRBinding,
@@ -51,6 +59,12 @@ else:
         revalidate_exact_open_pr,
     )
     from managed_gh import resolve_managed_gh
+    from pr_review_convergence import (
+        ReviewConvergenceError,
+        publish_owner_authorization,
+        reconcile_post_rerun,
+        rerun_after_review_marker,
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -271,6 +285,7 @@ def dispatch_controller_result(
     target_root: Path,
     dry_run: bool = False,
     transport: Any = None,
+    allow_submit: bool = True,
     resolver: Callable[..., ExactPRBinding] = resolve_exact_open_pr,
     dispatcher: Callable[..., dict[str, Any]] = dispatch_review_request,
     marker_lookup: Callable[..., Any] = github_owner_marker_lookup,
@@ -346,9 +361,21 @@ def dispatch_controller_result(
             "head_sha": binding.head_sha,
             "handoff_sha256": request["handoff_sha256"],
             "transport": "DRY_RUN",
+            "transport_state": "DRY_RUN",
+            "transport_backend": "none",
             "verdict_authority": False,
         }
         return controller
+    if transport is None:
+        resolution = resolve_review_transport()
+        transport = resolution.transport
+        transport_state = resolution.state
+        transport_backend = resolution.backend
+        transport_reason = resolution.reason
+    else:
+        transport_state = "CONFIGURED"
+        transport_backend = "injected"
+        transport_reason = "INJECTED"
     lookup = (
         (lambda bound, kind: marker_lookup(bound, kind, gh=gh))
         if marker_lookup is github_owner_marker_lookup
@@ -358,9 +385,11 @@ def dispatch_controller_result(
         request,
         binding=binding,
         transport=transport,
+        allow_submit=allow_submit,
         owner_marker_lookup=lookup,
         binding_revalidator=lambda bound: revalidate_exact_open_pr(bound, gh=gh),
         legacy_bootstrap_binding=legacy_bootstrap_binding,
+        gh=gh,
     )
     if not isinstance(record, dict) or record.get("verdict_authority") is not False:
         raise ReviewTransitionError(
@@ -387,8 +416,14 @@ def dispatch_controller_result(
         "head_sha": binding.head_sha,
         "handoff_sha256": request["handoff_sha256"],
         "dispatch_identity": record.get("identity"),
+        "submission_id": record.get("submission_id"),
         "outbox_path": record.get("outbox_path"),
+        "result_status": record.get("result_status"),
+        "result_blocking_findings": record.get("result_blocking_findings"),
         "transport": "EXTERNAL" if transport is not None else "UNAVAILABLE",
+        "transport_state": transport_state,
+        "transport_backend": transport_backend,
+        "transport_reason": transport_reason,
         "verdict_authority": False,
     }
     # Missing transport is a handoff boundary, not a qualification failure.
@@ -424,16 +459,24 @@ def transition(
     dry_run: bool = False,
     transport: Any = None,
     legacy_bootstrap_binding: str | None = None,
+    owner_authorization_binding: str | None = None,
+    poll_existing_only: bool = False,
     preflight: Callable[[Path, int], ExactPRBinding] = _preflight_owner_markers,
 ) -> tuple[int, dict[str, Any]]:
     """Advance one bounded trusted transition, repeating only after a real marker."""
     trusted_root = trusted_root.resolve()
     target_root = target_root.resolve()
     previous_kind = ""
+    owner_authorization_attempted = False
     binding = preflight(target_root, pr_number)
     if legacy_bootstrap_binding is not None:
         _validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
-    for attempt in range(3):
+    if (
+        owner_authorization_binding is not None
+        and owner_authorization_binding != f"{binding.pr_number}:{binding.head_sha}"
+    ):
+        raise ReviewTransitionError("owner authorization binding differs from exact PR")
+    for attempt in range(6):
         if attempt and preflight(target_root, pr_number) != binding:
             raise ReviewTransitionError("exact PR binding changed during transition")
         rc, controller = _trusted_transition(
@@ -494,6 +537,38 @@ def transition(
                     "exact-base review handoff did not stabilize after qualification"
                 )
             controller = settled
+        if (
+            not rc
+            and not dry_run
+            and controller.get("state") == "OWNER_AUTH_REQUIRED"
+            and owner_authorization_binding is not None
+        ):
+            if owner_authorization_attempted:
+                raise ReviewTransitionError(
+                    "trusted controller did not accept owner authorization"
+                )
+            authorization = publish_owner_authorization(
+                controller,
+                binding,
+                gh=_managed_gh(),
+                authorization_binding=owner_authorization_binding,
+            )
+            controller["owner_authorization_dispatch"] = authorization
+            if authorization.get("status") != "PASS":
+                return 0, controller
+            owner_authorization_attempted = True
+            continue
+        if rc and owner_authorization_attempted:
+            post_authorization = reconcile_post_rerun(binding, gh=_managed_gh())
+            controller["post_rerun"] = post_authorization
+            if post_authorization.get("status") == "MERGED":
+                controller["state"] = "MERGED"
+                controller["merge_result"] = "PASS"
+                controller["merge_sha"] = post_authorization.get("merge_sha")
+                controller["next_action"] = "NONE"
+                return 0, controller
+            if post_authorization.get("status") == "UNKNOWN":
+                controller["merge_result"] = "UNKNOWN"
         if rc or controller.get("state") != "CHATGPT_REVIEW_REQUIRED":
             return rc, controller
         result = dispatch_controller_result(
@@ -502,6 +577,7 @@ def transition(
             target_root=target_root,
             dry_run=dry_run,
             transport=transport,
+            allow_submit=not poll_existing_only,
             binding=binding,
             legacy_bootstrap_binding=legacy_bootstrap_binding,
         )
@@ -513,6 +589,35 @@ def transition(
                     "trusted controller did not accept the owner marker"
                 )
             previous_kind = kind
+            gh = _managed_gh()
+            rerun_rc = rerun_after_review_marker(
+                result,
+                binding,
+                trusted_root=trusted_root,
+                target_root=target_root,
+                gh=gh,
+            )
+            post_rerun = reconcile_post_rerun(binding, gh=gh)
+            result["post_rerun"] = post_rerun
+            if post_rerun.get("status") == "MERGED":
+                result["state"] = "MERGED"
+                result["merge_result"] = "PASS"
+                result["merge_sha"] = post_rerun.get("merge_sha")
+                result["next_action"] = "NONE"
+                return 0, result
+            if post_rerun.get("status") == "SUPERSEDED":
+                result["state"] = "SUPERSEDED"
+                result["next_action"] = "QUALIFICATION"
+                return 1, result
+            if post_rerun.get("status") != "OPEN":
+                result["state"] = "BLOCKED"
+                result["merge_result"] = "UNKNOWN"
+                result["next_action"] = "REVALIDATE_EXACT_PR"
+                return 1, result
+            if rerun_rc != 0:
+                result["state"] = "BLOCKED"
+                result["next_action"] = "REVALIDATE_EXACT_PR"
+                return rerun_rc, result
             continue
         if dispatch.get("status") == "FAIL":
             result["state"] = f"{dispatch.get('kind')}_FAILED"
@@ -575,6 +680,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--kind", choices=("CODE", "SECURITY"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--poll-existing-only", action="store_true")
+    parser.add_argument(
+        "--owner-authorization-binding",
+        metavar="PR:HEAD_SHA",
+        help="explicit exact campaign consent for publishing owner authorization",
+    )
     parser.add_argument(
         "--legacy-bootstrap-binding",
         metavar="BASE_SHA:HEAD_SHA",
@@ -588,6 +699,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.kind is None
                 or args.dry_run
                 or args.legacy_bootstrap_binding is not None
+                or args.owner_authorization_binding is not None
+                or args.poll_existing_only
             ):
                 raise ReviewTransitionError(
                     "status requires --kind and disallows transition options"
@@ -595,7 +708,11 @@ def main(argv: list[str] | None = None) -> int:
             result = review_dispatch_status(args.target_root, args.pr, args.kind)
             rc = 0
         else:
-            if args.trusted_root is None or args.kind is not None:
+            if (
+                args.trusted_root is None
+                or args.kind is not None
+                or (args.poll_existing_only and args.dry_run)
+            ):
                 raise ReviewTransitionError(
                     "transition requires --trusted-root and no --kind"
                 )
@@ -605,6 +722,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.pr,
                 dry_run=args.dry_run,
                 legacy_bootstrap_binding=args.legacy_bootstrap_binding,
+                owner_authorization_binding=args.owner_authorization_binding,
+                poll_existing_only=args.poll_existing_only,
             )
     except (
         OSError,
@@ -612,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         ReviewTransitionError,
         ExactPRBindingError,
         ReviewDispatchError,
+        ReviewConvergenceError,
     ) as exc:
         rc = 1
         result = {

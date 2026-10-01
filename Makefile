@@ -325,10 +325,10 @@ roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from Gi
 deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, push and create/update exact-SHA GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-pr-loop: ## Run trusted-pr-transition from TRUSTED_ROOT at the PR BASE_SHA, then dispatch external review; PR required
+pr-loop: ## Converge the exact-base trusted PR controller and configured review transport; PR/TRUSTED_ROOT required
 	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
 	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
-	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,) $(if $(LEGACY_BOOTSTRAP_BINDING),--legacy-bootstrap-binding "$(LEGACY_BOOTSTRAP_BINDING)",)
+	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,) $(if $(LEGACY_BOOTSTRAP_BINDING),--legacy-bootstrap-binding "$(LEGACY_BOOTSTRAP_BINDING)",) $(if $(OWNER_AUTHORIZATION_BINDING),--owner-authorization-binding "$(OWNER_AUTHORIZATION_BINDING)",)
 
 .PHONY: review-dispatch-status
 review-dispatch-status: ## Read non-authoritative ChatGPT outbox status for exact PR and KIND=CODE|SECURITY
@@ -375,8 +375,8 @@ diff-context: ## Build compact diff-only context pack (hard-capped by codex-toke
 failure-context: ## Capture causal output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)" $(if $(RERUN),--rerun,)
 
-pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handoffs; PR/OWNER/REPO required
-	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
+pr-monitor: ## Poll one GitHub PR; TRUSTED_ROOT enables automatic exact-base review resumption
+	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 $(if $(TRUSTED_ROOT),--trusted-root "$(TRUSTED_ROOT)",) $(if $(OWNER_AUTHORIZATION_BINDING),--owner-authorization-binding "$(OWNER_AUTHORIZATION_BINDING)",)
 
 review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }

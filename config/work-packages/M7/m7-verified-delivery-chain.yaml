@@ -7,6 +7,7 @@ scope:
   allowed_paths:
   - .agents/skills/chatgpt-exact-sha-review/references/review-runbook.md
   - architecture.lock.yaml
+  - Makefile
   - config/contracts/ci-evidence.yaml
   - config/contracts/execution-properties-policy.yaml
   - config/contracts/issue-lifecycle-policy.yaml
@@ -16,15 +17,20 @@ scope:
   - config/contracts/roadmap-policy.yaml
   - config/contracts/work-package-policy.yaml
   - config/work-packages/M7/**
+  - docs/engineering/CHATGPT_REVIEW_BUDGET.md
   - docs/engineering/verified-delivery-chain.md
   - docs/project/MASTER_EXECUTION_PLAN.md
   - scripts/architecture_authority.py
+  - scripts/chatgpt_review_dispatcher.py
+  - scripts/chatgpt_review_transport.py
   - scripts/delivery_preflight.py
   - scripts/evidence_bundle.py
   - scripts/issue_lifecycle.py
   - scripts/merge_risk.py
   - scripts/milestone_plan.py
   - scripts/post_merge_verify.py
+  - scripts/pr_monitor.py
+  - scripts/pr_review_convergence.py
   - scripts/repoctl.py
   - scripts/pr_review_dispatch_transition.py
   - scripts/roadmap_sync.py
@@ -36,6 +42,8 @@ scope:
   - tests/test_delivery_witness_bootstrap.py
   - tests/test_architecture_authority.py
   - tests/test_chatgpt_review_authority.py
+  - tests/test_chatgpt_review_dispatcher.py
+  - tests/test_chatgpt_review_transport.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
   - tests/test_delivery_supersession.py
@@ -46,6 +54,8 @@ scope:
   - tests/test_risk_content_assessment.py
   - tests/test_milestone_plan.py
   - tests/test_post_merge_verify.py
+  - tests/test_pr_monitor.py
+  - tests/test_pr_review_convergence.py
   - tests/test_pr_loop.py
   - tests/test_pr_review_dispatch_transition.py
   - tests/test_roadmap_sync.py
@@ -79,6 +89,8 @@ acceptance:
   - tests/test_work_package.py
   - tests/test_architecture_authority.py
   - tests/test_chatgpt_review_authority.py
+  - tests/test_chatgpt_review_dispatcher.py
+  - tests/test_chatgpt_review_transport.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
   - tests/test_delivery_preflight.py
@@ -87,6 +99,8 @@ acceptance:
   - tests/test_merge_risk.py
   - tests/test_risk_content_assessment.py
   - tests/test_post_merge_verify.py
+  - tests/test_pr_monitor.py
+  - tests/test_pr_review_convergence.py
   - tests/test_roadmap_sync.py
   - tests/test_issue_lifecycle.py
   - tests/test_milestone_plan.py

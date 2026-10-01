@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, mock
 
+from scripts import chatgpt_review_transport as review_transport
 from scripts import pr_monitor
 from scripts import pr_review_dispatch_transition as transition
 from scripts.exact_pr_binding import ExactPRBinding
@@ -168,6 +169,30 @@ class PRReviewDispatchTransitionTest(TestCase):
             REPOSITORY, HEAD, BRANCH, "main", BASE, gh=self.gh_path
         )
 
+    def test_poll_existing_only_forbids_new_transport_submission(self):
+        dispatch = mock.Mock(
+            return_value={
+                "state": "BLOCKED",
+                "reason": "SUBMIT_NOT_ALLOWED",
+                "identity": "c" * 64,
+                "submission_id": "",
+                "verdict_authority": False,
+            }
+        )
+        with self.local_git():
+            result = transition.dispatch_controller_result(
+                structured_controller(),
+                pr_number=169,
+                target_root=Path("/repo"),
+                allow_submit=False,
+                resolver=lambda *args, **kwargs: self.binding,
+                dispatcher=dispatch,
+                marker_lookup=lambda *_: None,
+            )
+        self.assertFalse(dispatch.call_args.kwargs["allow_submit"])
+        self.assertEqual("SUBMIT_NOT_ALLOWED", result["review_dispatch"]["reason"])
+        self.assertEqual("", result["review_dispatch"]["submission_id"])
+
     def test_structured_handoff_is_the_actual_dispatched_text(self):
         source = structured_controller()
         record = {
@@ -312,6 +337,12 @@ class PRReviewDispatchTransitionTest(TestCase):
                     "review_dispatch": {"status": "PASS", "kind": "CODE"},
                 },
             ),
+            mock.patch.object(
+                transition, "rerun_after_review_marker", return_value=0
+            ) as rerun,
+            mock.patch.object(
+                transition, "reconcile_post_rerun", return_value={"status": "OPEN"}
+            ),
         ):
             code, result = transition.transition(
                 Path("/trusted"),
@@ -322,6 +353,7 @@ class PRReviewDispatchTransitionTest(TestCase):
         self.assertEqual(0, code)
         self.assertEqual("OWNER_AUTH_REQUIRED", result["state"])
         self.assertEqual(2, trusted.call_count)
+        rerun.assert_called_once()
 
     def test_new_qualification_settles_handoff_before_dispatch(self):
         first = controller(
@@ -635,6 +667,12 @@ class PRReviewDispatchTransitionTest(TestCase):
                     value, **kwargs, dispatcher=dispatch
                 ),
             ),
+            mock.patch.object(
+                transition, "rerun_after_review_marker", return_value=0
+            ) as rerun,
+            mock.patch.object(
+                transition, "reconcile_post_rerun", return_value={"status": "OPEN"}
+            ),
         ):
             rc, result = transition.transition(
                 Path("/trusted"),
@@ -650,6 +688,7 @@ class PRReviewDispatchTransitionTest(TestCase):
             [call.args[0]["review_kind"] for call in dispatch.call_args_list],
         )
         self.assertEqual("SECURITY", result["review_dispatch"]["kind"])
+        rerun.assert_called_once()
 
     def test_legacy_bootstrap_is_rejected_without_explicit_exact_binding(self):
         source = controller(
@@ -770,3 +809,178 @@ class PRReviewDispatchTransitionTest(TestCase):
             )
             self.assertEqual(legacy_handoff, record["request"]["handoff"])
             self.assertFalse(record["request"]["handoff"].startswith("{"))
+
+    def test_resolved_transport_states_are_explicit_and_passed_to_dispatcher(self):
+        for state in ("DISABLED", "UNAVAILABLE", "CONFIGURED"):
+            with self.subTest(state=state):
+                backend = object() if state == "CONFIGURED" else None
+                resolution = review_transport.TransportResolution(
+                    state, "command-v1" if backend else "none", backend, state
+                )
+                dispatch = mock.Mock(
+                    return_value={
+                        "state": "BLOCKED",
+                        "reason": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+                        "verdict_authority": False,
+                    }
+                )
+                with (
+                    self.local_git(),
+                    mock.patch.object(
+                        transition, "resolve_review_transport", return_value=resolution
+                    ) as resolve,
+                ):
+                    result = transition.dispatch_controller_result(
+                        structured_controller(),
+                        pr_number=169,
+                        target_root=Path("/repo"),
+                        resolver=lambda *args, **kwargs: self.binding,
+                        dispatcher=dispatch,
+                        marker_lookup=lambda *_: None,
+                    )
+                resolve.assert_called_once_with()
+                self.assertIs(backend, dispatch.call_args.kwargs["transport"])
+                self.assertEqual(state, result["review_dispatch"]["transport_state"])
+                self.assertEqual(
+                    resolution.backend, result["review_dispatch"]["transport_backend"]
+                )
+
+    def test_dry_run_never_resolves_transport(self):
+        with (
+            self.local_git(),
+            mock.patch.object(transition, "resolve_review_transport") as resolve,
+        ):
+            result = transition.dispatch_controller_result(
+                structured_controller(),
+                pr_number=169,
+                target_root=Path("/repo"),
+                dry_run=True,
+                resolver=lambda *args, **kwargs: self.binding,
+            )
+        resolve.assert_not_called()
+        self.assertEqual("NOT_REQUESTED", result["review_dispatch"]["status"])
+        self.assertEqual("DRY_RUN", result["review_dispatch"]["transport"])
+
+    def test_owner_authorization_requires_exact_opt_in(self):
+        owner = {"state": "OWNER_AUTH_REQUIRED", "pr": 169, "head_sha": HEAD}
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", return_value=(0, owner)
+            ),
+            mock.patch.object(transition, "publish_owner_authorization") as publish,
+        ):
+            rc, result = transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        self.assertEqual(0, rc)
+        self.assertEqual("OWNER_AUTH_REQUIRED", result["state"])
+        publish.assert_not_called()
+        with (
+            mock.patch.object(transition, "_trusted_transition") as trusted,
+            self.assertRaisesRegex(transition.ReviewTransitionError, "binding differs"),
+        ):
+            transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+                owner_authorization_binding="169:" + "c" * 40,
+            )
+        trusted.assert_not_called()
+
+    def test_exact_owner_authorization_opt_in_restarts_controller(self):
+        owner = {"state": "OWNER_AUTH_REQUIRED", "pr": 169, "head_sha": HEAD}
+        ready = {"state": "MERGE_READY", "pr": 169, "head_sha": HEAD}
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", side_effect=[(0, owner), (0, ready)]
+            ) as trusted,
+            mock.patch.object(
+                transition,
+                "publish_owner_authorization",
+                return_value={"status": "PASS", "published": True},
+            ) as publish,
+        ):
+            rc, result = transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+                owner_authorization_binding=f"169:{HEAD}",
+            )
+        self.assertEqual(0, rc)
+        self.assertEqual("MERGE_READY", result["state"])
+        self.assertEqual(2, trusted.call_count)
+        self.assertEqual(
+            f"169:{HEAD}", publish.call_args.kwargs["authorization_binding"]
+        )
+
+    def test_nonzero_rerun_is_reconciled_against_exact_github_merge(self):
+        review = controller()
+        merged = {"status": "MERGED", "merge_sha": "f" * 40}
+        with (
+            mock.patch.object(
+                transition, "_trusted_transition", return_value=(0, review)
+            ) as trusted,
+            mock.patch.object(
+                transition,
+                "dispatch_controller_result",
+                return_value={
+                    **review,
+                    "review_dispatch": {"status": "PASS", "kind": "CODE"},
+                },
+            ),
+            mock.patch.object(
+                transition, "rerun_after_review_marker", return_value=1
+            ) as rerun,
+            mock.patch.object(
+                transition, "reconcile_post_rerun", return_value=merged
+            ) as reconcile,
+        ):
+            rc, result = transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+            )
+        self.assertEqual(0, rc)
+        self.assertEqual("MERGED", result["state"])
+        self.assertEqual("f" * 40, result["merge_sha"])
+        trusted.assert_called_once()
+        rerun.assert_called_once()
+        reconcile.assert_called_once_with(self.binding, gh=self.gh_path)
+
+    def test_nonzero_after_uac_accepts_only_exact_github_merge(self):
+        owner = {"state": "OWNER_AUTH_REQUIRED", "pr": 169, "head_sha": HEAD}
+        uncertain = {"state": "BLOCKED", "pr": 169, "head_sha": HEAD}
+        with (
+            mock.patch.object(
+                transition,
+                "_trusted_transition",
+                side_effect=[(0, owner), (1, uncertain)],
+            ),
+            mock.patch.object(
+                transition,
+                "publish_owner_authorization",
+                return_value={"status": "PASS", "published": True},
+            ),
+            mock.patch.object(
+                transition,
+                "reconcile_post_rerun",
+                return_value={"status": "MERGED", "merge_sha": "f" * 40},
+            ) as reconcile,
+        ):
+            rc, result = transition.transition(
+                Path("/trusted"),
+                Path("/target"),
+                169,
+                preflight=lambda *_: self.binding,
+                owner_authorization_binding=f"169:{HEAD}",
+            )
+        self.assertEqual(0, rc)
+        self.assertEqual("MERGED", result["state"])
+        self.assertEqual("f" * 40, result["merge_sha"])
+        reconcile.assert_called_once_with(self.binding, gh=self.gh_path)
