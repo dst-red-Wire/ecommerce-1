@@ -22,6 +22,7 @@ from typing import Any
 
 if __package__:
     from .exact_pr_binding import (
+        ExactPRBinding,
         ExactPRBindingChanged,
         ExactPRBindingError,
         resolve_exact_open_pr,
@@ -30,6 +31,7 @@ if __package__:
     from .managed_gh import resolve_managed_gh
 else:
     from exact_pr_binding import (
+        ExactPRBinding,
         ExactPRBindingChanged,
         ExactPRBindingError,
         resolve_exact_open_pr,
@@ -818,6 +820,15 @@ def compact_status_lines(
     ]
 
 
+def _safe_exec_env() -> dict[str, str]:
+    environment = os.environ.copy()
+    for name in tuple(environment):
+        if name.startswith(("GIT_", "PYTHON")):
+            environment.pop(name, None)
+    environment["PATH"] = os.defpath
+    return environment
+
+
 def _run(
     command: list[str], *, cwd: Path, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
@@ -828,11 +839,87 @@ def _run(
         text=True,
         capture_output=True,
         check=True,
+        env=_safe_exec_env(),
     )
 
 
-def _git_value(*arguments: str) -> str:
-    return _run(["git", *arguments], cwd=ROOT).stdout.strip()
+def _git_value(root: Path, *arguments: str) -> str:
+    return _run(["git", *arguments], cwd=root).stdout.strip()
+
+
+_TRUSTED_SOURCE_PATHS = (
+    "scripts/pr_monitor.py",
+    "scripts/pr_review_dispatch_transition.py",
+    "scripts/chatgpt_review_dispatcher.py",
+    "scripts/chatgpt_review_transport.py",
+    "scripts/pr_review_convergence.py",
+    "scripts/exact_pr_binding.py",
+    "scripts/managed_gh.py",
+)
+_TRUSTED_BOOTSTRAP = (
+    "import runpy,sys;"
+    "from pathlib import Path;"
+    "entry=Path(sys.argv[1]);"
+    "sys.path.insert(0,str(entry.parent));"
+    "sys.argv=sys.argv[1:];"
+    'runpy.run_path(str(entry),run_name="__main__")'
+)
+
+
+def _trusted_roots(args: argparse.Namespace) -> tuple[Path, Path]:
+    trusted_arg = getattr(args, "trusted_root", None)
+    target_arg = getattr(args, "target_root", None)
+    if trusted_arg is None or target_arg is None:
+        raise RuntimeError("trusted monitor requires explicit trusted and target roots")
+    trusted = Path(trusted_arg).resolve()
+    target = Path(target_arg).resolve()
+    if trusted != ROOT or trusted == target:
+        raise RuntimeError(
+            "trusted monitor must execute from a distinct exact-base checkout"
+        )
+    return trusted, target
+
+
+def _verified_base_source(root: Path, base_sha: str, relative: str) -> Path:
+    source = root / relative
+    if (
+        source.parent.is_symlink()
+        or source.is_symlink()
+        or not source.is_file()
+        or source.resolve(strict=True) != source
+    ):
+        raise RuntimeError("trusted exact-base source is unavailable")
+    try:
+        committed = subprocess.run(
+            ["git", "cat-file", "blob", f"{base_sha}:{relative}"],
+            cwd=root,
+            capture_output=True,
+            check=True,
+            timeout=30,
+            env=_safe_exec_env(),
+        ).stdout
+        actual = source.read_bytes()
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("trusted exact-base source is unavailable") from exc
+    if actual != committed:
+        raise RuntimeError("trusted exact-base source differs from Git")
+    return source
+
+
+def _trusted_adapter(args: argparse.Namespace, binding: ExactPRBinding) -> Path:
+    trusted, _ = _trusted_roots(args)
+    if binding.repository != REPOSITORY or binding.pr_number != args.pr:
+        raise RuntimeError("trusted monitor exact PR binding differs")
+    try:
+        if _git_value(trusted, "rev-parse", "HEAD") != binding.base_sha or _git_value(
+            trusted, "status", "--porcelain", "--untracked-files=all"
+        ):
+            raise RuntimeError("trusted monitor base checkout differs from GitHub")
+        for relative in _TRUSTED_SOURCE_PATHS:
+            _verified_base_source(trusted, binding.base_sha, relative)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("trusted monitor base checkout is unavailable") from exc
+    return trusted / "scripts/pr_review_dispatch_transition.py"
 
 
 def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
@@ -845,11 +932,14 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
         or _SHA.fullmatch(head_sha) is None
     ):
         raise SupersededHeadError("SUPERSEDED: invalid exact PR HEAD binding")
+    trusted_root, target_root = _trusted_roots(args)
     try:
-        gh, _, _ = resolve_managed_gh(ROOT)
-        branch = _git_value("branch", "--show-current")
-        local_head = _git_value("rev-parse", "HEAD")
-        dirty = _git_value("status", "--porcelain", "--untracked-files=all")
+        gh, _, _ = resolve_managed_gh(trusted_root)
+        branch = _git_value(target_root, "branch", "--show-current")
+        local_head = _git_value(target_root, "rev-parse", "HEAD")
+        dirty = _git_value(
+            target_root, "status", "--porcelain", "--untracked-files=all"
+        )
     except (ValueError, OSError, subprocess.CalledProcessError) as exc:
         raise SupersededHeadError("SUPERSEDED: local checkout is unavailable") from exc
     if not branch or dirty or _SHA.fullmatch(local_head) is None:
@@ -866,6 +956,7 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
         ) from exc
     if binding.pr_number != args.pr:
         raise SupersededHeadError("SUPERSEDED: GitHub PR number differs")
+    _trusted_adapter(args, binding)
 
     def verify_github() -> None:
         try:
@@ -892,18 +983,21 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
     if local_head == head_sha:
         return
     try:
-        _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=ROOT)
+        _run(["git", "fetch", "--no-tags", "origin", head_sha], cwd=target_root)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise TransientGitHubError("git fetch failed for exact GitHub PR HEAD") from exc
     try:
-        fetched = _git_value("rev-parse", "FETCH_HEAD")
+        fetched = _git_value(target_root, "rev-parse", "FETCH_HEAD")
         if fetched != head_sha:
             raise SupersededHeadError("SUPERSEDED: fetched HEAD differs from GitHub")
-        _run(["git", "merge-base", "--is-ancestor", local_head, head_sha], cwd=ROOT)
+        _run(
+            ["git", "merge-base", "--is-ancestor", local_head, head_sha],
+            cwd=target_root,
+        )
         if (
-            _git_value("branch", "--show-current") != branch
-            or _git_value("rev-parse", "HEAD") != local_head
-            or _git_value("status", "--porcelain", "--untracked-files=all")
+            _git_value(target_root, "branch", "--show-current") != branch
+            or _git_value(target_root, "rev-parse", "HEAD") != local_head
+            or _git_value(target_root, "status", "--porcelain", "--untracked-files=all")
         ):
             raise SupersededHeadError(
                 "SUPERSEDED: local checkout changed before fast-forward"
@@ -911,12 +1005,12 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
         verify_github()
         _run(
             ["git", "-c", "core.hooksPath=/dev/null", "merge", "--ff-only", head_sha],
-            cwd=ROOT,
+            cwd=target_root,
         )
         if (
-            _git_value("branch", "--show-current") != branch
-            or _git_value("rev-parse", "HEAD") != head_sha
-            or _git_value("status", "--porcelain", "--untracked-files=all")
+            _git_value(target_root, "branch", "--show-current") != branch
+            or _git_value(target_root, "rev-parse", "HEAD") != head_sha
+            or _git_value(target_root, "status", "--porcelain", "--untracked-files=all")
         ):
             raise SupersededHeadError("SUPERSEDED: local fast-forward is not exact")
         verify_github()
@@ -927,10 +1021,10 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
 
 
 @contextmanager
-def exact_head_worktree(head_sha: str):
+def exact_head_worktree(head_sha: str, *, repo_root: Path | None = None):
     if re.fullmatch(r"[0-9a-f]{40}", head_sha) is None:
         raise RuntimeError(f"invalid exact PR head SHA: {head_sha!r}")
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = ROOT if repo_root is None else Path(repo_root).resolve()
     with tempfile.TemporaryDirectory(prefix="pr-monitor-") as directory:
         worktree = Path(directory) / "repo"
         try:
@@ -957,6 +1051,7 @@ def exact_head_worktree(head_sha: str):
                 text=True,
                 capture_output=True,
                 check=False,
+                env=_safe_exec_env(),
             )
 
 
@@ -1012,22 +1107,57 @@ def _record_resume_outcome(
         state["resume_pending"] = outcome.pending
 
 
+def _verified_resume_context(
+    args: argparse.Namespace,
+) -> tuple[Path, Path, Path]:
+    trusted, target = _trusted_roots(args)
+    if f"{args.owner}/{args.repo}" != REPOSITORY or type(args.pr) is not int:
+        raise RuntimeError("trusted monitor requires the canonical exact PR")
+    try:
+        head = _git_value(target, "rev-parse", "HEAD")
+        branch = _git_value(target, "branch", "--show-current")
+        dirty = _git_value(target, "status", "--porcelain", "--untracked-files=all")
+        gh, _, _ = resolve_managed_gh(trusted)
+        binding = resolve_exact_open_pr(REPOSITORY, head, branch, "main", gh=gh)
+    except (
+        OSError,
+        ValueError,
+        ExactPRBindingError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise RuntimeError("trusted monitor exact PR binding is unavailable") from exc
+    if (
+        _SHA.fullmatch(head) is None
+        or not branch
+        or dirty
+        or binding.pr_number != args.pr
+    ):
+        raise RuntimeError("trusted monitor target PR checkout is not exact and clean")
+    adapter = _trusted_adapter(args, binding)
+    try:
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            raise RuntimeError("trusted monitor exact PR binding changed")
+    except ExactPRBindingError as exc:
+        raise RuntimeError("trusted monitor exact PR revalidation failed") from exc
+    return trusted, target, adapter
+
+
 def resume_trusted_transition(
     args: argparse.Namespace, *, poll_existing_only: bool = False
 ) -> ResumeOutcome:
-    """Advance the trusted adapter; timers may poll only an existing submission."""
-    trusted_root = getattr(args, "trusted_root", None)
-    if trusted_root is None:
+    if getattr(args, "trusted_root", None) is None:
         return ResumeOutcome(False)
-    if f"{args.owner}/{args.repo}" != REPOSITORY:
-        raise RuntimeError("trusted monitor requires the canonical repository")
+    trusted_root, target_root, adapter = _verified_resume_context(args)
     command = [
         sys.executable,
-        str(ROOT / "scripts/pr_review_dispatch_transition.py"),
+        "-I",
+        "-c",
+        _TRUSTED_BOOTSTRAP,
+        str(adapter),
         "--trusted-root",
-        str(Path(trusted_root).resolve()),
+        str(trusted_root),
         "--target-root",
-        str(ROOT),
+        str(target_root),
         "--pr",
         str(args.pr),
         "--json",
@@ -1040,12 +1170,13 @@ def resume_trusted_transition(
     try:
         completed = subprocess.run(
             command,
-            cwd=ROOT,
+            cwd=trusted_root,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             check=False,
             timeout=3600,
+            env=_safe_exec_env(),
         )
         result = json.loads(completed.stdout)
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -1185,7 +1316,14 @@ def poll_once(
     }
     if previous and handoff_changes:
         if not current["exact_head_verified"]:
-            with exact_head_worktree(str(current.get("head_sha") or "")):
+            worktree_root = (
+                _trusted_roots(args)[1]
+                if getattr(args, "trusted_root", None) is not None
+                else ROOT
+            )
+            with exact_head_worktree(
+                str(current.get("head_sha") or ""), repo_root=worktree_root
+            ):
                 pass
             current["exact_head_verified"] = True
         files = changed_files(
@@ -1253,26 +1391,39 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-interval", type=int, default=3600)
     parser.add_argument("--state")
     parser.add_argument("--trusted-root", type=Path)
+    parser.add_argument("--target-root", type=Path)
     parser.add_argument("--owner-authorization-binding")
     parser.add_argument("--once", action="store_true")
     parser.add_argument("--abandoned", action="store_true")
     args = parser.parse_args()
     if args.interval < 1 or args.max_interval < args.interval:
         parser.error("intervals must satisfy 1 <= --interval <= --max-interval")
+    if (args.trusted_root is None) != (args.target_root is None):
+        parser.error("--trusted-root and --target-root must be supplied together")
+    if args.owner_authorization_binding and args.trusted_root is None:
+        parser.error("owner authorization binding requires trusted mode")
     return args
 
 
 def main() -> int:
     args = parse_args()
+    try:
+        if args.trusted_root is not None:
+            _trusted_roots(args)
+    except RuntimeError as exc:
+        print(f"BLOCKED_AUTHORITY {exc}", file=sys.stderr, flush=True)
+        return 2
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     if not token:
         try:
+            gh = resolve_managed_gh(ROOT)[0] if args.trusted_root is not None else "gh"
             result = subprocess.run(
-                ["gh", "auth", "token"],
+                [gh, "auth", "token"],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=15,
+                env=_safe_exec_env(),
             )
             if result.returncode == 0:
                 token = result.stdout.strip()
@@ -1284,7 +1435,8 @@ def main() -> int:
     state_path = (
         Path(args.state)
         if args.state
-        else default_state_path(args.owner, args.repo, args.pr)
+        else (_trusted_roots(args)[1] if args.trusted_root is not None else ROOT)
+        / default_state_path(args.owner, args.repo, args.pr)
     )
     transient_failures = 0
     bootstrap = True
@@ -1311,6 +1463,9 @@ def main() -> int:
                 return 3
             time.sleep(delay)
             continue
+        except RuntimeError as exc:
+            print(f"BLOCKED_AUTHORITY {exc}", file=sys.stderr, flush=True)
+            return 2
         if terminal or args.once:
             return 0
         time.sleep(next_interval(unchanged, args.interval, args.max_interval))

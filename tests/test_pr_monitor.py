@@ -193,7 +193,7 @@ class PRMonitorTest(unittest.TestCase):
             self.assertIn("chatgpt_review_handoff", stored)
             self.assertIn("current_head", stored["chatgpt_review_handoff"])
             self.assertTrue(stored["exact_head_verified"])
-            checkout.assert_called_once_with("new")
+            checkout.assert_called_once_with("new", repo_root=pr_monitor.ROOT)
             output.assert_any_call("CHATGPT_REVIEW_REQUIRED", flush=True)
 
     def test_chatgpt_review_handoff_is_bounded_and_exact_sha_oriented(self):
@@ -514,6 +514,7 @@ class PRMonitorTest(unittest.TestCase):
             repo="ecommerce-1",
             pr=169,
             trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
             owner_authorization_binding="169:" + "a" * 40,
         )
         completed = mock.Mock(
@@ -532,15 +533,31 @@ class PRMonitorTest(unittest.TestCase):
             ),
             returncode=0,
         )
-        with mock.patch.object(
-            pr_monitor.subprocess, "run", return_value=completed
-        ) as runner:
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(
+                pr_monitor.subprocess, "run", return_value=completed
+            ) as runner,
+        ):
             pending = pr_monitor.resume_trusted_transition(monitor_args)
         self.assertTrue(pending.pending)
         self.assertFalse(pending.transient_error)
         command = runner.call_args.args[0]
         self.assertIn("--owner-authorization-binding", command)
         self.assertEqual("169:" + "a" * 40, command[-1])
+        self.assertEqual(["-I", "-c"], command[1:3])
+        self.assertEqual(
+            "/trusted/scripts/pr_review_dispatch_transition.py", command[4]
+        )
+        self.assertEqual(Path("/trusted"), runner.call_args.kwargs["cwd"])
 
     def test_transient_transport_retry_is_bounded_and_timer_polls_only_existing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -586,6 +603,7 @@ class PRMonitorTest(unittest.TestCase):
             repo="ecommerce-1",
             pr=169,
             trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
         )
         dispatch = {
             "status": "BLOCKED",
@@ -600,11 +618,22 @@ class PRMonitorTest(unittest.TestCase):
             "state": "CHATGPT_REVIEW_REQUIRED",
             "review_dispatch": dispatch,
         }
-        with mock.patch.object(
-            pr_monitor.subprocess,
-            "run",
-            return_value=mock.Mock(stdout=json.dumps(result), returncode=0),
-        ) as runner:
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(
+                pr_monitor.subprocess,
+                "run",
+                return_value=mock.Mock(stdout=json.dumps(result), returncode=0),
+            ) as runner,
+        ):
             outcome = pr_monitor.resume_trusted_transition(
                 monitor_args, poll_existing_only=True
             )
@@ -644,8 +673,10 @@ class PRMonitorTest(unittest.TestCase):
                 repo="ecommerce-1",
                 pr=169,
                 trusted_root=Path("/trusted"),
+                target_root=Path("/target"),
             )
             with (
+                mock.patch.object(pr_monitor, "ROOT", Path("/trusted")),
                 mock.patch.object(
                     pr_monitor, "github_request", return_value=(200, payload, "new")
                 ),
@@ -687,6 +718,7 @@ class PRMonitorTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             origin = Path(directory) / "origin.git"
             checkout = Path(directory) / "checkout"
+            trusted = Path(directory) / "trusted"
             subprocess.run(
                 ["git", "init", "--bare", str(origin)],
                 text=True,
@@ -707,6 +739,12 @@ class PRMonitorTest(unittest.TestCase):
             git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "base")
             base_sha = git(checkout, "rev-parse", "HEAD")
             git(checkout, "push", "origin", "main")
+            subprocess.run(
+                ["git", "clone", "--branch", "main", str(origin), str(trusted)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
             git(checkout, "checkout", "-b", "feature")
             (checkout / "feature.txt").write_text("old")
             git(checkout, "add", "feature.txt")
@@ -721,9 +759,20 @@ class PRMonitorTest(unittest.TestCase):
             binding = ExactPRBinding(
                 "dst-red-Wire/ecommerce-1", 169, "main", base_sha, "feature", new_sha
             )
-            monitor_args = args(owner="dst-red-Wire", repo="ecommerce-1", pr=169)
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=checkout,
+            )
             with (
-                mock.patch.object(pr_monitor, "ROOT", checkout),
+                mock.patch.object(pr_monitor, "ROOT", trusted),
+                mock.patch.object(
+                    pr_monitor,
+                    "_trusted_adapter",
+                    return_value=trusted / "scripts/pr_review_dispatch_transition.py",
+                ),
                 mock.patch.object(
                     pr_monitor,
                     "resolve_managed_gh",
@@ -738,6 +787,7 @@ class PRMonitorTest(unittest.TestCase):
             ):
                 pr_monitor.sync_exact_pr_head(monitor_args, new_sha)
                 self.assertEqual(new_sha, git(checkout, "rev-parse", "HEAD"))
+                self.assertEqual(base_sha, git(trusted, "rev-parse", "HEAD"))
                 self.assertEqual("", git(checkout, "status", "--porcelain"))
                 self.assertGreaterEqual(revalidate.call_count, 3)
                 git(checkout, "reset", "--hard", old_sha)
@@ -761,6 +811,117 @@ class PRMonitorTest(unittest.TestCase):
             self.assertRaises(pr_monitor.TransientGitHubError),
         ):
             pr_monitor.github_request("https://api.github.com", "token")
+
+    def test_malicious_target_adapter_is_never_selected_for_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            target = root / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            (target / "scripts").mkdir(parents=True)
+            safe_adapter = trusted / "scripts/pr_review_dispatch_transition.py"
+            malicious_adapter = target / "scripts/pr_review_dispatch_transition.py"
+            safe_adapter.write_text("raise SystemExit(0)\n")
+            malicious_adapter.write_text('raise RuntimeError("stolen token")\n')
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=target,
+            )
+            completed = mock.Mock(
+                stdout=json.dumps({"pr": 169, "state": "MERGE_READY"}),
+                returncode=0,
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor,
+                    "_verified_resume_context",
+                    return_value=(trusted, target, safe_adapter),
+                ),
+                mock.patch.object(
+                    pr_monitor.subprocess, "run", return_value=completed
+                ) as runner,
+            ):
+                pr_monitor.resume_trusted_transition(monitor_args)
+            command = runner.call_args.args[0]
+            self.assertEqual(str(safe_adapter), command[4])
+            self.assertNotIn(str(malicious_adapter), command)
+            self.assertEqual(trusted, runner.call_args.kwargs["cwd"])
+            self.assertEqual(["-I", "-c"], command[1:3])
+            self.assertEqual(str(target), command[command.index("--target-root") + 1])
+
+    def test_missing_base_adapter_blocks_without_target_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            target = root / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            (target / "scripts").mkdir(parents=True)
+            (trusted / "scripts/pr_monitor.py").write_bytes(
+                Path(pr_monitor.__file__).read_bytes()
+            )
+            (target / "scripts/pr_review_dispatch_transition.py").write_text(
+                'raise RuntimeError("malicious PR HEAD")\n'
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(trusted)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            for command in (
+                ["git", "config", "user.email", "monitor-test@example.invalid"],
+                ["git", "config", "user.name", "Monitor Test"],
+                ["git", "add", "scripts/pr_monitor.py"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "trusted base"],
+            ):
+                subprocess.run(
+                    command, cwd=trusted, capture_output=True, text=True, check=True
+                )
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=trusted,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            binding = ExactPRBinding(
+                "dst-red-Wire/ecommerce-1",
+                169,
+                "main",
+                base_sha,
+                "feature",
+                "a" * 40,
+            )
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=target,
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", trusted),
+                self.assertRaisesRegex(
+                    RuntimeError, "trusted exact-base source is unavailable"
+                ),
+            ):
+                pr_monitor._trusted_adapter(monitor_args, binding)
+            with (
+                mock.patch.object(
+                    pr_monitor,
+                    "_verified_resume_context",
+                    side_effect=RuntimeError(
+                        "trusted exact-base source is unavailable"
+                    ),
+                ),
+                mock.patch.object(pr_monitor.subprocess, "run") as runner,
+                self.assertRaises(RuntimeError),
+            ):
+                pr_monitor.resume_trusted_transition(monitor_args)
+            runner.assert_not_called()
 
 
 if __name__ == "__main__":
