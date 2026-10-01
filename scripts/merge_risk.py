@@ -14,6 +14,7 @@ import hashlib
 import json
 import re
 import subprocess
+from bisect import bisect_right
 from pathlib import Path
 
 POLICY_PATH = "config/contracts/review-policy.yaml"
@@ -21,6 +22,7 @@ CONTROLLER_PATH = "scripts/merge_risk.py"
 MAX_CHANGED_FILES = 10_000
 MAX_CHANGED_CONTENT_BYTES = 16 * 1024 * 1024
 MAX_CONTENT_FINDINGS = 128
+MAX_CONTENT_MATCHES = 4096
 MAX_ASSESSMENT_BYTES = 8192
 CONTENT_ASSESSMENT_KINDS = frozenset(
     {"comment", "read-only-validation", "metadata"}
@@ -422,6 +424,7 @@ def _content_findings(
     if not isinstance(changed_lines, dict) or set(changed_lines) != set(changed_files):
         return [], set(), False
     spans: dict[str, list[tuple[int, int, dict]]] = {}
+    span_starts: dict[str, list[int]] = {}
     for path in changed_files:
         records = changed_lines[path]
         if not isinstance(records, list) or any(
@@ -438,12 +441,17 @@ def _content_findings(
             return [], set(), False
         offset = 0
         spans[path] = []
+        span_starts[path] = []
         for item in records:
             end = offset + len(item["text"])
             spans[path].append((offset, end, item))
+            span_starts[path].append(offset)
             offset = end + 1
     findings: dict[str, dict] = {}
     unmapped: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str, int, int]] = set()
+    line_hashes: dict[tuple[str, int], str] = {}
+    match_count = 0
     for tier, name in (("PRODUCTION", "production"), ("PRIVILEGED", "privileged")):
         for capability, rule in policy[name]["capabilities"].items():
             for path in changed_files:
@@ -454,16 +462,26 @@ def _content_findings(
                     for match in re.finditer(
                         pattern, blob, flags=re.IGNORECASE | re.MULTILINE
                     ):
-                        matching = [
-                            item for start, end, item in spans[path]
-                            if match.start() >= start
-                            and match.end() <= end
-                            and match.start() < match.end()
-                        ]
-                        if len(matching) != 1:
+                        match_count += 1
+                        if match_count > MAX_CONTENT_MATCHES:
+                            return [], set(), False
+                        span_index = bisect_right(span_starts[path], match.start()) - 1
+                        if span_index < 0:
                             unmapped.add((tier, capability))
                             continue
-                        item = matching[0]
+                        start, end, item = spans[path][span_index]
+                        if not start <= match.start() < match.end() <= end:
+                            unmapped.add((tier, capability))
+                            continue
+                        key = (tier, capability, path, rule_index, span_index)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        line_key = (path, span_index)
+                        if line_key not in line_hashes:
+                            line_hashes[line_key] = "sha256:" + hashlib.sha256(
+                                item["text"].encode("utf-8")
+                            ).hexdigest()
                         identity = {
                             "tier": tier,
                             "capability": capability,
@@ -471,9 +489,7 @@ def _content_findings(
                             "side": item["side"],
                             "line": item["line"],
                             "rule_index": rule_index,
-                            "line_sha256": "sha256:" + hashlib.sha256(
-                                item["text"].encode("utf-8")
-                            ).hexdigest(),
+                            "line_sha256": line_hashes[line_key],
                         }
                         finding = {"id": _canonical_sha256(identity), **identity}
                         findings[finding["id"]] = finding

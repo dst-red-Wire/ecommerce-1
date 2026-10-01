@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -191,6 +193,154 @@ class MergeRiskPolicyTest(unittest.TestCase):
         )
         self.assertFalse(complete)
         self.assertEqual([], findings)
+
+    def test_repeated_matches_hash_the_line_and_identity_once(self):
+        path = "scripts/observer.py"
+        line = "# " + "VirtualBox " * 4000
+        records = {path: [{"side": "+", "line": 1, "text": line}]}
+        line_bytes = line.encode("utf-8")
+        original_sha256 = hashlib.sha256
+        original_canonical = MERGE_RISK._canonical_sha256
+        line_hashes = 0
+        identities = 0
+
+        def counted_sha256(data, *args, **kwargs):
+            nonlocal line_hashes
+            if data == line_bytes:
+                line_hashes += 1
+            return original_sha256(data, *args, **kwargs)
+
+        def counted_canonical(value):
+            nonlocal identities
+            identities += 1
+            return original_canonical(value)
+
+        with patch.object(MERGE_RISK.hashlib, "sha256", side_effect=counted_sha256), (
+            patch.object(MERGE_RISK, "_canonical_sha256", side_effect=counted_canonical)
+        ):
+            findings, unmapped, complete = MERGE_RISK._content_findings(
+                self.policy, [path], {path: line}, records
+            )
+        self.assertTrue(complete)
+        self.assertFalse(unmapped)
+        self.assertEqual(1, len(findings))
+        self.assertEqual(44002, len(line_bytes))
+        self.assertEqual(1, line_hashes)
+        self.assertEqual(1, identities)
+
+    def test_line_hash_is_reused_for_distinct_findings(self):
+        path = "scripts/observer.py"
+        line = "production credentials"
+        records = {path: [{"side": "+", "line": 1, "text": line}]}
+        original_sha256 = hashlib.sha256
+        line_hashes = 0
+
+        def counted_sha256(data, *args, **kwargs):
+            nonlocal line_hashes
+            if data == line.encode("utf-8"):
+                line_hashes += 1
+            return original_sha256(data, *args, **kwargs)
+
+        with patch.object(MERGE_RISK.hashlib, "sha256", side_effect=counted_sha256):
+            findings, unmapped, complete = MERGE_RISK._content_findings(
+                self.policy, [path], {path: line}, records
+            )
+        self.assertTrue(complete)
+        self.assertFalse(unmapped)
+        self.assertEqual(2, len(findings))
+        self.assertEqual(1, line_hashes)
+
+    def test_match_budget_is_global_across_files_and_rules(self):
+        paths = ["scripts/host_probe.py", "scripts/identity_probe.py"]
+        changes = {
+            paths[0]: "VirtualBox VirtualBox",
+            paths[1]: "credentials credentials",
+        }
+        records = {
+            path: [{"side": "+", "line": 1, "text": changes[path]}]
+            for path in paths
+        }
+        original_finditer = MERGE_RISK.re.finditer
+        matches_consumed = 0
+
+        def counted_finditer(*args, **kwargs):
+            nonlocal matches_consumed
+            for match in original_finditer(*args, **kwargs):
+                matches_consumed += 1
+                yield match
+
+        with patch.object(MERGE_RISK, "MAX_CONTENT_MATCHES", 3), (
+            patch.object(MERGE_RISK.re, "finditer", side_effect=counted_finditer)
+        ):
+            findings, _unmapped, complete = MERGE_RISK._content_findings(
+                self.policy, paths, changes, records
+            )
+        self.assertFalse(complete)
+        self.assertEqual([], findings)
+        self.assertEqual(4, matches_consumed)
+
+    def test_match_budget_exhaustion_keeps_the_original_risk(self):
+        path = "scripts/observer.py"
+        budget = MERGE_RISK.MAX_CONTENT_MATCHES
+        line = "# " + "VirtualBox " * (budget + 1)
+        records = {path: [{"side": "+", "line": 1, "text": line}]}
+        changes = {path: line}
+        with patch.object(MERGE_RISK, "MAX_CONTENT_MATCHES", budget + 1):
+            complete_findings, unmapped, complete = MERGE_RISK._content_findings(
+                self.policy, [path], changes, records
+            )
+            self.assertTrue(complete)
+            self.assertFalse(unmapped)
+            self.assertEqual(1, len(complete_findings))
+            assessment = {
+                "schema_version": 1, "pr": 183,
+                "base_sha": BASE_SHA, "head_sha": HEAD_SHA,
+                "findings_sha256": MERGE_RISK._canonical_sha256(complete_findings),
+                "dispositions": [{
+                    "finding_id": complete_findings[0]["id"],
+                    "kind": "metadata",
+                    "rationale": "Static fixture label only.",
+                    "effect_trace": "Literal is not consumed by host commands.",
+                }],
+            }
+            reviewed = MERGE_RISK.evaluate_merge_risk(
+                self.policy, base_sha=BASE_SHA, head_sha=HEAD_SHA,
+                pr_number=183, changed_files=[path], file_changes=changes,
+                changed_lines=records, assessment=assessment,
+            )
+            self.assertEqual("SENSITIVE", reviewed["classification"])
+
+        original_finditer = MERGE_RISK.re.finditer
+        matches_consumed = 0
+
+        def counted_finditer(*args, **kwargs):
+            nonlocal matches_consumed
+            for match in original_finditer(*args, **kwargs):
+                matches_consumed += 1
+                yield match
+
+        with patch.object(MERGE_RISK.re, "finditer", side_effect=counted_finditer):
+            findings, unmapped, complete = MERGE_RISK._content_findings(
+                self.policy, [path], changes, records
+            )
+        self.assertFalse(complete)
+        self.assertEqual([], findings)
+        self.assertFalse(unmapped)
+        self.assertEqual(budget + 1, matches_consumed)
+
+        baseline = MERGE_RISK.evaluate_merge_risk(
+            self.policy, base_sha=BASE_SHA, head_sha=HEAD_SHA,
+            pr_number=183, changed_files=[path], file_changes=changes,
+            changed_lines=records,
+        )
+        attempted_downgrade = MERGE_RISK.evaluate_merge_risk(
+            self.policy, base_sha=BASE_SHA, head_sha=HEAD_SHA,
+            pr_number=183, changed_files=[path], file_changes=changes,
+            changed_lines=records, assessment=assessment,
+        )
+        self.assertEqual("PRIVILEGED", baseline["classification"])
+        self.assertEqual(baseline["classification"], attempted_downgrade["classification"])
+        self.assertEqual([], attempted_downgrade["content_findings"])
 
     def test_assessment_structure_rejects_stale_missing_extra_and_duplicate_ids(self):
         path = "scripts/observer.py"
