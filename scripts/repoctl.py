@@ -13299,11 +13299,11 @@ def _create_pr_qualification_envelope(base_ref: str, head_sha: str) -> dict:
         controller_path=Path(trusted["trusted_root"]) / "scripts/repoctl.py",
         raw_proof_path=evidence, audit_path=audit,
         validate_raw=lambda path: _valid_exact_evidence(
-            base_ref, head_sha, evidence_path=path,
-        ) is not None,
+            base_ref, head_sha, evidence_path=None if path == evidence else path,
+        ) == path,
         validate_audit=lambda path: _valid_performance_audit(
-            base_ref, head_sha, audit_path=path,
-        ) is not None,
+            base_ref, head_sha, audit_path=None if path == audit else path,
+        ) == path,
     )
     _PR_LOOP_FRESH_WITNESS.set((
         repository, int(trusted["pr_number"]), base_sha, head_sha, tree_sha,
