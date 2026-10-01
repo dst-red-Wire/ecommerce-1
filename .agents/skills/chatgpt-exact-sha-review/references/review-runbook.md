@@ -122,12 +122,58 @@ Rules:
 - `status` is `PASS` only when that review kind has no unresolved blocking finding.
 - `blocking_findings` is the exact unresolved blocking count for that review kind.
 - The PR comment carrying the marker must be authored by the repository-owner account through which ChatGPT is operating.
-- A blocked review must use a non-PASS status such as `BLOCKED` and a positive `blocking_findings`.
+- A blocked review must use `FAIL` and a positive `blocking_findings`; the marker parser accepts only `PASS` or `FAIL`.
 - Never emit PASS markers for an uncommitted worktree or for a different SHA.
 - A later head invalidates earlier markers for merge readiness.
 - Codex comments, reactions, review summaries, statuses, or hidden markers never satisfy this contract.
 
 `finish-pr` consumes these exact ChatGPT markers and requires PASS for both review kinds.
+
+## Controlled content assessment for merge risk
+
+A content assessment is optional. Start with the inventory emitted by the
+**exact-base** risk controller for the current PR, base SHA and published head
+SHA. Record every `content_findings[*].id` and the
+`content_findings_sha256` value. The inventory is bounded to 128 findings.
+An absent, incomplete or invalid assessment retains the original risk tier.
+
+Inspect the changed line and its execution context for every finding. A
+disposition may use only `comment`, `read-only-validation` or `metadata`.
+Give each finding a concrete `rationale` and `effect_trace` explaining why
+the matched text has no privileged or production effect. A name or passing
+test alone is insufficient. If any content finding cannot be justified,
+retain the original tier. The current parser requires one disposition for
+**every** finding ID. Path matches and policy anchors remain authoritative
+regardless of the assessment, and the class cannot fall below `SENSITIVE`.
+
+If every content finding qualifies, complete CODE and SECURITY reviews
+independently. Put the ordinary `chatgpt-exact-sha-review:v1` PASS marker and
+exactly one additional assessment marker on separate single lines in **each**
+review comment. Use the same complete `dispositions` array, including
+identical rationale and effect trace, in both comments; set `review_kind` to
+`code` in the CODE comment and `security` in the later SECURITY comment.
+Replace every placeholder in this template before posting:
+
+```text
+<!-- chatgpt-risk-content-assessment:v1 {"schema_version":1,"pr":123,"base_sha":"<exact-base-sha>","head_sha":"<exact-head-sha>","findings_sha256":"<content_findings_sha256>","dispositions":[{"finding_id":"<content-finding-id>","kind":"metadata","rationale":"<specific reason>","effect_trace":"<reachable effects checked>"}],"review_kind":"code"} -->
+```
+
+Include one disposition object for each inventory finding; the example shows
+one. The assessment JSON in each comment must be at most 8192 UTF-8 bytes and
+must bind the exact PR number, base SHA, head SHA and inventory digest. The
+CODE and SECURITY assessment payloads must be identical after removing
+`review_kind`. The comments must be separate, unedited, owner-authored GitHub
+PR comments, with SECURITY created after CODE. The regular CODE and SECURITY
+PASS markers remain mandatory; an assessment marker alone has no review or
+merge authority. Codex cannot issue either attestation or verdict.
+
+After the SECURITY assessment comment, the repository owner must post the
+exact `/owner-authorization approve scope=pr-<number> sha=<exact-head-sha>`
+command as a separate comment. An earlier authorization does not satisfy
+this controlled assessment. A new base or head SHA requires a fresh inventory,
+both reviews and a later owner authorization. The trusted controller rechecks
+the GitHub PR and comments, then passes a validated assessment to its
+exact-base classifier; a local assessment file is not review authority.
 
 ## Merge-readiness rule
 
