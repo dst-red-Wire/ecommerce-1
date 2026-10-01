@@ -1,45 +1,39 @@
-check "exact_mgmt_node_set" {
-  assert {
+# A failed check block only warns. Preconditions block planning and apply.
+output "mgmt_contract_guard" {
+  description = "Canonical MGMT inventory, addressing, and access gates must be valid."
+  value       = true
+
+  precondition {
     condition     = toset(keys(local.nodes)) == local.expected_nodes
     error_message = "MGMT inventory must contain exactly cp-01..03 and worker-01..03."
   }
-}
 
-check "governed_bootstrap_ssh" {
-  assert {
+  precondition {
     condition = !var.bootstrap_ssh_enabled || (
       var.bootstrap_ssh_human_gate_confirmed && length(var.bootstrap_ssh_allowed_cidrs) > 0
     )
     error_message = "Temporary wg-01 bootstrap SSH requires a confirmed human gate and at least one explicit restricted source CIDR."
   }
-}
 
-check "governed_wireguard_udp" {
-  assert {
+  precondition {
     condition     = !var.wireguard_udp_enabled || var.wireguard_udp_human_gate_confirmed
     error_message = "Public WireGuard UDP activation requires an explicit human gate."
   }
-}
 
-check "known_vm_profiles" {
-  assert {
+  precondition {
     condition = alltrue([
       for node in values(local.nodes) :
       contains(keys(local.vm_profiles), node.profile)
     ])
     error_message = "Every MGMT node must reference a declared vm_profile."
   }
-}
 
-check "private_block_consistency" {
-  assert {
+  precondition {
     condition     = local.mgmt_private_block == local.network_plan.address_domains.mgmt
     error_message = "MGMT private block differs between inventory and network plan."
   }
-}
 
-check "mgmt_ips_inside_segment" {
-  assert {
+  precondition {
     condition = alltrue([
       for node in values(local.node_ipv4_numbers) :
       node.mgmt >= local.mgmt_segment_ipv4_bounds["401"].first &&
@@ -47,10 +41,8 @@ check "mgmt_ips_inside_segment" {
     ])
     error_message = "Every MGMT management IP must belong to VLAN/segment 401."
   }
-}
 
-check "k8s_ips_inside_segment" {
-  assert {
+  precondition {
     condition = alltrue([
       for node in values(local.node_ipv4_numbers) :
       node.k8s >= local.mgmt_segment_ipv4_bounds["402"].first &&
@@ -58,10 +50,8 @@ check "k8s_ips_inside_segment" {
     ])
     error_message = "Every MGMT Kubernetes node IP must belong to VLAN/segment 402."
   }
-}
 
-check "worker_storage_ips_inside_segment" {
-  assert {
+  precondition {
     condition = alltrue([
       for name in keys(local.workers) :
       local.node_ipv4_numbers[name].storage >= local.mgmt_segment_ipv4_bounds["403"].first &&
@@ -69,10 +59,8 @@ check "worker_storage_ips_inside_segment" {
     ])
     error_message = "Every MGMT worker storage IP must belong to VLAN/segment 403."
   }
-}
 
-check "worker_backup_ips_inside_segment" {
-  assert {
+  precondition {
     condition = alltrue([
       for name in keys(local.workers) :
       local.node_ipv4_numbers[name].backup >= local.mgmt_segment_ipv4_bounds["405"].first &&
@@ -80,10 +68,8 @@ check "worker_backup_ips_inside_segment" {
     ])
     error_message = "Every MGMT worker backup IP must belong to VLAN/segment 405."
   }
-}
 
-check "unique_static_ips" {
-  assert {
+  precondition {
     condition = length(distinct(concat(
       [for node in values(local.nodes) : node.mgmt_ip],
       [for node in values(local.nodes) : node.k8s_ip],
@@ -92,10 +78,8 @@ check "unique_static_ips" {
     ))) == 18
     error_message = "MGMT static node IP addresses must be globally unique."
   }
-}
 
-check "inventory_matches_network_allocations" {
-  assert {
+  precondition {
     condition = alltrue(concat(
       [
         for name, node in local.nodes :

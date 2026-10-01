@@ -1,4 +1,16 @@
-mock_provider "hcloud" {}
+mock_provider "hcloud" {
+  mock_resource "hcloud_network" {
+    defaults = { id = 12345 }
+  }
+
+  mock_resource "hcloud_network_subnet" {
+    defaults = { id = 23456 }
+  }
+
+  mock_resource "hcloud_server" {
+    defaults = { id = 34567 }
+  }
+}
 
 variables {
   hcloud_location            = "fsn1"
@@ -18,6 +30,24 @@ run "canonical_mgmt_contract_plans_without_provider_mutation" {
   assert {
     condition     = length(module.hcloud_mgmt.servers) == 6
     error_message = "The canonical MGMT plan must contain exactly six RKE2 nodes."
+  }
+
+  assert {
+    condition     = length(module.hcloud_mgmt.access_gateways) == 1
+    error_message = "The canonical MGMT plan must contain one WireGuard gateway."
+  }
+
+  assert {
+    condition = module.hcloud_mgmt.declared_static_inventory == {
+      servers        = 7
+      networks       = 1
+      subnets        = 6
+      firewalls      = 2
+      volumes        = 0
+      load_balancers = 0
+      floating_ips   = 0
+    }
+    error_message = "The canonical MGMT resource inventory must remain exact."
   }
 }
 
@@ -57,6 +87,29 @@ run "accept_restricted_bootstrap_sources" {
     bootstrap_ssh_allowed_cidrs        = ["198.51.100.4/32", "2001:db8::4/128"]
     bootstrap_ssh_enabled              = true
     bootstrap_ssh_human_gate_confirmed = true
+  }
+}
+
+run "reject_unconfirmed_bootstrap_ssh" {
+  command = plan
+  variables {
+    bootstrap_ssh_enabled       = true
+    bootstrap_ssh_allowed_cidrs = ["198.51.100.4/32"]
+  }
+  expect_failures = [output.mgmt_contract_guard]
+}
+
+run "reject_unconfirmed_wireguard_udp" {
+  command = plan
+  variables { wireguard_udp_enabled = true }
+  expect_failures = [output.mgmt_contract_guard]
+}
+
+run "accept_confirmed_wireguard_udp" {
+  command = plan
+  variables {
+    wireguard_udp_enabled              = true
+    wireguard_udp_human_gate_confirmed = true
   }
 }
 
