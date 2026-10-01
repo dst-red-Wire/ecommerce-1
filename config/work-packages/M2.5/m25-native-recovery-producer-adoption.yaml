@@ -1,0 +1,64 @@
+id: m25-native-recovery-producer-adoption
+milestone: M2.5
+tracker_issue: 32
+work_item_issue: 182
+objective: Adopt the deterministic native host recovery proof reader and its current and historical consumers
+  without changing the runner or mutating host, VM, or cloud resources.
+scope:
+  allowed_paths:
+  - scripts/native_recovery_evidence.py
+  - scripts/runtime_authority.py
+  - scripts/issue_completion.py
+  - tests/test_native_recovery_evidence.py
+  - tests/test_runtime_authority.py
+  - tests/test_issue_completion.py
+  - tests/test_verified_pr_integration.py
+  - docs/engineering/native-recovery-evidence.md
+  - config/work-packages/M2.5/m25-native-recovery-producer-adoption.yaml
+  forbidden_paths: []
+dependencies: []
+acceptance:
+  contracts:
+  - config/contracts/review-policy.yaml
+  - config/contracts/execution-properties-policy.yaml
+  - config/contracts/work-package-policy.yaml
+  - config/contracts/qualification-execution-policy.yaml
+  qualification_gates:
+  - governance
+  - runtime-efficiency
+  - contracts
+  - automation
+  - security
+  - qualification-tools
+  - system
+  runtime_evidence: []
+  tests:
+  - tests/test_native_recovery_evidence.py
+  - tests/test_runtime_authority.py
+  - tests/test_issue_completion.py
+  - tests/test_verified_pr_integration.py
+  qce_capabilities: []
+execution:
+  preflight_required: true
+  runtime_required: false
+  recovery_required: false
+  required_capabilities:
+  - toolchain-pinned
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+- One closed canonical dispatch recognizes existing LAB and native host recovery producers, with stable
+  functional identities.
+- Known fixtures validate; unknown producers, wrong scope, mismatched digests or provenance, duplicate
+  declarations and missing observations fail closed.
+- Repeated validation is deterministic and cannot convert fixture verdicts into runtime evidence.
+- Historical consumers require the original signed bundle identity and protected observations.
+- The canonical exact-base risk classification and every resulting qualification, review, owner and merge
+  gate pass before adoption.
+- No native runner, host setting, VM lifecycle or paid resource is changed by this adoption.

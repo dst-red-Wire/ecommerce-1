@@ -413,6 +413,11 @@ def _complete_work_item(
         runtime_projection = _historical_runtime(
             root, package, proof, bundle["manifest_digest"]
         )
+        # This projection exists only after every registered producer verifies
+        # capture, restore and readback against the signed historical bundle.
+        recovery_projection = (
+            runtime_projection if execution["recovery_required"] is True else None
+        )
         if not dependencies_verified:
             dependency_result = verify_dependencies(root, gh, repository, package)
             _require(
@@ -437,7 +442,7 @@ def _complete_work_item(
             acceptance=acceptance,
             evidence_bundle=bundle_projection,
             runtime=runtime_projection,
-            recovery=None,
+            recovery=recovery_projection,
             post_merge=proof,
         )
         required = "CLOSED" if raw_issue["state"] == "closed" else "VERIFIED"
@@ -496,7 +501,7 @@ def _complete_work_item(
             acceptance=acceptance,
             evidence_bundle=bundle_projection,
             runtime=runtime_projection,
-            recovery=None,
+            recovery=recovery_projection,
             post_merge=proof,
         )
         _require(
@@ -630,11 +635,10 @@ def _historical_runtime(
     manifest_digest: str,
 ) -> dict[str, Any] | None:
     execution = package["execution"]
-    _require(
-        execution.get("recovery_required") is False,
-        "historical recovery producer authority is unavailable",
-    )
+    recovery_required = execution.get("recovery_required")
+    _require(type(recovery_required) is bool, "recovery requirement is not a boolean")
     if execution.get("runtime_required") is False:
+        _require(not recovery_required, "historical recovery producer requires runtime evidence")
         return None
     _require(
         execution.get("runtime_required") is True,
@@ -679,6 +683,20 @@ def _historical_runtime(
     verified: list[dict[str, Any]] = []
     digests: list[str] = []
     for relative in required:
+        if recovery_required:
+            _require(
+                relative == runtime_authority._NATIVE_RECOVERY_PATH,
+                "historical recovery producer path is not registered",
+            )
+            expected_producer = runtime_authority._NATIVE_PRODUCER
+            expected_type = "native-host-recovery"
+        else:
+            _require(
+                relative == runtime_authority._LAB_PATH,
+                "historical LAB runtime producer path is not registered",
+            )
+            expected_producer = "scripts/m25_runtime_evidence.py:validate"
+            expected_type = "lab-readiness"
         _require(
             relative in by_path, "required runtime proof is absent from exact bundle"
         )
@@ -691,17 +709,39 @@ def _historical_runtime(
             base_sha=proof["base_sha"],
             head_tree_sha=proof["head_tree_sha"],
             evidence_digest=digest,
-            recovery_required=False,
+            recovery_required=recovery_required,
         )
+        _require(isinstance(verdict, dict), "historical runtime producer returned no verdict")
+        if recovery_required:
+            recovery = verdict.get("recovery")
+            identity = verdict.get("runtime_identity")
+            _require(
+                verdict.get("environment") == "host"
+                and isinstance(identity, dict)
+                and set(identity) == {"kind", "id"}
+                and identity.get("kind") == "virtualbox-vm"
+                and isinstance(identity.get("id"), str)
+                and re.fullmatch(
+                    r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", identity["id"]
+                ) is not None
+                and isinstance(recovery, dict)
+                and set(recovery) == set(runtime_authority._RECOVERY_PHASES)
+                and all(recovery[phase] == "PASS" for phase in runtime_authority._RECOVERY_PHASES),
+                "historical recovery producer did not verify host capture, restore and readback",
+            )
+        else:
+            _require(
+                verdict.get("recovery") == "NOT_REQUIRED",
+                "historical LAB producer cannot assert recovery authority",
+            )
         _require(
             verdict.get("status") == "PASS"
-            and verdict.get("producer") == "scripts/m25_runtime_evidence.py:validate"
-            and verdict.get("proof_type") == "lab-readiness"
+            and verdict.get("producer") == expected_producer
+            and verdict.get("proof_type") == expected_type
             and verdict.get("head_sha") == head
             and verdict.get("head_tree_sha") == proof["head_tree_sha"]
             and verdict.get("evidence_path") == relative
-            and verdict.get("evidence_digest") == digest
-            and verdict.get("recovery") == "NOT_REQUIRED",
+            and verdict.get("evidence_digest") == digest,
             "historical runtime producer authority failed: "
             + str(verdict.get("reason", "")),
         )
