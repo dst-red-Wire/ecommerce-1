@@ -12,7 +12,7 @@ There is intentionally no committed backend block that would make first creation
 depend on MGMT itself.
 
 Required runtime inputs are the provider location/network zone, a pinned Rocky
-Linux 9 image, existing provider SSH public-key IDs (`hcloud_ssh_key_ids`), and
+Linux 10.2 image, existing provider SSH public-key IDs (`hcloud_ssh_key_ids`), and
 explicit reviewed mappings from canonical compute profiles to
 Hetzner server types. No defaults guess provider identifiers or silently resize
 the canonical intent.

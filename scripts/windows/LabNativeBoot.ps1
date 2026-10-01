@@ -652,21 +652,19 @@ function Get-NativeTaskFolder {
     return $service.GetFolder('\')
 }
 
-function Assert-NativeTaskSecurity {
-    param([string]$Name)
-    $registered = (Get-NativeTaskFolder).GetTask($Name)
-    $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
-        [string]$registered.GetSecurityDescriptor(7))
-    if ($raw.Owner.Value -ne $AdminSid.Value -or
-        ($raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -eq 0 -or
-        $null -eq $raw.DiscretionaryAcl -or $raw.DiscretionaryAcl.Count -ne 2) {
+function Assert-NativeTaskDescriptor {
+    param([Security.AccessControl.RawSecurityDescriptor]$Raw, [string]$Name)
+    if ($Raw.Owner.Value -ne $AdminSid.Value -or
+        ($Raw.ControlFlags -band [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected) -eq 0 -or
+        $null -eq $Raw.DiscretionaryAcl -or $Raw.DiscretionaryAcl.Count -ne 2) {
         throw "Native smoke task ACL owner or protection differs: $Name"
     }
     $seen = @{}
-    foreach ($ace in $raw.DiscretionaryAcl) {
+    foreach ($ace in $Raw.DiscretionaryAcl) {
         if ($ace.AceType -ne [Security.AccessControl.AceType]::AccessAllowed -or
             $ace.AceFlags -ne [Security.AccessControl.AceFlags]::None -or
-            $ace.AccessMask -ne 0x10000000 -or
+            # Task Scheduler may map generic GA to the exact FILE_ALL_ACCESS mask.
+            $ace.AccessMask -notin @(0x10000000, 0x001F01FF) -or
             $ace.SecurityIdentifier.Value -notin @($AdminSid.Value,$SystemSid.Value) -or
             $seen.ContainsKey($ace.SecurityIdentifier.Value)) {
             throw "Native smoke task ACL grants an unexpected principal: $Name"
@@ -676,6 +674,14 @@ function Assert-NativeTaskSecurity {
     if (-not $seen.ContainsKey($AdminSid.Value) -or -not $seen.ContainsKey($SystemSid.Value)) {
         throw "Native smoke task ACL lacks privileged principals: $Name"
     }
+}
+
+function Assert-NativeTaskSecurity {
+    param([string]$Name)
+    $registered = (Get-NativeTaskFolder).GetTask($Name)
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        [string]$registered.GetSecurityDescriptor(7))
+    Assert-NativeTaskDescriptor -Raw $raw -Name $Name
 }
 
 function Register-ProtectedNativeTask {
@@ -2109,6 +2115,29 @@ function Invoke-NativeAclDiskSelfTest {
     }
 }
 
+function Invoke-NativeTaskAclInMemorySelfTest {
+    $fixtures = @(
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)'; accepted=$true },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'; accepted=$true },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;SY)(A;;FR;;;BA)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;AU)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;AU)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;BA)(A;;GA;;;BA)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:SYG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:BAG:BAD:(A;;GA;;;SY)(A;;GA;;;BA)'; accepted=$false },
+        [pscustomobject]@{ sddl='O:BAG:BAD:P(A;;GA;;;SY)(A;ID;GA;;;BA)'; accepted=$false }
+    )
+    foreach ($fixture in $fixtures) {
+        $raw = [Security.AccessControl.RawSecurityDescriptor]::new($fixture.sddl)
+        $accepted = $true
+        try { Assert-NativeTaskDescriptor -Raw $raw -Name 'in-memory fixture' }
+        catch { $accepted = $false }
+        if ($accepted -ne $fixture.accepted) {
+            throw "Native task ACL in-memory fixture differs: $($fixture.sddl)"
+        }
+    }
+}
+
 function Invoke-NativeTaskAclDiskSelfTest {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -2279,6 +2308,7 @@ function Invoke-SelfTest {
     catch { $rejected = $true }
     if (-not $rejected) { throw 'Wrong recovery campaign was accepted' }
     Invoke-NativeAclDiskSelfTest
+    Invoke-NativeTaskAclInMemorySelfTest
     Invoke-NativeTaskAclDiskSelfTest
     [Console]::WriteLine('PASS lab-native-boot-self-test')
 }

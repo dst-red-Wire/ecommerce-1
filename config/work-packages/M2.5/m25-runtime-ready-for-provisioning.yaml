@@ -1,0 +1,50 @@
+id: m25-runtime-ready-for-provisioning
+milestone: M2.5
+tracker_issue: 32
+work_item_issue: 176
+objective: Validate MGMT provisioning configuration and exact-SHA local runtime readiness without cloud apply.
+scope:
+  allowed_paths:
+    - platform/terraform/environments/mgmt/checks.tf
+    - platform/terraform/environments/mgmt/tests/contracts.tftest.hcl
+    - tests/test_terraform_network_checks.py
+    - platform/terraform/environments/mgmt/README.md
+    - config/work-packages/M2.5/m25-runtime-ready-for-provisioning.yaml
+    - scripts/windows/LabNativeBoot.ps1
+  forbidden_paths: []
+dependencies: []
+acceptance:
+  contracts:
+    - architecture.lock.yaml
+    - config/contracts/roadmap-policy.yaml
+    - config/contracts/qualification-execution-policy.yaml
+    - config/infrastructure/mgmt-inventory.yaml
+    - config/infrastructure/network-plan.yaml
+    - config/infrastructure/mgmt-bootstrap.yaml
+  qualification_gates: [governance, contracts, system]
+  runtime_evidence:
+    - .context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json
+  tests:
+    - tests/test_terraform_network_checks.py
+    - tests/test_windows_packer_pipeline.py
+    - tests/test_m2_5_mgmt_bootstrap.py
+    - tests/test_m25_runtime_evidence.py
+    - tests/test_work_package.py
+  qce_capabilities: []
+execution:
+  preflight_required: true
+  runtime_required: true
+  recovery_required: false
+  required_capabilities: [toolchain-pinned]
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+  - OpenTofu mock-provider plans and MGMT static checks pass without provider mutation.
+  - Exact-SHA Rocky 10.2 local RKE2 and Cilium lab proof declares NOT_DEPLOYED and zero paid resources.
+  - Persistent MGMT deployment and milestone PROVEN remain pending real provisioning.

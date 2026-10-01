@@ -15,6 +15,7 @@ ENV_OUTPUTS = ROOT / "platform/terraform/environments/mgmt/outputs.tf"
 MODULE_MAIN = ROOT / "platform/terraform/modules/hcloud-mgmt/main.tf"
 INVENTORY = ROOT / "config/infrastructure/mgmt-inventory.yaml"
 NETWORK_PLAN = ROOT / "config/infrastructure/network-plan.yaml"
+ACCESS_GATEWAYS = ROOT / "config/infrastructure/mgmt-access-gateways.yaml"
 
 
 class TerraformNetworkChecksTest(unittest.TestCase):
@@ -28,6 +29,59 @@ class TerraformNetworkChecksTest(unittest.TestCase):
         for worker in inventory["workers"].values():
             self.assertIn(ipaddress.ip_address(worker["storage_ip"]), ipaddress.ip_network(segments[403]["cidr"]))
             self.assertIn(ipaddress.ip_address(worker["backup_ip"]), ipaddress.ip_network(segments[405]["cidr"]))
+
+    def _assert_wireguard_gateway_contract(self, inventory, network, access):
+        wireguard = network["wireguard"]["mgmt"]
+        gateway_name = wireguard["gateway_node"]
+        gateways = access["access_gateways"]
+
+        self.assertEqual({gateway_name}, set(gateways))
+        mgmt_segments = network["vlans"]["mgmt"]
+        mgmt_vlans = [
+            vlan for vlan, segment in mgmt_segments.items() if segment["name"] == "mgmt"
+        ]
+        self.assertEqual(1, len(mgmt_vlans))
+        mgmt_vlan = mgmt_vlans[0]
+        gateway = gateways[gateway_name]
+        self.assertEqual(
+            mgmt_vlan, gateway["mgmt_vlan"], "WireGuard gateway VLAN differs from MGMT segment"
+        )
+        gateway_ip = gateway["mgmt_ip"]
+        self.assertEqual(wireguard["gateway_mgmt_ip"], gateway_ip)
+        self.assertEqual(
+            network["static_allocations"]["mgmt"][mgmt_vlan][gateway_name], gateway_ip
+        )
+
+        node_mgmt_ips = {
+            node["mgmt_ip"]
+            for node in [
+                *inventory["control_planes"].values(),
+                *inventory["workers"].values(),
+            ]
+        }
+        self.assertEqual(6, len(node_mgmt_ips))
+        self.assertNotIn(gateway_ip, node_mgmt_ips)
+        gateway_address = ipaddress.ip_address(gateway_ip)
+        self.assertIn(
+            gateway_address, ipaddress.ip_network(mgmt_segments[mgmt_vlan]["cidr"])
+        )
+        self.assertIn(gateway_address, ipaddress.ip_network(inventory["private_block"]))
+
+    def test_wireguard_gateway_matches_canonical_mgmt_addresses(self):
+        inventory = yaml.safe_load(INVENTORY.read_text(encoding="utf-8"))
+        network = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))
+        access = yaml.safe_load(ACCESS_GATEWAYS.read_text(encoding="utf-8"))
+        self._assert_wireguard_gateway_contract(inventory, network, access)
+
+    def test_wireguard_gateway_rejects_kubernetes_vlan(self):
+        inventory = yaml.safe_load(INVENTORY.read_text(encoding="utf-8"))
+        network = yaml.safe_load(NETWORK_PLAN.read_text(encoding="utf-8"))
+        access = yaml.safe_load(ACCESS_GATEWAYS.read_text(encoding="utf-8"))
+        gateway_name = network["wireguard"]["mgmt"]["gateway_node"]
+        access["access_gateways"][gateway_name]["mgmt_vlan"] = 402
+
+        with self.assertRaisesRegex(AssertionError, "WireGuard gateway VLAN"):
+            self._assert_wireguard_gateway_contract(inventory, network, access)
 
     def test_terraform_uses_standard_ipv4_interval_bounds(self):
         locals_text = LOCALS.read_text(encoding="utf-8")
