@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -243,6 +244,13 @@ class RiskEvidenceGateTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        (self.root / ".git").mkdir()
+        # Keep real lock acquisition inside the fixture. Qualification itself
+        # may already hold the canonical workspace's PR transition lock.
+        for name, value in (("ROOT", self.root), ("CONTEXT", self.root / ".context")):
+            patcher = mock.patch.object(REPOCTL, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.runtime_path = runtime_authority._LAB_PATH
         path = self.root / self.runtime_path
         path.parent.mkdir(parents=True)
@@ -412,6 +420,22 @@ class RiskEvidenceGateTests(unittest.TestCase):
                 self.assertEqual("CONTRACT_DRIVEN", result["runtime"])
                 producer.assert_not_called()
 
+    def test_isolated_pr_loop_preserves_real_lock_exclusion(self):
+        stream = io.StringIO()
+        with (
+            REPOCTL._pr_sync_lock_path().open("w") as held_lock,
+            mock.patch.object(REPOCTL, "_pr_loop_impl_locked") as transition,
+            contextlib.redirect_stdout(stream),
+        ):
+            fcntl.flock(held_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code = REPOCTL.pr_loop(171, json_output=True)
+        result = json.loads(stream.getvalue())
+        self.assertEqual(1, code)
+        self.assertEqual("SYNC_BUSY", result["state"])
+        self.assertEqual("RETRY_SYNC_PR_BASE", result["next_action"])
+        self.assertEqual("NOT_ATTEMPTED", result["merge_result"])
+        transition.assert_not_called()
+
     def test_pr_loop_owner_pass_cannot_bypass_privileged_or_production_evidence(self):
         snapshot = {
             "number": 171,
@@ -492,7 +516,7 @@ class RiskEvidenceGateTests(unittest.TestCase):
                             _require_trusted_pr_execution=mock.Mock(
                                 return_value={
                                     "trusted_root": Path("/trusted/base"),
-                                    "target_root": ROOT,
+                                    "target_root": self.root,
                                     "base_sha": BASE,
                                 }
                             ),
