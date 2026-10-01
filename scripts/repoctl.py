@@ -12824,6 +12824,33 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return 1
 
     try:
+        candidates = json.loads(output([
+            gh, "pr", "list", "--head", branch, "--base", base_name,
+            "--state", "open", "--limit", "2", "--json", "number",
+        ]) or "[]")
+        if not isinstance(candidates, list) or len(candidates) != 1:
+            raise RuntimeError("exactly one open PR is required for the feature branch")
+        pre_pr = _github_pr_snapshot(gh, name_with_owner, int(candidates[0]["number"]))
+        if (
+            pre_pr.get("state") != "OPEN"
+            or pre_pr.get("draft")
+            or pre_pr.get("head_sha") != head
+            or pre_pr.get("head_branch") != branch
+            or pre_pr.get("base") != base_name
+            or pre_pr.get("base_sha") != _exact_commit_sha(base_ref)
+        ):
+            raise RuntimeError("PR exact head/base/branch changed before preflight")
+        work_item = _delivery_pr_work_item_preflight(
+            gh, name_with_owner, pre_pr, persist=True
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr work-item/preflight gate failed: {exc}")
+    if work_item["status"] != "PASS":
+        return fail(
+            f"finish-pr preflight {work_item['status']}: {work_item['reason']}"
+        )
+
+    try:
         _fresh_qualification_for_finish(base_ref, head, name_with_owner)
     except (OSError, ValueError, RuntimeError) as exc:
         return fail(f"finish-pr fresh base qualification failed: {exc}")
@@ -13015,6 +13042,26 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         import evidence_bundle
         import post_merge_verify
 
+        fresh_work_item = _delivery_pr_work_item_preflight(
+            gh, name_with_owner, fresh_pr, persist=True
+        )
+        if fresh_work_item["status"] != "PASS":
+            raise RuntimeError(f"final preflight failed: {fresh_work_item['reason']}")
+        for key in ("work_package", "work_package_id", "work_item_issue", "milestone"):
+            if fresh_work_item[key] != work_item[key]:
+                raise RuntimeError("primary work item changed during final revalidation")
+        if fresh_work_item["preflight"].get("work_package_digest") != work_item["preflight"].get("work_package_digest"):
+            raise RuntimeError("work package changed during final revalidation")
+        preflight_path = fresh_work_item["preflight_path"]
+        if preflight_path != f".context/evidence/preflight/{head}.json":
+            raise RuntimeError("final preflight path is not canonical")
+        captured_preflight = post_merge_verify._record_bytes(
+            evidence_bundle._safe_file(ROOT, preflight_path), label="final BASE preflight"
+        )
+        preflight_digest = evidence_bundle.digest_bytes(captured_preflight)
+        if preflight_digest != fresh_work_item["preflight_digest"]:
+            raise RuntimeError("final preflight differs from fresh BASE execution")
+
         # The compatibility envelope authorized these archived bytes in this
         # process. Bind the retained witness to that same final BASE execution.
         canonical_evidence = _valid_exact_evidence(base_ref, head)
@@ -13047,7 +13094,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         }
         created = evidence_bundle.create_bundle(
             ROOT, **identity,
-            gate_evidence=[str(canonical_audit.relative_to(ROOT))],
+            gate_evidence=[str(canonical_audit.relative_to(ROOT)), preflight_path],
         )
         verified = evidence_bundle.verify_bundle(ROOT, head, expected_identity=identity)
         if created["manifest_digest"] != verified["manifest_digest"]:
@@ -13064,6 +13111,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             or evidence_bundle.digest_bytes(manifest_bytes) != created["manifest_digest"]
             or indexed_digests.get(str(canonical_evidence.relative_to(ROOT))) != evidence_digest
             or indexed_digests.get(str(canonical_audit.relative_to(ROOT))) != audit_digest
+            or indexed_digests.get(preflight_path) != preflight_digest
         ):
             raise RuntimeError("final BASE bundle does not retain the validated bytes")
         witness = post_merge_verify.write_pre_merge_witness(
@@ -13286,6 +13334,8 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "draft": False,
         "sync": {"status": "NOT_REQUIRED", "old_head_sha": "", "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED", "force_push_used": False, "rebase_used": False},
         "qualification": {"status": "UNKNOWN", "source": "none"},
+        "work_item": {"status": "UNKNOWN"},
+        "preflight": {"status": "UNKNOWN"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
         "security_review": {"status": "UNKNOWN", "head_sha": ""},
         "risk": {
@@ -14215,7 +14265,9 @@ def _pr_loop_post_merge(
                 + "; ".join(completion.get("errors") or [completion["status"]])
             )
     except (OSError, RuntimeError, ValueError, KeyError) as exc:
-        result["state"] = "VERIFIED"
+        # A signed post-merge proof alone cannot establish work-item completion.
+        # In particular a rejected required preflight must never project VERIFIED.
+        result["state"] = "MERGED"
         result["next_action"] = "CLOSE_WORK_ITEM"
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
@@ -14426,6 +14478,33 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
         return 1
     if lineage == 1:
         return reconcile_main(initial)
+
+    try:
+        work_item = _delivery_pr_work_item_preflight(
+            gh, name_with_owner, initial, persist=not dry_run
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "FIX_WORK_ITEM_RELATION"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["work_item"] = {
+        "milestone": work_item["milestone"],
+        "issue": work_item["work_item_issue"],
+        "package": work_item["work_package"],
+        "status": "VALID",
+    }
+    result["preflight"] = work_item["preflight"]
+    if work_item["status"] != "PASS":
+        result["state"] = (
+            "BLOCKED_RUNTIME" if work_item["status"] == "BLOCKED_RUNTIME"
+            else "BLOCKED"
+        )
+        result["next_action"] = "FIX_PREFLIGHT"
+        result["blockers"].append(work_item["reason"] or "preflight did not PASS")
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
 
     def refresh_authorities(snapshot: dict) -> None:
         reviews, authorization = pull_request_authority_evidence(
@@ -14940,6 +15019,195 @@ def qualification_tools_smoke_check() -> int:
     print(f"PASS qualification tools smoke {destination.relative_to(ROOT)}")
     print(json.dumps(payload, sort_keys=True))
     return 0
+
+
+def _delivery_package_input(
+    package_arg: str,
+    *,
+    issue: int | None = None,
+    milestone: str | None = None,
+    changed_paths: list[str] | None = None,
+) -> tuple[dict, dict, Path]:
+    """Read only a canonical-repository package and validate its declaration."""
+    import work_package
+
+    if not package_arg or chr(92) in package_arg or chr(0) in package_arg:
+        raise ValueError("work package path must be inside the canonical repository")
+    raw = Path(package_arg)
+    if ".." in raw.parts:
+        raise ValueError("work package path traversal is forbidden")
+    root = ROOT.resolve()
+    candidate = raw if raw.is_absolute() else root / raw
+    relative = candidate.relative_to(root)
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("work package symlink path is forbidden")
+    resolved = candidate.resolve(strict=True)
+    if not resolved.is_relative_to(root) or not resolved.is_file():
+        raise ValueError("work package must be a regular canonical-repository file")
+    import delivery_preflight
+    import yaml
+
+    package_bytes = delivery_preflight._record_bytes(root, resolved)
+    try:
+        package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("work package YAML is invalid") from exc
+    if not isinstance(package, dict):
+        raise ValueError("work package must contain a YAML mapping")
+    status = work_package.work_package_status(
+        package,
+        root=root,
+        changed_paths=changed_paths,
+        expected_issue=issue,
+        expected_milestone=milestone,
+    )
+    if delivery_preflight._record_bytes(root, resolved) != package_bytes:
+        raise RuntimeError("work package changed during declaration validation")
+    return package, status, resolved
+
+
+def _delivery_pr_work_item_preflight(
+    gh: str,
+    repository: str,
+    snapshot: dict,
+    *,
+    persist: bool,
+) -> dict:
+    """Verify the structured work item and run read-only exact-head probes."""
+    import delivery_preflight
+    import issue_lifecycle
+
+    issue_lifecycle.load_policy(ROOT)
+    number = snapshot.get("number")
+    if type(number) is not int or number < 1:
+        raise RuntimeError("PR snapshot has no valid number")
+    raw = json.loads(output([gh, "api", f"repos/{repository}/pulls/{number}"]))
+    if not isinstance(raw, dict) or raw.get("number") != number:
+        raise RuntimeError("GitHub PR work-item readback is invalid")
+    head = raw.get("head")
+    base = raw.get("base")
+    if (
+        not isinstance(head, dict)
+        or not isinstance(base, dict)
+        or head.get("sha") != snapshot.get("head_sha")
+        or base.get("sha") != snapshot.get("base_sha")
+    ):
+        raise RuntimeError("PR head/base changed during work-item readback")
+    marker = issue_lifecycle.parse_pr_work_item_marker(raw.get("body"))
+    package_path = marker["work_package_path"]
+    changed = git(
+        "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
+        snapshot["base_sha"], snapshot["head_sha"], "--",
+    )
+    changed_paths = [item for item in changed.split(chr(0)) if item]
+    package, validation, path = _delivery_package_input(
+        package_path,
+        issue=marker["work_item_issue"],
+        milestone=marker["milestone"],
+        changed_paths=changed_paths,
+    )
+    if validation["status"] != "VALID" or validation["scope_status"] != "VALID":
+        raise RuntimeError("work package invalid: " + "; ".join(validation["errors"]))
+    roadmap = ruby_yaml("config/contracts/roadmap-policy.yaml")
+    relation = issue_lifecycle.read_pr_work_item_relation(
+        gh, repository, number, roadmap, package
+    )
+    if (
+        relation.get("status") != "PASS"
+        or relation.get("head_sha") != snapshot["head_sha"]
+        or relation.get("base_sha") != snapshot["base_sha"]
+    ):
+        raise RuntimeError(
+            "PR/work-item/tracker relation invalid: "
+            + "; ".join(relation.get("errors") or ["exact base/head readback changed"])
+        )
+    import issue_completion
+
+    dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
+    if dependencies["status"] != "PASS":
+        raise RuntimeError("work package dependencies are not verified: "
+                           + "; ".join(dependencies.get("errors", [])))
+    import post_merge_verify
+
+    package_bytes = post_merge_verify._record_bytes(path, label="work package")
+    import work_package
+    import yaml
+
+    try:
+        captured_package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("captured work package YAML is invalid") from exc
+    if captured_package != package:
+        raise RuntimeError("work package differs from its validated declaration")
+    committed_package = delivery_preflight._base_blob(
+        ROOT, snapshot["head_sha"], package_path
+    )
+    if committed_package != package_bytes:
+        raise RuntimeError("work package differs from exact HEAD blob")
+    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    tree_sha = git("rev-parse", f"{snapshot['head_sha']}^{{tree}}").strip()
+    execution = package["execution"]
+    preflight = delivery_preflight.run_preflight(
+        ROOT,
+        expected_head_sha=snapshot["head_sha"],
+        expected_base_sha=snapshot["base_sha"],
+        expected_branch=snapshot["head_branch"],
+        expected_head_tree_sha=tree_sha,
+        expected_package_id=package["id"],
+        expected_package_digest=package_digest,
+        expected_issue=package["work_item_issue"],
+        expected_milestone=package["milestone"],
+        required_capabilities=execution.get("required_capabilities", []),
+        capability_parameters=execution.get("capability_parameters", {}),
+    )
+    if (
+        post_merge_verify._record_bytes(path, label="work package") != package_bytes
+        or git("rev-parse", "HEAD").strip() != snapshot["head_sha"]
+        or git("rev-parse", "origin/main").strip() != snapshot["base_sha"]
+        or git("branch", "--show-current").strip() != snapshot["head_branch"]
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError("work package or exact source changed during preflight")
+    receipt = {}
+    preflight_path = ""
+    preflight_digest = ""
+    if persist:
+        destination = delivery_preflight.write_preflight(ROOT, preflight)
+        preflight_path = str(destination.relative_to(ROOT))
+        if preflight["status"] == "PASS":
+            receipt = delivery_preflight.verify_preflight(
+                ROOT,
+                expected_head_sha=snapshot["head_sha"],
+                expected_head_tree_sha=tree_sha,
+                expected_base_sha=snapshot["base_sha"],
+                expected_branch=snapshot["head_branch"],
+                expected_package_id=package["id"],
+                expected_package_digest=package_digest,
+                expected_issue=package["work_item_issue"],
+                expected_milestone=package["milestone"],
+                expected_capabilities=execution.get("required_capabilities", []),
+                expected_capability_parameters=execution.get("capability_parameters", {}),
+                expected_result=preflight,
+            )
+            if receipt.get("status") != "PASS":
+                raise RuntimeError("fresh BASE preflight verification failed")
+            preflight_digest = receipt["evidence_digest"]
+    return {
+        "status": preflight["status"],
+        "reason": preflight.get("reason", ""),
+        "work_package": package_path,
+        "work_package_id": package["id"],
+        "work_item_issue": package["work_item_issue"],
+        "milestone": package["milestone"],
+        "pr": number,
+        "preflight": preflight,
+        "preflight_verification": receipt,
+        "preflight_path": preflight_path,
+        "preflight_digest": preflight_digest,
+    }
 
 
 def _delivery_command_failure(reason: str) -> int:

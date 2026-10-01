@@ -14,6 +14,7 @@ import yaml
 
 try:
     from scripts import (
+        delivery_preflight,
         evidence_bundle,
         issue_lifecycle,
         post_merge_verify,
@@ -21,6 +22,7 @@ try:
         work_package,
     )
 except ModuleNotFoundError:
+    import delivery_preflight
     import evidence_bundle
     import issue_lifecycle
     import post_merge_verify
@@ -84,7 +86,7 @@ def _github_json(
     return value
 
 
-def _git_show_package(root: Path, head: str, relative: str) -> dict[str, Any]:
+def _git_package_bytes(root: Path, head: str, relative: str) -> bytes:
     _require(
         isinstance(relative, str)
         and relative.startswith("config/work-packages/")
@@ -97,7 +99,7 @@ def _git_show_package(root: Path, head: str, relative: str) -> dict[str, Any]:
         result = subprocess.run(
             ["git", "show", f"{head}:{relative}"],
             cwd=root,
-            text=True,
+            text=False,
             capture_output=True,
             check=False,
             timeout=30,
@@ -107,8 +109,15 @@ def _git_show_package(root: Path, head: str, relative: str) -> dict[str, Any]:
             f"qualified work package unavailable: {exc}"
         ) from exc
     _require(result.returncode == 0, "work package is absent from qualified HEAD")
+    _require(isinstance(result.stdout, bytes), "Git work package bytes are unavailable")
+    return result.stdout
+
+
+def _git_show_package(root: Path, head: str, relative: str) -> dict[str, Any]:
     try:
-        package = yaml.load(result.stdout, Loader=work_package._UniqueKeyLoader)
+        package = yaml.load(
+            _git_package_bytes(root, head, relative), Loader=work_package._UniqueKeyLoader
+        )
     except (yaml.YAMLError, work_package.WorkPackageError) as exc:
         raise IssueCompletionError("qualified work package YAML is invalid") from exc
     _require(isinstance(package, dict), "qualified work package must be a mapping")
@@ -398,6 +407,9 @@ def _complete_work_item(
             runtime is None and recovery is None,
             "caller-supplied runtime/recovery PASS has no producer authority",
         )
+        preflight_projection = _historical_preflight(
+            root, package, proof, bundle["manifest_digest"], pr_snapshot
+        )
         runtime_projection = _historical_runtime(
             root, package, proof, bundle["manifest_digest"]
         )
@@ -419,6 +431,7 @@ def _complete_work_item(
             projected_pr,
             work_package_validation=package_validation,
             qualification=qualification,
+            preflight=preflight_projection,
             code_review=code,
             security_review=security,
             acceptance=acceptance,
@@ -477,6 +490,7 @@ def _complete_work_item(
             projected_pr,
             work_package_validation=package_validation,
             qualification=qualification,
+            preflight=preflight_projection,
             code_review=code,
             security_review=security,
             acceptance=acceptance,
@@ -520,6 +534,93 @@ def _complete_work_item(
             "projection": projection,
             "errors": [str(exc)],
         }
+
+
+def _historical_preflight(
+    root: Path,
+    package: Mapping[str, Any],
+    proof: Mapping[str, Any],
+    manifest_digest: str,
+    pr_snapshot: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    execution = package["execution"]
+    if execution.get("preflight_required") is False:
+        return None
+    _require(
+        execution.get("preflight_required") is True,
+        "preflight requirement is not a boolean",
+    )
+    head = proof["head_sha"]
+    path = evidence_bundle._safe_file(root, f".context/evidence/{head}/manifest.json")
+    encoded = post_merge_verify._record_bytes(path, label="historical preflight manifest")
+    _require(
+        evidence_bundle.digest_bytes(encoded) == manifest_digest,
+        "historical preflight bundle manifest changed",
+    )
+    manifest = json.loads(encoded, object_pairs_hook=evidence_bundle._unique_object)
+    _require(
+        isinstance(manifest, dict)
+        and manifest.get("base_sha") == proof["base_sha"]
+        and manifest.get("head_sha") == head
+        and manifest.get("tree_sha") == proof["head_tree_sha"],
+        "historical preflight bundle identity differs",
+    )
+    entries = manifest.get("gate_evidence")
+    _require(isinstance(entries, list), "bundle gate evidence inventory is missing")
+    relative = f".context/evidence/preflight/{head}.json"
+    references = [
+        entry for entry in entries
+        if isinstance(entry, dict) and entry.get("path") == relative
+    ]
+    _require(
+        len(references) == 1 and set(references[0]) == {"path", "sha256"},
+        "required preflight proof is absent or ambiguous in exact bundle",
+    )
+    digest = references[0]["sha256"]
+    _require(
+        isinstance(digest, str) and _DIGEST.fullmatch(digest),
+        "required preflight proof digest is invalid",
+    )
+    package_path = f"config/work-packages/{package['milestone']}/{package['id']}.yaml"
+    package_digest = evidence_bundle.digest_bytes(
+        _git_package_bytes(root, head, package_path)
+    )
+    merge_epoch = int(post_merge_verify._git(
+        root, "show", "-s", "--format=%ct", proof["merge_sha"]
+    ))
+    verdict = delivery_preflight.verify_historical_preflight(
+        root,
+        proof_path=relative,
+        expected_sha256=digest,
+        expected_head_sha=head,
+        expected_head_tree_sha=proof["head_tree_sha"],
+        expected_base_sha=proof["base_sha"],
+        expected_branch=pr_snapshot.get("head_branch"),
+        expected_package_id=package["id"],
+        expected_package_digest=package_digest,
+        expected_issue=package["work_item_issue"],
+        expected_milestone=package["milestone"],
+        expected_capabilities=execution.get("required_capabilities", []),
+        expected_capability_parameters=execution.get("capability_parameters", {}),
+        merge_epoch=merge_epoch,
+    )
+    _require(
+        isinstance(verdict, dict)
+        and verdict.get("work_package_digest") == package_digest
+        and verdict.get("evidence_digest") == digest
+        and issue_lifecycle.preflight_proof_state(
+            verdict,
+            {"state": "MERGED", "head_sha": head, "base_sha": proof["base_sha"]},
+            package,
+            {"head_tree_sha": proof["head_tree_sha"]},
+        ) == "PASS",
+        "historical preflight producer authority failed",
+    )
+    _require(
+        post_merge_verify._record_bytes(path, label="historical preflight manifest") == encoded,
+        "preflight bundle changed during validation",
+    )
+    return verdict
 
 
 def _historical_runtime(

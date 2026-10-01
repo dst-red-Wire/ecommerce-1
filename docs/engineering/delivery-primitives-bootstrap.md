@@ -5,6 +5,7 @@ Ce prérequis installe dans `main` les primitives nécessaires au contrôleur BA
 ## Responsabilités
 
 - `repoctl.py` orchestre les lectures fraîches GitHub, la qualification BASE, la fusion, le nettoyage et la clôture.
+- `delivery_preflight.py` produit et vérifie les sondes en lecture seule depuis la BASE exacte, avec liaison au package, aux capacités et aux paramètres bornés.
 - `evidence_bundle.py` inventorie les octets des preuves ; son manifeste ne porte pas de verdict.
 - `post_merge_verify.py` signe le témoin prémerge et vérifie la signature, la lignée Git, les arbres, les preuves conservées et l’état post-fusion.
 - `issue_completion.py` valide les preuves et la relation PR/work-item avant clôture, puis relit GitHub.
@@ -13,11 +14,11 @@ Ce prérequis installe dans `main` les primitives nécessaires au contrôleur BA
 
 ## Séquence
 
-1. Le contrôleur BASE réexécute sa qualification finale et valide son enveloppe de compatibilité.
-2. Après les dernières lectures des revues, de l’autorisation et des protections, il exige que preuve et audit canoniques correspondent aux octets archivés et validés.
-3. Il crée et vérifie un bundle lié à BASE, HEAD, tree, toolchain et identité de qualification, puis signe `write_pre_merge_witness` avant la mutation GitHub.
+1. Le contrôleur BASE vérifie la relation PR/work-item, les dépendances et le preflight du package avant de consulter les revues ou de déclarer `MERGE_READY`, puis réexécute sa qualification finale et valide son enveloppe de compatibilité.
+2. Après les dernières lectures des revues, de l’autorisation et des protections, il exécute à nouveau le preflight. Son vérificateur compare les octets conservés au résultat produit en mémoire par BASE. Il exige aussi que preuve de qualification et audit canoniques correspondent aux octets archivés et validés.
+3. Il crée et vérifie un bundle lié à BASE, HEAD, tree, toolchain et identité de qualification, incluant le digest exact du preflight final, puis signe `write_pre_merge_witness` avant la mutation GitHub.
 4. Après fusion, nettoyage et réconciliation roadmap, il produit la preuve post-fusion signée.
-5. La boucle ne devient `DONE` qu’après clôture vérifiée du work-item et contrôle final de la roadmap.
+5. La clôture relit le preflight retenu par le bundle signé, vérifie son producteur BASE, ses identités et sa fraîcheur au moment de la fusion. La boucle ne devient `DONE` qu’après clôture vérifiée du work-item et contrôle final de la roadmap.
 
 `post-merge-verify --pr <numéro>` vérifie une preuve existante ou récupère une preuve absente à partir du témoin signé. Une preuve invalide ou partiellement publiée reste bloquante. Un témoin prémerge ne se fabrique pas après fusion.
 
@@ -25,7 +26,7 @@ Le contrôle `roadmap_sync.py check --document-only` vérifie le document sans r
 
 ## Périmètre du prérequis
 
-Le bundle construit par ce contrôleur contient la qualification et l’audit BASE finaux. Il satisfait les besoins de #171, dont le package n’exige ni runtime ni récupération. La clôture des packages qui les exigent reste bloquée sans les véritables preuves et producteurs enregistrés. Les revues CODE et SECURITY sont relues auprès de GitHub par leur vérificateur canonique.
+Le bundle construit par ce contrôleur contient la qualification, l’audit et le preflight BASE finaux. Le preflight lie BASE, HEAD, arbre, package, issue, milestone, capacités et paramètres. La fraîcheur suit `ci-evidence.yaml` de BASE ; une preuve absente, périmée, incompatible ou issue d’un producteur invalide bloque la fusion et la clôture. Il satisfait les besoins de #171, dont le package n’exige ni runtime ni récupération. La clôture des packages qui les exigent reste bloquée sans les véritables preuves et producteurs enregistrés. Les revues CODE et SECURITY sont relues auprès de GitHub par leur vérificateur canonique.
 
 La planification M7, son package, les nouveaux niveaux de risque et sa publication enrichie restent dans #171. Les schémas de capacités inclus ici permettent au validateur de work-package de vérifier des paramètres bornés ; les commandes exécutables restent définies par la BASE vérifiée.
 
@@ -33,6 +34,6 @@ Cette PR préalable est qualifiée et revue sur son SHA exact, puis fusionnée p
 
 ## Vérification et retour arrière
 
-Les tests couvrent la signature et la relecture des preuves, les archives divergentes, les relations et dépendances d’issues, l’ordre témoin/fusion, la récupération, l’échec de clôture et le refus d’un succès fondé seulement sur GitHub `MERGED`.
+Les tests couvrent la signature et la relecture des preuves, les archives divergentes, les refus de preflight avant `MERGE_READY` et la fusion, la vérification historique du preflight avant `VERIFIED`/`CLOSED`, les relations et dépendances d’issues, l’ordre témoin/fusion, la récupération, l’échec de clôture et le refus d’un succès fondé seulement sur GitHub `MERGED`.
 
 Le retour arrière passe par une PR de revert signée, qualifiée et revue ; les preuves et témoins existants restent conservés.

@@ -166,7 +166,7 @@ class BootstrapPostMergeTests(unittest.TestCase):
     def test_pr_loop_refuses_done_when_work_item_close_is_unverified(self):
         code, result, _ = self.post_merge(proof=self.proof(), issue_status="BLOCKED")
         self.assertEqual(1, code)
-        self.assertEqual("VERIFIED", result["state"])
+        self.assertEqual("MERGED", result["state"])
         self.assertEqual("CLOSE_WORK_ITEM", result["next_action"])
         self.assertEqual("PASS", result["post_merge_result"])
         self.assertEqual("BLOCKED", result["work_item_completion"]["status"])
@@ -348,6 +348,8 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         self.issue_number = 175
         self.branch = "fix/witness-bootstrap"
         self.bundle_digest = None
+        self.preflight_calls = []
+        self.preflight_path = self.context / "evidence/preflight" / f"{self.head}.json"
         for name, value in (("ROOT", self.root), ("CONTEXT", self.context)):
             patcher = mock.patch.object(REPOCTL, name, value)
             patcher.start()
@@ -404,12 +406,63 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         bundle_error=None,
         during_bundle=None,
         witness_digests=None,
+        preflight_outcomes=None,
     ):
         def fresh(*_args):
             self.events.append("qualification")
             self.write_artifacts(self.final_payload)
             if mutate:
                 mutate()
+
+        outcomes = iter(preflight_outcomes) if preflight_outcomes is not None else None
+
+        def preflight(_gh, _repository, snapshot, *, persist):
+            self.preflight_calls.append(list(self.events))
+            outcome = next(outcomes) if outcomes is not None else None
+            if isinstance(outcome, Exception):
+                raise outcome
+            payload = {
+                "schema_version": 1,
+                "status": "PASS",
+                "source_sha": self.head,
+                "base_sha": self.base,
+                "tree_sha": self.tree,
+                "branch": self.branch,
+                "work_package_id": "delivery-fixture",
+                "work_package_digest": "sha256:" + "6" * 64,
+                "work_item_issue": 170,
+                "milestone": "M7",
+                "required_capabilities": [],
+                "capacity": "PASS",
+                "environment": "PASS",
+                "checks": {
+                    "head": "PASS", "base": "PASS", "tree": "PASS",
+                    "branch": "PASS", "worktree": "PASS",
+                },
+                "reason": "",
+                "mutation_performed": False,
+                "probe_sequence": len(self.preflight_calls),
+            }
+            if persist:
+                self.preflight_path.parent.mkdir(parents=True, exist_ok=True)
+                self.preflight_path.write_bytes(evidence_bundle.canonical_bytes(payload))
+            result = {
+                "status": "PASS",
+                "reason": "",
+                "work_package": "config/work-packages/M7/delivery-fixture.yaml",
+                "work_package_id": "delivery-fixture",
+                "work_item_issue": 170,
+                "milestone": "M7",
+                "pr": snapshot["number"],
+                "preflight": payload,
+                "preflight_verification": {"status": "PASS"},
+                "preflight_path": str(self.preflight_path.relative_to(self.root)),
+                "preflight_digest": evidence_bundle.digest_bytes(
+                    evidence_bundle.canonical_bytes(payload)
+                ),
+            }
+            result.update(outcome or {})
+            return result
 
         def run(argv, **_kwargs):
             if argv[:3] == ["gh", "pr", "merge"]:
@@ -500,6 +553,7 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             "commit_provenance_check": mock.Mock(return_value=0),
             "remote_commit_provenance_check": mock.Mock(return_value=0),
             "_fresh_qualification_for_finish": mock.Mock(side_effect=fresh),
+            "_delivery_pr_work_item_preflight": mock.Mock(side_effect=preflight),
             "_pr_loop_qualification": mock.Mock(
                 return_value={
                     "status": "PASS",
@@ -549,6 +603,8 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
                 side_effect=lambda: (self.events.append("cleanup") or 0, 0)
             ),
         }
+        self.authority_reader = patches["pull_request_authority_evidence"]
+        self.qualifier = patches["_fresh_qualification_for_finish"]
         create_bundle = evidence_bundle.create_bundle
 
         def create_after_replacement(*args, **kwargs):
@@ -617,6 +673,104 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             evidence_bundle.digest_file(self.audit),
             manifest["evidence_digests"][str(self.audit.relative_to(self.root))],
         )
+        self.assertEqual([[], ["qualification"]], self.preflight_calls)
+        self.assertEqual(
+            evidence_bundle.digest_file(self.preflight_path),
+            manifest["evidence_digests"][str(self.preflight_path.relative_to(self.root))],
+        )
+        self.assertEqual(
+            2, json.loads(self.preflight_path.read_bytes())["probe_sequence"]
+        )
+
+    def test_preflight_failure_blocks_finish_even_with_external_authorities_pass(self):
+        for reason in (
+            "preflight evidence missing", "preflight evidence stale",
+            "preflight head differs", "preflight tree differs",
+            "preflight producer is invalid",
+        ):
+            with self.subTest(reason=reason):
+                self.events.clear()
+                self.preflight_calls.clear()
+                self.assertNotEqual(
+                    0, self.run_finish(preflight_outcomes=[RuntimeError(reason)])
+                )
+                self.assertEqual([], self.events)
+                self.assertEqual([[]], self.preflight_calls)
+                self.authority_reader.assert_not_called()
+                self.qualifier.assert_not_called()
+
+    def test_preflight_rejects_validated_declaration_different_from_captured_git_file(self):
+        import issue_lifecycle
+
+        package = {
+            "id": "delivery-fixture",
+            "milestone": "M7",
+            "tracker_issue": 107,
+            "work_item_issue": 170,
+            "objective": "Committed objective",
+            "execution": {"preflight_required": True, "required_capabilities": []},
+        }
+        relative = "config/work-packages/M7/delivery-fixture.yaml"
+        path = self.root / relative
+        path.parent.mkdir(parents=True)
+        path.write_bytes(evidence_bundle.canonical_bytes(package))
+        self.git("add", relative)
+        self.git("commit", "-qm", "exact work-package fixture")
+        qualified_head = self.git("rev-parse", "HEAD")
+        self.assertEqual(
+            json.loads(self.git("show", f"{qualified_head}:{relative}")),
+            json.loads(path.read_bytes()),
+        )
+        snapshot = {**self.snapshot(), "head_sha": qualified_head}
+        raw_pr = {
+            "number": self.issue_number,
+            "head": {"sha": qualified_head},
+            "base": {"sha": self.base},
+            "body": issue_lifecycle.format_pr_work_item_marker(package),
+        }
+        prior_declaration = {**package, "objective": "Different validated objective"}
+        with (
+            mock.patch.object(REPOCTL, "git", side_effect=self.git),
+            mock.patch.object(REPOCTL, "output", return_value=json.dumps(raw_pr)),
+            mock.patch.object(REPOCTL, "ruby_yaml", return_value={}),
+            mock.patch.object(
+                REPOCTL,
+                "_delivery_package_input",
+                return_value=(
+                    prior_declaration,
+                    {"status": "VALID", "scope_status": "VALID", "errors": []},
+                    path,
+                ),
+            ),
+            mock.patch.object(issue_lifecycle, "load_policy"),
+            mock.patch.object(
+                issue_lifecycle,
+                "read_pr_work_item_relation",
+                return_value={
+                    "status": "PASS", "head_sha": qualified_head, "base_sha": self.base,
+                },
+            ),
+            mock.patch(
+                "issue_completion.verify_dependencies",
+                return_value={"status": "PASS", "errors": []},
+            ),
+            mock.patch("delivery_preflight.run_preflight") as producer,
+            self.assertRaisesRegex(RuntimeError, "validated declaration"),
+        ):
+            REPOCTL._delivery_pr_work_item_preflight(
+                "gh", "owner/repo", snapshot, persist=True
+            )
+        producer.assert_not_called()
+
+    def test_final_preflight_failure_blocks_witness_after_successful_first_probe(self):
+        self.assertNotEqual(
+            0,
+            self.run_finish(preflight_outcomes=[
+                None, {"status": "BLOCKED_RUNTIME", "reason": "capacity changed"},
+            ]),
+        )
+        self.assertEqual(["qualification"], self.events)
+        self.assertEqual([[], ["qualification"]], self.preflight_calls)
 
     def test_missing_canonical_qualification_blocks_before_witness_or_merge(self):
         self.assertNotEqual(0, self.run_finish(mutate=self.raw.unlink))
@@ -658,8 +812,8 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         )
         self.assertEqual(["qualification", "witness"], self.events)
 
-    def test_replacement_during_bundle_cannot_change_captured_raw_or_audit(self):
-        for path in (self.raw, self.audit):
+    def test_replacement_during_bundle_cannot_change_captured_proofs(self):
+        for path in (self.raw, self.audit, self.preflight_path):
             with self.subTest(artifact=str(path.relative_to(self.root))):
                 self.events.clear()
 

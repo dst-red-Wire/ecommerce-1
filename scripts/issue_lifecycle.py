@@ -118,6 +118,7 @@ def load_policy(root: Path = ROOT) -> dict[str, Any]:
         "progression": list(PROGRESSION),
         "invalid_state": "BLOCKED",
         "required_exact_head_proofs": list(EXACT_HEAD_PROOFS),
+        "preflight_if_required": True,
         "runtime_if_required": True,
         "recovery_if_required": True,
         "post_merge_required": True,
@@ -1029,6 +1030,46 @@ def proof_state(proof: object, head_sha: str) -> str:
     return "FAIL"
 
 
+def preflight_proof_state(
+    proof: object,
+    pr: Mapping[str, Any],
+    work_package: Mapping[str, Any],
+    qualification: object,
+) -> str:
+    """Consume the receipt of the canonical producer verifier, never a raw PASS."""
+    state = proof_state(proof, pr["head_sha"])
+    if state != "PASS":
+        return state
+    historical = pr["state"] == "MERGED"
+    if (
+        not isinstance(qualification, Mapping)
+        or proof.get("producer") != "scripts/delivery_preflight.py:run_preflight"
+        or proof.get("authority") != (
+            "historical-preflight-verification" if historical
+            else "current-preflight-verification"
+        )
+        or proof.get("historical_verification") != (
+            "VERIFIED" if historical else "NOT_APPLICABLE"
+        )
+        or proof.get("base_sha") != pr.get("base_sha")
+        or not _sha(proof.get("head_tree_sha"))
+        or proof.get("head_tree_sha") != qualification.get("head_tree_sha")
+        or proof.get("work_package_id") != work_package.get("id")
+        or proof.get("work_item_issue") != work_package.get("work_item_issue")
+        or proof.get("milestone") != work_package.get("milestone")
+        or proof.get("evidence_path") != f".context/evidence/preflight/{pr['head_sha']}.json"
+        or any(
+            not isinstance(proof.get(field), str)
+            or DIGEST_RE.fullmatch(proof[field]) is None
+            for field in ("evidence_digest", "work_package_digest", "producer_fingerprint")
+        )
+        or type(proof.get("generated_at_epoch")) not in (int, float)
+        or not 0 < proof["generated_at_epoch"] < float("inf")
+    ):
+        return "FAIL"
+    return "PASS"
+
+
 def post_merge_state(proof: object, head_sha: str, merge_sha: str) -> str:
     if not isinstance(proof, Mapping) or not proof:
         return "MISSING"
@@ -1059,6 +1100,7 @@ def project_work_item(
     *,
     work_package_validation: object,
     qualification: object = None,
+    preflight: object = None,
     code_review: object = None,
     security_review: object = None,
     acceptance: object = None,
@@ -1108,6 +1150,13 @@ def project_work_item(
     execution = work_package.get("execution", {})
     if not isinstance(execution, dict):
         execution = {}
+    preflight_required = execution.get("preflight_required")
+    proofs["preflight"] = (
+        preflight_proof_state(preflight, pr, work_package, qualification)
+        if preflight_required is True
+        else "NOT_REQUIRED" if preflight_required is False else "FAIL"
+    )
+    preflight_ready = proofs["preflight"] in {"PASS", "NOT_REQUIRED"}
     proofs["runtime"] = (
         proof_state(runtime, head_sha)
         if execution.get("runtime_required") is True else "NOT_REQUIRED"
@@ -1121,17 +1170,20 @@ def project_work_item(
         if pr["state"] == "MERGED" else "MISSING"
     )
     if pr["state"] == "MERGED":
-        status = "MERGED"
+        status = "MERGED" if preflight_ready else "BLOCKED"
+        if not preflight_ready:
+            errors.append("merged work item lacks verified required preflight")
         required = (*EXACT_HEAD_PROOFS, "post_merge")
         if (
-            all(proofs[name] == "PASS" for name in required)
+            preflight_ready
+            and all(proofs[name] == "PASS" for name in required)
             and proofs["runtime"] in {"PASS", "NOT_REQUIRED"}
             and proofs["recovery"] in {"PASS", "NOT_REQUIRED"}
         ):
             status = "VERIFIED"
     else:
         status = "PR_OPEN"
-        if proofs["qualification"] == "PASS":
+        if proofs["qualification"] == "PASS" and preflight_ready:
             status = "QUALIFIED"
             if proofs["code_review"] == proofs["security_review"] == "PASS":
                 status = "REVIEWED"
