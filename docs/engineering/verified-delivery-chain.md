@@ -117,6 +117,20 @@ runtime and recovery requirements before mutation. Unknown or partial analysis
 fails closed. Owner authorization, when required, binds the PR scope and exact HEAD;
 the controller cannot issue it.
 
+A bounded content assessment can arbitrate a matched content finding only. The
+exact-base controller records at most 128 findings and exposes their
+`content_findings_sha256` digest. An assessment of at most 8192 bytes must bind
+the PR number, exact base and HEAD SHAs, and the same digest as
+`findings_sha256`. Independent ChatGPT CODE and SECURITY attestations must agree
+on each dismissed finding and include a rationale and effect trace. Only a
+comment, read-only validation, or metadata finding can be dismissed; a matched
+path or policy anchor cannot. The resulting class cannot fall below
+`SENSITIVE`, and explicit repository-owner authorization is required after both attestations.
+Missing, stale, malformed, oversized, or conflicting assessment evidence keeps
+the original classification. The assessment marker
+`chatgpt-risk-content-assessment:v1` cannot substitute for the final CODE and
+SECURITY review markers or authorize a merge by itself.
+
 Before `finish-pr`, the PR must still be open and ready, base and HEAD current,
 qualification and required runtime/recovery proofs valid, CODE and SECURITY PASS
 for that HEAD, no unresolved blocking finding or thread, risk classified, required
