@@ -27,6 +27,16 @@ HEAD, BASE, MERGE = "a" * 40, "b" * 40, "c" * 40
 
 
 class VerifiedPRIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / ".git").mkdir()
+        for name, value in (("ROOT", self.root), ("CONTEXT", self.root / ".context")):
+            patcher = mock.patch.object(REPOCTL, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def snapshot(self):
         return {
             "number": 171,
@@ -154,7 +164,7 @@ class VerifiedPRIntegrationTests(unittest.TestCase):
     def test_pr_loop_refuses_done_when_work_item_close_is_unverified(self):
         code, result, _ = self.post_merge(proof=self.proof(), issue_status="BLOCKED")
         self.assertEqual(1, code)
-        self.assertEqual("VERIFIED", result["state"])
+        self.assertEqual("MERGED", result["state"])
         self.assertEqual("CLOSE_WORK_ITEM", result["next_action"])
         self.assertEqual("PASS", result["post_merge_result"])
         self.assertEqual("BLOCKED", result["work_item_completion"]["status"])

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -18,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
@@ -60,6 +62,183 @@ _EXECUTABLE_PARAMETER_KEYS = frozenset(
 )
 _MAX_PARAMETER_INTEGER = 2**63 - 1
 _MAX_PARAMETER_STRING = 4096
+_MAX_PROOF_BYTES = 1024 * 1024
+_CI_EVIDENCE_PATH = "config/contracts/ci-evidence.yaml"
+_PRODUCER_PATH = "scripts/delivery_preflight.py"
+_RUNTIME_PATH = "scripts/runtime_orchestration.py"
+
+
+def _git_environment() -> dict[str, str]:
+    environment = {
+        key: value for key, value in os.environ.items() if not key.startswith("GIT_")
+    }
+    environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_LITERAL_PATHSPECS="1")
+    return environment
+
+
+def _base_blob(root: Path, base_sha: str, relative: str) -> bytes:
+    if _SHA.fullmatch(base_sha) is None:
+        raise ValueError("full exact producer base SHA required")
+    command = [
+        "/usr/bin/git",
+        "--no-optional-locks",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        str(root),
+    ]
+    tree = subprocess.run(
+        [*command, "ls-tree", "-z", base_sha, "--", relative],
+        env=_git_environment(),
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    metadata, separator, name = tree.stdout.partition(b"\t")
+    fields = metadata.split()
+    if (
+        tree.returncode
+        or not separator
+        or name != relative.encode() + b"\0"
+        or len(fields) != 3
+        or fields[0] not in {b"100644", b"100755"}
+        or fields[1] != b"blob"
+    ):
+        raise ValueError("base producer input must be a regular Git blob: " + relative)
+    blob = subprocess.run(
+        [*command, "cat-file", "blob", fields[2].decode("ascii")],
+        env=_git_environment(),
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+    if blob.returncode or len(blob.stdout) > 16 * 1024 * 1024:
+        raise ValueError("base producer input is unavailable or too large")
+    return blob.stdout
+
+
+def _producer_fingerprint(root: Path, base_sha: str) -> dict:
+    def digest(relative: str) -> str:
+        return (
+            "sha256:" + hashlib.sha256(_base_blob(root, base_sha, relative)).hexdigest()
+        )
+
+    return {
+        "source": "exact-pr-base-sha",
+        "path": _PRODUCER_PATH,
+        "sha256": digest(_PRODUCER_PATH),
+        "runtime_sha256": digest(_RUNTIME_PATH),
+        "policy_sha256": digest(_POLICY_PATH),
+    }
+
+
+def _execution_authority(root: Path, base_sha: str, head_sha: str) -> str:
+    if not any(
+        key.startswith("REPOCTL_TRUSTED_") and value.strip()
+        for key, value in os.environ.items()
+    ):
+        return "diagnostic"
+    names = (
+        "WRAPPER",
+        "CONTROLLER",
+        "POLICY_ROOT",
+        "BASE_SHA",
+        "TARGET_ROOT",
+        "HEAD_SHA",
+        "PR_NUMBER",
+    )
+    values = {
+        name: os.environ.get("REPOCTL_TRUSTED_" + name, "").strip() for name in names
+    }
+    if (
+        not all(values.values())
+        or values["BASE_SHA"] != base_sha
+        or values["HEAD_SHA"] != head_sha
+        or values["TARGET_ROOT"] != str(root)
+        or not values["PR_NUMBER"].isdigit()
+        or int(values["PR_NUMBER"]) < 1
+    ):
+        raise ValueError("complete exact-base preflight execution binding required")
+    trusted = Path(values["POLICY_ROOT"])
+    if not trusted.is_absolute() or ".." in trusted.parts:
+        raise ValueError("exact-base producer root is not canonical")
+    if (
+        Path(__file__).absolute() != trusted / _PRODUCER_PATH
+        or Path(runtime.__file__).absolute() != trusted / _RUNTIME_PATH
+        or values["CONTROLLER"] != str(trusted / "scripts/repoctl.py")
+        or values["WRAPPER"] != str(trusted / "scripts/repository_delivery.py")
+    ):
+        raise ValueError("preflight is not executing its exact-base producer")
+    try:
+        from .capability_bootstrap import read_repository_text
+    except ImportError:
+        from capability_bootstrap import read_repository_text
+    if (
+        Path(read_repository_text.__globals__["__file__"]).absolute()
+        != trusted / "scripts/capability_bootstrap.py"
+    ):
+        raise ValueError("preflight reader is not the exact-base dependency")
+    for relative in (
+        _PRODUCER_PATH,
+        _RUNTIME_PATH,
+        "scripts/repoctl.py",
+        "scripts/repository_delivery.py",
+        "scripts/capability_bootstrap.py",
+    ):
+        read_repository_text(trusted / relative, root=trusted)
+    return "exact-base"
+
+
+def _record_bytes(root: Path, path: Path) -> bytes:
+    """Capture one bounded regular file through no-follow descriptors."""
+    candidate = path if path.is_absolute() else root / path
+    if ".." in candidate.parts or not candidate.is_relative_to(root):
+        raise ValueError("preflight evidence path escapes repository")
+    if not hasattr(os, "O_NOFOLLOW") or os.open not in os.supports_dir_fd:
+        raise ValueError("preflight evidence requires no-follow descriptor support")
+    directory = descriptor = None
+    try:
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory = os.open(candidate.anchor, flags)
+        for part in candidate.parts[1:-1]:
+            child = os.open(part, flags, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(
+            candidate.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=directory,
+        )
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_PROOF_BYTES:
+            raise ValueError("preflight evidence must be a bounded regular file")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read(_MAX_PROOF_BYTES + 1)
+        after = os.fstat(descriptor)
+
+        def identity(info):
+            return (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+
+        if len(content) != before.st_size or identity(before) != identity(after):
+            raise ValueError("preflight evidence changed during capture")
+        return content
+    except OSError as exc:
+        raise ValueError(
+            "preflight evidence missing, unsafe, or contains a symlink"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
 
 
 def load_base_policy(root: Path, expected_base_sha: str) -> dict:
@@ -88,50 +267,7 @@ def load_base_policy(root: Path, expected_base_sha: str) -> dict:
             from capability_bootstrap import read_repository_text
         content = read_repository_text(policy_root / _POLICY_PATH, root=policy_root)
     else:
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if not key.startswith("GIT_")
-        }
-        environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_LITERAL_PATHSPECS="1")
-        command = [
-            "/usr/bin/git",
-            "--no-optional-locks",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-C",
-            str(root),
-        ]
-        tree = subprocess.run(
-            [*command, "ls-tree", "-z", expected_base_sha, "--", _POLICY_PATH],
-            env=environment,
-            capture_output=True,
-            check=False,
-            timeout=15,
-        )
-        metadata, separator, name = tree.stdout.partition(b"\t")
-        fields = metadata.split()
-        if (
-            tree.returncode != 0
-            or not separator
-            or name != _POLICY_PATH.encode() + b"\0"
-            or len(fields) != 3
-            or fields[0] not in {b"100644", b"100755"}
-            or fields[1] != b"blob"
-        ):
-            raise ValueError("base capability policy must be a regular Git blob")
-        blob = subprocess.run(
-            [*command, "cat-file", "blob", fields[2].decode("ascii")],
-            env=environment,
-            capture_output=True,
-            check=False,
-            timeout=15,
-        )
-        if blob.returncode != 0 or len(blob.stdout) > 16 * 1024 * 1024:
-            raise ValueError("base capability policy is unavailable or too large")
-        content = blob.stdout.decode("utf-8")
+        content = _base_blob(root, expected_base_sha, _POLICY_PATH).decode("utf-8")
     policy = yaml.safe_load(content)
     if not isinstance(policy, dict):
         raise TypeError("base capability policy must be a mapping")
@@ -192,8 +328,17 @@ def _validate_parameters(name: str, schema: object, supplied: object) -> None:
 
 def _git(root: Path, *args: str) -> tuple[int, str]:
     proc = subprocess.run(
-        ["git", *args],
+        [
+            "/usr/bin/git",
+            "--no-optional-locks",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            *args,
+        ],
         cwd=root,
+        env=_git_environment(),
         text=True,
         capture_output=True,
         check=False,
@@ -385,11 +530,16 @@ def run_preflight(
     required_capabilities: list[str],
     capability_parameters: Mapping[str, Mapping[str, object]] | None = None,
     driver: runtime.CapabilityDriver | None = None,
+    expected_head_tree_sha: str | None = None,
+    expected_package_id: str | None = None,
+    expected_package_digest: str | None = None,
+    expected_issue: int | None = None,
+    expected_milestone: str | None = None,
 ) -> dict:
     """Return PASS, BLOCKED_RUNTIME, or FAIL without any machine mutation."""
     parameters = capability_parameters if capability_parameters is not None else {}
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "FAIL",
         "source_sha": expected_head_sha,
         "base_sha": expected_base_sha,
@@ -428,7 +578,26 @@ def run_preflight(
         result["reason"] = "unique required capabilities list required"
         return result
     root = root.resolve()
+    tree_code, tree_sha = _git(root, "rev-parse", expected_head_sha + "^{tree}")
+    result["head_tree_sha"] = tree_sha
+    if tree_code or (
+        expected_head_tree_sha is not None and expected_head_tree_sha != tree_sha
+    ):
+        result["reason"] = "exact source tree mismatch"
+        return result
+    result.update(
+        capability_parameters={
+            name: dict(parameters.get(name, {}))
+            for name in required_capabilities
+            if isinstance(parameters.get(name, {}), Mapping)
+        },
+        work_package_id=expected_package_id,
+        work_package_digest=expected_package_digest,
+        work_item_issue=expected_issue,
+        milestone=expected_milestone,
+    )
     source_checks = {
+        "tree": (_git(root, "rev-parse", "HEAD^{tree}"), tree_sha),
         "head": (_git(root, "rev-parse", "HEAD"), expected_head_sha),
         "base": (_git(root, "rev-parse", "origin/main"), expected_base_sha),
         "branch": (_git(root, "branch", "--show-current"), expected_branch),
@@ -463,6 +632,12 @@ def run_preflight(
             if name in planner.specs
         ]
         plan = planner.resolve(requests)
+        result["producer"] = _producer_fingerprint(root, expected_base_sha)
+        result["execution_authority"] = _execution_authority(
+            root, expected_base_sha, expected_head_sha
+        )
+        if driver is not None:
+            result["execution_authority"] = "diagnostic"
     except (
         KeyError,
         OSError,
@@ -499,6 +674,18 @@ def run_preflight(
         result["checks"][name] = "PASS" if passed else "BLOCKED_RUNTIME"
         if not passed:
             blocked.append(f"{name}: {reason}")
+    for name, arguments, expected in (
+        ("head", ("rev-parse", "HEAD"), expected_head_sha),
+        ("tree", ("rev-parse", "HEAD^{tree}"), tree_sha),
+        ("base", ("rev-parse", "origin/main"), expected_base_sha),
+        ("branch", ("branch", "--show-current"), expected_branch),
+        ("worktree", ("status", "--porcelain", "--untracked-files=all"), ""),
+    ):
+        code, observed = _git(root, *arguments)
+        if code or observed != expected:
+            result["checks"][name] = "FAIL"
+            result["reason"] = "source identity changed during preflight"
+    result["generated_at_epoch"] = int(time.time())
     statuses = list(result["checks"].values())
     capacity_names = set(required_capabilities) & _CAPACITY
     result["capacity"] = (
@@ -584,7 +771,7 @@ def write_preflight(root: Path, result: Mapping[str, object]) -> Path:
     if destination.exists():
         if not destination.is_file():
             raise ValueError("preflight evidence path is not a regular file")
-        previous = destination.read_bytes()
+        previous = _record_bytes(root, destination)
         if previous == content:
             return destination
         previous_digest = hashlib.sha256(previous).hexdigest()
@@ -595,7 +782,7 @@ def write_preflight(root: Path, result: Mapping[str, object]) -> Path:
         if archive.is_symlink():
             raise ValueError("symlink preflight history file")
         if archive.exists():
-            if not archive.is_file() or archive.read_bytes() != previous:
+            if not archive.is_file() or _record_bytes(root, archive) != previous:
                 raise ValueError("preflight history digest collision")
         else:
             _atomic_evidence_write(archive, previous)
@@ -612,6 +799,218 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
     return value
 
 
+def _freshness_limit(root: Path, base_sha: str) -> int:
+    policy = yaml.safe_load(_base_blob(root, base_sha, _CI_EVIDENCE_PATH))
+    age = (
+        policy.get("evidence", {}).get("maximum_local_age_seconds")
+        if isinstance(policy, dict)
+        else None
+    )
+    if type(age) is not int or age <= 0:
+        raise ValueError("exact-base preflight freshness policy is invalid")
+    return age
+
+
+def _reject_constant(value: str) -> None:
+    raise ValueError("nonfinite preflight evidence value: " + value)
+
+
+def _verify_record(
+    root: Path,
+    content: bytes,
+    *,
+    expected_head_sha: str,
+    expected_head_tree_sha: str,
+    expected_base_sha: str,
+    expected_branch: str,
+    expected_package_id: str,
+    expected_package_digest: str,
+    expected_issue: int,
+    expected_milestone: str,
+    expected_capabilities: list[str],
+    expected_capability_parameters: Mapping[str, Mapping[str, object]] | None,
+    at_epoch: float,
+) -> dict:
+    for label, value in (
+        ("head SHA", expected_head_sha),
+        ("head tree SHA", expected_head_tree_sha),
+        ("base SHA", expected_base_sha),
+    ):
+        if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+            raise ValueError(f"full exact {label} required")
+    if (
+        not isinstance(expected_branch, str)
+        or not expected_branch
+        or expected_branch in {"main", "master"}
+        or not isinstance(expected_package_id, str)
+        or not expected_package_id
+        or not isinstance(expected_milestone, str)
+        or not expected_milestone
+        or type(expected_issue) is not int
+        or expected_issue < 1
+        or not isinstance(expected_package_digest, str)
+        or _DIGEST.fullmatch(expected_package_digest) is None
+    ):
+        raise ValueError("complete work package and branch identity required")
+    parameters = (
+        expected_capability_parameters
+        if expected_capability_parameters is not None
+        else {}
+    )
+    if (
+        not isinstance(expected_capabilities, list)
+        or len(expected_capabilities) > 128
+        or any(
+            not isinstance(item, str)
+            or re.fullmatch(r"[a-z][a-z0-9-]{0,127}", item) is None
+            for item in expected_capabilities
+        )
+        or len(expected_capabilities) != len(set(expected_capabilities))
+        or not isinstance(parameters, Mapping)
+        or set(parameters) - set(expected_capabilities)
+    ):
+        raise ValueError("unique expected capabilities and bounded parameters required")
+    try:
+        payload = json.loads(
+            content,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError("preflight evidence is not valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("preflight evidence must be a JSON object")  # noqa: TRY004
+    declared_digest = payload.get("evidence_digest")
+    if (
+        not isinstance(declared_digest, str)
+        or _DIGEST.fullmatch(declared_digest) is None
+    ):
+        raise ValueError("preflight evidence digest is missing or malformed")
+    unsigned = {
+        key: value for key, value in payload.items() if key != "evidence_digest"
+    }
+    if _evidence_digest(unsigned) != declared_digest:
+        raise ValueError("preflight evidence digest mismatch")
+    policy = yaml.safe_load(_base_blob(root, expected_base_sha, _POLICY_PATH))
+    runtime_policy = policy["runtime_orchestration"]
+    additional = policy["work_item_preflight"]["additional_capabilities"]
+    planner = runtime.RuntimePlanner(runtime_policy)
+    schemas = {**runtime_policy["capabilities"], **additional}
+    normalized = {}
+    for name in expected_capabilities:
+        if name not in schemas:
+            raise ValueError("unknown expected preflight capability")
+        _validate_parameters(name, schemas[name], parameters.get(name, {}))
+        normalized[name] = dict(parameters.get(name, {}))
+    plan = planner.resolve(
+        [
+            runtime.CapabilityRequest(name, normalized[name])
+            for name in expected_capabilities
+            if name in planner.specs
+        ]
+    )
+    expected = {
+        "source_sha": expected_head_sha,
+        "head_tree_sha": expected_head_tree_sha,
+        "base_sha": expected_base_sha,
+        "branch": expected_branch,
+        "work_package_id": expected_package_id,
+        "work_package_digest": expected_package_digest,
+        "work_item_issue": expected_issue,
+        "milestone": expected_milestone,
+        "required_capabilities": expected_capabilities,
+        "capability_parameters": normalized,
+        "producer": _producer_fingerprint(root, expected_base_sha),
+        "execution_authority": "exact-base",
+    }
+    for field, value in expected.items():
+        if type(payload.get(field)) is not type(value) or _evidence_digest(
+            {"value": payload[field]}
+        ) != _evidence_digest({"value": value}):
+            raise ValueError(f"preflight {field} differs from expected identity")
+    if (
+        type(payload.get("schema_version")) is not int
+        or payload["schema_version"] != 2
+        or payload.get("status") != "PASS"
+        or payload.get("capacity") != "PASS"
+        or payload.get("environment") != "PASS"
+        or payload.get("reason") != ""
+        or payload.get("mutation_performed") is not False
+    ):
+        raise ValueError("preflight evidence is not a non-mutating PASS")
+    generated = payload.get("generated_at_epoch")
+    if (
+        type(generated) is not int
+        or generated <= 0
+        or isinstance(at_epoch, bool)
+        or not isinstance(at_epoch, (int, float))
+        or not math.isfinite(at_epoch)
+        or at_epoch <= 0
+        or generated > at_epoch
+        or at_epoch - generated > _freshness_limit(root, expected_base_sha)
+    ):
+        raise ValueError(
+            "preflight evidence is stale, future-dated or has invalid freshness"
+        )
+    checks = payload.get("checks")
+    required_checks = {
+        "head",
+        "tree",
+        "base",
+        "branch",
+        "worktree",
+        *expected_capabilities,
+        *(capability.spec.name for capability in plan),
+    }
+    if (
+        not isinstance(checks, dict)
+        or not required_checks.issubset(checks)
+        or any(
+            not isinstance(key, str) or value != "PASS" for key, value in checks.items()
+        )
+    ):
+        raise ValueError("preflight evidence checks are incomplete or not PASS")
+    if _git(root, "rev-parse", expected_head_sha + "^{tree}") != (
+        0,
+        expected_head_tree_sha,
+    ):
+        raise ValueError("preflight historical head tree differs")
+    if (
+        _git(root, "merge-base", "--is-ancestor", expected_base_sha, expected_head_sha)[
+            0
+        ]
+        != 0
+    ):
+        raise ValueError("preflight exact base is not an ancestor of HEAD")
+    return payload
+
+
+def _receipt(payload: dict, content: bytes, relative: str, *, historical: bool) -> dict:
+    return {
+        "status": "PASS",
+        "producer": "scripts/delivery_preflight.py:run_preflight",
+        "authority": "historical-preflight-verification"
+        if historical
+        else "current-preflight-verification",
+        "head_sha": payload["source_sha"],
+        "head_tree_sha": payload["head_tree_sha"],
+        "base_sha": payload["base_sha"],
+        "work_package_id": payload["work_package_id"],
+        "work_package_digest": payload["work_package_digest"],
+        "work_item_issue": payload["work_item_issue"],
+        "milestone": payload["milestone"],
+        "required_capabilities": payload["required_capabilities"],
+        "capability_parameters": payload["capability_parameters"],
+        "evidence_path": relative,
+        "evidence_digest": "sha256:" + hashlib.sha256(content).hexdigest(),
+        "producer_fingerprint": _evidence_digest(payload["producer"]),
+        "producer_identity": payload["producer"],
+        "generated_at_epoch": payload["generated_at_epoch"],
+        "historical_verification": "VERIFIED" if historical else "NOT_APPLICABLE",
+        "payload": payload,
+    }
+
+
 def verify_preflight(
     root: Path,
     *,
@@ -623,107 +1022,123 @@ def verify_preflight(
     expected_issue: int,
     expected_milestone: str,
     expected_capabilities: list[str],
+    expected_head_tree_sha: str | None = None,
+    expected_capability_parameters: Mapping[str, Mapping[str, object]] | None = None,
+    expected_result: Mapping[str, object] | None = None,
 ) -> dict:
-    """Verify a persisted PASS against current source and work package identity."""
-    for label, value in (
-        ("head SHA", expected_head_sha),
-        ("base SHA", expected_base_sha),
-    ):
-        if not isinstance(value, str) or _SHA.fullmatch(value) is None:
-            raise ValueError(f"full exact {label} required")
+    """Verify one captured proof; merge callers bind the fresh BASE run result.
+
+    A producer fingerprint identifies code, not execution. Passing the in-memory
+    result of the trusted BASE run prevents a persisted self-declared PASS from
+    substituting for that execution. Read-only bundle checks may omit it.
+    """
+    root = root.resolve(strict=True)
     if (
-        not isinstance(expected_branch, str)
-        or not expected_branch
-        or not isinstance(expected_package_id, str)
-        or not expected_package_id
-        or not isinstance(expected_milestone, str)
-        or not expected_milestone
-        or type(expected_issue) is not int
-        or expected_issue < 1
-        or not isinstance(expected_package_digest, str)
-        or _DIGEST.fullmatch(expected_package_digest) is None
+        not isinstance(expected_head_sha, str)
+        or _SHA.fullmatch(expected_head_sha) is None
     ):
-        raise ValueError("complete work package and branch identity required")
-    if (
-        not isinstance(expected_capabilities, list)
-        or any(not isinstance(item, str) or not item for item in expected_capabilities)
-        or len(expected_capabilities) != len(set(expected_capabilities))
-    ):
-        raise ValueError("unique expected capabilities required")
-    root = root.resolve()
+        raise ValueError("full exact head SHA required")
     relative = f".context/evidence/preflight/{expected_head_sha}.json"
-    path = _safe_file(root, relative)
-    if path is None:
-        raise ValueError("exact-HEAD preflight evidence missing or unsafe")
-    try:
-        payload = json.loads(
-            path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object
-        )
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("preflight evidence is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("preflight evidence must be a JSON object")  # noqa: TRY004 -- persisted evidence has one validation error contract
-    declared_digest = payload.get("evidence_digest")
-    if (
-        not isinstance(declared_digest, str)
-        or _DIGEST.fullmatch(declared_digest) is None
-    ):
-        raise ValueError("preflight evidence digest is missing or malformed")
-    unsigned = dict(payload)
-    del unsigned["evidence_digest"]
-    if _evidence_digest(unsigned) != declared_digest:
-        raise ValueError("preflight evidence digest mismatch")
-    expected = {
-        "source_sha": expected_head_sha,
-        "base_sha": expected_base_sha,
-        "branch": expected_branch,
-        "work_package_id": expected_package_id,
-        "work_package_digest": expected_package_digest,
-        "work_item_issue": expected_issue,
-        "milestone": expected_milestone,
-        "required_capabilities": expected_capabilities,
-    }
-    for field, value in expected.items():
-        if type(payload.get(field)) is not type(value) or payload[field] != value:
-            raise ValueError(f"preflight {field} differs from expected identity")
-    if (
-        type(payload.get("schema_version")) is not int
-        or payload["schema_version"] != 1
-        or payload.get("status") != "PASS"
-        or payload.get("capacity") != "PASS"
-        or payload.get("environment") != "PASS"
-        or payload.get("reason") != ""
-        or payload.get("mutation_performed") is not False
-    ):
-        raise ValueError("preflight evidence is not a non-mutating PASS")
-    checks = payload.get("checks")
-    required_checks = {"head", "base", "branch", "worktree", *expected_capabilities}
-    if (
-        not isinstance(checks, dict)
-        or not required_checks.issubset(checks)
-        or any(
-            not isinstance(key, str) or value != "PASS" for key, value in checks.items()
-        )
-    ):
-        raise ValueError("preflight evidence checks are incomplete or not PASS")
+    content = _record_bytes(root, root / relative)
+    tree = (
+        expected_head_tree_sha
+        or _git(root, "rev-parse", expected_head_sha + "^{tree}")[1]
+    )
+    payload = _verify_record(
+        root,
+        content,
+        expected_head_sha=expected_head_sha,
+        expected_head_tree_sha=tree,
+        expected_base_sha=expected_base_sha,
+        expected_branch=expected_branch,
+        expected_package_id=expected_package_id,
+        expected_package_digest=expected_package_digest,
+        expected_issue=expected_issue,
+        expected_milestone=expected_milestone,
+        expected_capabilities=expected_capabilities,
+        expected_capability_parameters=expected_capability_parameters,
+        at_epoch=time.time(),
+    )
+    if expected_result is not None:
+        if not isinstance(expected_result, Mapping):
+            raise ValueError("fresh BASE producer result must be a mapping")
+        expected_unsigned = {
+            key: value
+            for key, value in expected_result.items()
+            if key != "evidence_digest"
+        }
+        if _evidence_digest(expected_unsigned) != payload["evidence_digest"]:
+            raise ValueError("preflight differs from fresh BASE producer result")
     for label, args, observed in (
         ("HEAD", ("rev-parse", "HEAD"), expected_head_sha),
+        ("tree", ("rev-parse", "HEAD^{tree}"), tree),
+        ("base", ("rev-parse", "origin/main"), expected_base_sha),
         ("branch", ("branch", "--show-current"), expected_branch),
         ("worktree", ("status", "--porcelain", "--untracked-files=all"), ""),
     ):
-        code, value = _git(root, *args)
-        if code != 0 or value != observed:
+        if _git(root, *args) != (0, observed):
             raise ValueError(f"preflight current {label} differs from verified source")
-    if _git(root, "cat-file", "-e", expected_base_sha + "^{commit}")[0] != 0:
-        raise ValueError("preflight exact base commit is missing")
+    result = _receipt(payload, content, relative, historical=False)
+    result["fresh_execution_verified"] = expected_result is not None
+    return result
+
+
+def verify_historical_preflight(
+    root: Path,
+    *,
+    proof_path: str | Path,
+    expected_sha256: str,
+    expected_head_sha: str,
+    expected_head_tree_sha: str,
+    expected_base_sha: str,
+    expected_branch: str,
+    expected_package_id: str,
+    expected_package_digest: str,
+    expected_issue: int,
+    expected_milestone: str,
+    expected_capabilities: list[str],
+    merge_epoch: float,
+    expected_capability_parameters: Mapping[str, Mapping[str, object]] | None = None,
+) -> dict:
+    """Revalidate bytes anchored by the caller's verified signed post-merge bundle.
+
+    The caller supplies the exact manifest digest and verified merge commit time.
+    Current HEAD/branch are deliberately irrelevant to this historical proof.
+    """
+    root = root.resolve(strict=True)
+    relative = f".context/evidence/preflight/{expected_head_sha}.json"
+    path = Path(proof_path)
+    if path.is_absolute():
+        try:
+            path = path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("historical preflight path escapes repository") from exc
+    if path.as_posix() != relative or ".." in path.parts:
+        raise ValueError("historical preflight must use the exact canonical proof path")
     if (
-        _git(root, "merge-base", "--is-ancestor", expected_base_sha, expected_head_sha)[
-            0
-        ]
-        != 0
+        not isinstance(expected_sha256, str)
+        or _DIGEST.fullmatch(expected_sha256) is None
     ):
-        raise ValueError("preflight exact base is not an ancestor of HEAD")
-    return payload
+        raise ValueError("signed preflight byte digest required")
+    content = _record_bytes(root, root / path)
+    if "sha256:" + hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise ValueError("preflight bytes differ from signed bundle digest")
+    payload = _verify_record(
+        root,
+        content,
+        expected_head_sha=expected_head_sha,
+        expected_head_tree_sha=expected_head_tree_sha,
+        expected_base_sha=expected_base_sha,
+        expected_branch=expected_branch,
+        expected_package_id=expected_package_id,
+        expected_package_digest=expected_package_digest,
+        expected_issue=expected_issue,
+        expected_milestone=expected_milestone,
+        expected_capabilities=expected_capabilities,
+        expected_capability_parameters=expected_capability_parameters,
+        at_epoch=merge_epoch,
+    )
+    return _receipt(payload, content, relative, historical=True)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -26,6 +26,7 @@ completion:
   progression: [CONTRACTED, PR_OPEN, QUALIFIED, REVIEWED, MERGED, VERIFIED, CLOSED]
   invalid_state: BLOCKED
   required_exact_head_proofs: [qualification, code_review, security_review, acceptance, evidence_bundle]
+  preflight_if_required: true
   runtime_if_required: true
   recovery_if_required: true
   post_merge_required: true

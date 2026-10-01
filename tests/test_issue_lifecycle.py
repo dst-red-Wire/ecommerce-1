@@ -36,7 +36,7 @@ class IssueLifecycleTests(unittest.TestCase):
         self.package = {
             "id": "m25-rke2-runtime", "milestone": "M2.5",
             "tracker_issue": 32, "work_item_issue": 170,
-            "execution": {"runtime_required": False, "recovery_required": False},
+            "execution": {"preflight_required": True, "runtime_required": False, "recovery_required": False},
         }
         self.pr = {
             "number": 171, "work_item_issue": 170, "state": "OPEN",
@@ -58,13 +58,31 @@ class IssueLifecycleTests(unittest.TestCase):
         values.update(overrides)
         return ISSUES.project_work_item(**values)
 
+    def preflight_receipt(self, *, historical=True):
+        return {
+            "status": "PASS", "head_sha": self.pr["head_sha"],
+            "head_tree_sha": "d" * 40, "base_sha": self.pr["base_sha"],
+            "producer": "scripts/delivery_preflight.py:run_preflight",
+            "authority": "historical-preflight-verification" if historical else "current-preflight-verification",
+            "historical_verification": "VERIFIED" if historical else "NOT_APPLICABLE",
+            "work_package_id": self.package["id"],
+            "work_item_issue": self.package["work_item_issue"],
+            "milestone": self.package["milestone"],
+            "work_package_digest": "sha256:" + "4" * 64,
+            "producer_fingerprint": "sha256:" + "5" * 64,
+            "evidence_path": f".context/evidence/preflight/{self.pr['head_sha']}.json",
+            "evidence_digest": "sha256:" + "6" * 64,
+            "generated_at_epoch": 1_800_000_000,
+        }
+
     def pass_proofs(self):
         head = self.pr["head_sha"]
         merge = "c" * 40
         self.pr.update(state="MERGED", merge_sha=merge)
         proof = {"status": "PASS", "head_sha": head}
         return {
-            "qualification": dict(proof),
+            "qualification": {**proof, "head_tree_sha": "d" * 40},
+            "preflight": self.preflight_receipt(),
             "code_review": dict(proof),
             "security_review": dict(proof),
             "acceptance": {
@@ -91,6 +109,52 @@ class IssueLifecycleTests(unittest.TestCase):
                 "roadmap_sync": "PASS",
             },
         }
+
+    def test_required_preflight_blocks_qualification_and_merged_progression(self):
+        for change in (
+            None,
+            {"status": "PASS", "head_sha": self.pr["head_sha"]},
+            {"producer": "unregistered"},
+            {"head_sha": "e" * 40},
+            {"head_tree_sha": "e" * 40},
+            {"base_sha": "e" * 40},
+            {"work_package_id": "unrelated-package"},
+            {"generated_at_epoch": float("nan")},
+        ):
+            with self.subTest(change=change):
+                proofs = self.pass_proofs()
+                proofs["preflight"] = (
+                    None if change is None else {**proofs["preflight"], **change}
+                )
+                if change and set(change) == {"status", "head_sha"}:
+                    proofs["preflight"] = change
+                self.work_item["state"] = "open"
+                self.assertEqual("BLOCKED", self.project(**proofs)["status"])
+                self.work_item["state"] = "closed"
+                self.assertEqual("BLOCKED", self.project(**proofs)["status"])
+                self.work_item["state"] = "open"
+                self.pr["state"] = "OPEN"
+                if isinstance(proofs["preflight"], dict):
+                    proofs["preflight"].update(
+                        authority="current-preflight-verification",
+                        historical_verification="NOT_APPLICABLE",
+                    )
+                self.assertEqual("PR_OPEN", self.project(**proofs)["status"])
+
+    def test_current_preflight_cannot_replace_historical_verification(self):
+        proofs = self.pass_proofs()
+        proofs["preflight"] = self.preflight_receipt(historical=False)
+        self.assertEqual("BLOCKED", self.project(**proofs)["status"])
+
+    def test_policy_cannot_remove_preflight_requirement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / ISSUES.POLICY_PATH
+            path.parent.mkdir(parents=True)
+            value = ISSUES.load_policy()
+            value["completion"]["preflight_if_required"] = False
+            path.write_text(yaml.safe_dump(value), encoding="utf-8")
+            with self.assertRaisesRegex(ISSUES.IssueLifecycleError, "completion"):
+                ISSUES.load_policy(Path(directory))
 
     def test_registered_policy_and_m25_tracker_are_exact(self):
         self.assertEqual("IssueLifecyclePolicy", ISSUES.load_policy()["kind"])
@@ -195,7 +259,8 @@ class IssueLifecycleTests(unittest.TestCase):
     def test_code_pass_does_not_create_security_pass(self):
         head = self.pr["head_sha"]
         result = self.project(
-            qualification={"status": "PASS", "head_sha": head},
+            qualification={"status": "PASS", "head_sha": head, "head_tree_sha": "d" * 40},
+            preflight=self.preflight_receipt(historical=False),
             code_review={"status": "PASS", "head_sha": head},
         )
         self.assertEqual("QUALIFIED", result["status"])
@@ -229,7 +294,7 @@ class IssueLifecycleTests(unittest.TestCase):
 
     def test_runtime_and_recovery_proofs_are_required_when_declared(self):
         self.package["execution"] = {
-            "runtime_required": True, "recovery_required": True,
+            "preflight_required": True, "runtime_required": True, "recovery_required": True,
         }
         proofs = self.pass_proofs()
         result = self.project(**proofs)

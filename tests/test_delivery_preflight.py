@@ -2,9 +2,11 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -39,6 +41,18 @@ class DeliveryPreflightTests(unittest.TestCase):
         )
         self.policy_path.parent.mkdir(parents=True)
         self.policy_path.write_text(yaml.safe_dump(self.policy), encoding="utf-8")
+        for relative in (
+            "scripts/delivery_preflight.py",
+            "scripts/runtime_orchestration.py",
+            "scripts/capability_bootstrap.py",
+            "scripts/repoctl.py",
+            "scripts/repository_delivery.py",
+            "config/contracts/ci-evidence.yaml",
+            "config/contracts/toolchain-lock.json",
+        ):
+            destination = self.root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
         (self.root / "source.txt").write_text("one\n", encoding="utf-8")
         (self.root / ".gitignore").write_text(".context/\n", encoding="utf-8")
         self.git("init", "-q")
@@ -58,6 +72,7 @@ class DeliveryPreflightTests(unittest.TestCase):
         )
         self.head = self.git("rev-parse", "HEAD")
         self.base = self.head
+        self.tree = self.git("rev-parse", "HEAD^{tree}")
         self.git("update-ref", "refs/remotes/origin/main", self.base)
         self.branch = self.git("branch", "--show-current")
 
@@ -81,29 +96,80 @@ class DeliveryPreflightTests(unittest.TestCase):
         args.update(changes)
         return preflight.run_preflight(self.root, **args)
 
-    def bound_result(self, capabilities=None, parameters=None):
-        result = self.run_preflight(capabilities, parameters)
-        self.assertEqual("PASS", result["status"])
-        result.update(
-            work_package_id="wp-170",
-            work_package_digest="sha256:" + "a" * 64,
-            work_item_issue=170,
-            milestone="M2.5",
+    def trusted_result(self, capabilities=None, parameters=None, *, execute_head=False):
+        base = self.base_checkout()
+        environment = dict(os.environ)
+        environment.update(
+            PYTHONDONTWRITEBYTECODE="1",
+            REPOCTL_TRUSTED_POLICY_ROOT=str(base),
+            REPOCTL_TRUSTED_BASE_SHA=self.base,
+            REPOCTL_TRUSTED_TARGET_ROOT=str(self.root),
+            REPOCTL_TRUSTED_HEAD_SHA=self.head,
+            REPOCTL_TRUSTED_WRAPPER=str(base / "scripts/repository_delivery.py"),
+            REPOCTL_TRUSTED_CONTROLLER=str(base / "scripts/repoctl.py"),
+            REPOCTL_TRUSTED_PR_NUMBER="171",
         )
+        arguments = self.verification_arguments(capabilities, parameters)
+        arguments["required_capabilities"] = arguments.pop("expected_capabilities")
+        arguments["capability_parameters"] = arguments.pop(
+            "expected_capability_parameters"
+        )
+        program = """import importlib.util, json, sys
+from pathlib import Path
+source = Path(sys.argv[1])
+sys.path.insert(0, str(source / 'scripts'))
+spec = importlib.util.spec_from_file_location('fixture_preflight', source / 'scripts/delivery_preflight.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.run_preflight(Path(sys.argv[2]), **json.loads(sys.argv[3]))))
+"""
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                program,
+                str(self.root if execute_head else base),
+                str(self.root),
+                json.dumps(arguments),
+            ],
+            cwd=self.root,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        return json.loads(completed.stdout)
+
+    def verification_arguments(self, capabilities=None, parameters=None):
+        return {
+            "expected_head_sha": self.head,
+            "expected_head_tree_sha": self.git("rev-parse", self.head + "^{tree}"),
+            "expected_base_sha": self.base,
+            "expected_branch": self.branch,
+            "expected_package_id": "wp-170",
+            "expected_package_digest": "sha256:" + "a" * 64,
+            "expected_issue": 170,
+            "expected_milestone": "M2.5",
+            "expected_capabilities": capabilities or [],
+            "expected_capability_parameters": parameters or {},
+        }
+
+    def bound_result(self, capabilities=None, parameters=None):
+        result = self.trusted_result(capabilities, parameters)
+        self.assertEqual("PASS", result["status"], result["reason"])
+        self.bound_parameters = parameters or {}
         return result
 
     def verify_persisted(self, capabilities=None):
         return preflight.verify_preflight(
             self.root,
-            expected_head_sha=self.head,
-            expected_base_sha=self.base,
-            expected_branch=self.branch,
-            expected_package_id="wp-170",
-            expected_package_digest="sha256:" + "a" * 64,
-            expected_issue=170,
-            expected_milestone="M2.5",
-            expected_capabilities=capabilities or [],
-        )
+            **self.verification_arguments(
+                capabilities, getattr(self, "bound_parameters", {})
+            ),
+        )["payload"]
 
     def rewrite_evidence(self, path, payload):
         unsigned = {
@@ -139,6 +205,8 @@ class DeliveryPreflightTests(unittest.TestCase):
     def base_checkout(self):
         directory = self.root / ".context/trusted-base"
         directory.parent.mkdir(parents=True, exist_ok=True)
+        if directory.exists():
+            return directory
         self.git("worktree", "add", "--detach", "--quiet", str(directory), self.base)
         return directory
 
@@ -223,35 +291,22 @@ class DeliveryPreflightTests(unittest.TestCase):
 
     def test_authorized_base_command_ignores_head_registry_replacement(self):
         marker = self.root / ".context/HEAD_COMMAND_EXECUTED"
-        policy = copy.deepcopy(self.policy)
+        base_policy = copy.deepcopy(self.policy)
+        base_policy["runtime_orchestration"]["capabilities"]["ansible-runtime"][
+            "parameters"
+        ] = {"command": ["/bin/true"]}
+        self.commit_policy(base_policy)
+        self.base = self.head
+        self.git("update-ref", "refs/remotes/origin/main", self.base)
+        policy = copy.deepcopy(base_policy)
         policy["runtime_orchestration"]["capabilities"]["ansible-runtime"][
             "parameters"
-        ] = {
-            "command": ["touch", str(marker)],
-        }
+        ] = {"command": ["touch", str(marker)]}
         self.commit_policy(policy)
-        base_root = self.base_checkout()
-        with (
-            mock.patch.dict(
-                os.environ,
-                {
-                    "REPOCTL_TRUSTED_POLICY_ROOT": str(base_root),
-                    "REPOCTL_TRUSTED_BASE_SHA": self.base,
-                    "REPOCTL_TRUSTED_TARGET_ROOT": str(self.root),
-                    "REPOCTL_TRUSTED_HEAD_SHA": self.head,
-                },
-            ),
-            mock.patch.object(
-                preflight.runtime.BuiltinCapabilityDriver,
-                "_run",
-                return_value=subprocess.CompletedProcess(
-                    ["ansible-playbook", "--version"], 0, "", ""
-                ),
-            ) as run,
-        ):
-            result = self.run_preflight(["ansible-runtime"])
-        self.assertEqual("PASS", result["status"])
-        run.assert_called_once_with(["ansible-playbook", "--version"], timeout=15)
+        result = self.trusted_result(["ansible-runtime"])
+        self.assertEqual("PASS", result["status"], result["reason"])
+        self.assertEqual("exact-base", result["execution_authority"])
+        self.assertEqual("PASS", result["checks"]["ansible-runtime"])
         self.assertFalse(marker.exists())
 
     def test_local_diagnostic_reads_exact_base_blob_not_head_policy(self):
@@ -529,6 +584,206 @@ class DeliveryPreflightTests(unittest.TestCase):
         )
         self.assertEqual("BLOCKED_RUNTIME", result["status"])
         self.assertEqual(["capture", "preflight"], driver.calls)
+
+    def historical(self, path, result, **overrides):
+        arguments = self.verification_arguments(
+            result["required_capabilities"], result["capability_parameters"]
+        )
+        arguments.update(
+            proof_path=path,
+            expected_sha256="sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(),
+            merge_epoch=result["generated_at_epoch"] + 1,
+        )
+        arguments.update(overrides)
+        return preflight.verify_historical_preflight(self.root, **arguments)
+
+    def test_real_base_producer_receipt_survives_verified_merge_context(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        receipt = preflight.verify_preflight(
+            self.root, **self.verification_arguments(), expected_result=result
+        )
+        digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        self.assertEqual("current-preflight-verification", receipt["authority"])
+        self.assertTrue(receipt["fresh_execution_verified"])
+        self.assertEqual("NOT_APPLICABLE", receipt["historical_verification"])
+        self.assertEqual(digest, receipt["evidence_digest"])
+        self.assertRegex(receipt["producer_fingerprint"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(result["producer"], receipt["producer_identity"])
+        self.git("switch", "-q", "-c", "main")
+        (self.root / "source.txt").write_text("new main\n", encoding="utf-8")
+        self.git("add", "source.txt")
+        self.git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "merge successor",
+        )
+        # Later elapsed wall time and current main are irrelevant to the signed
+        # historical snapshot; freshness is evaluated at the verified merge.
+        with mock.patch.object(
+            preflight.time, "time", return_value=time.time() + 172800
+        ):
+            historical = self.historical(path, result)
+        self.assertEqual("historical-preflight-verification", historical["authority"])
+        self.assertEqual("VERIFIED", historical["historical_verification"])
+        self.assertEqual(self.head, historical["head_sha"])
+        self.assertEqual(digest, historical["evidence_digest"])
+        with self.assertRaisesRegex(ValueError, "current HEAD"):
+            preflight.verify_preflight(
+                self.root, **self.verification_arguments(), expected_result=result
+            )
+
+    def test_fresh_verification_binds_exact_in_memory_result(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        replacement = json.loads(path.read_bytes())
+        replacement["diagnostic"] = "another invocation with otherwise valid identity"
+        self.rewrite_evidence(path, replacement)
+        with self.assertRaisesRegex(ValueError, "fresh BASE producer result"):
+            preflight.verify_preflight(
+                self.root, **self.verification_arguments(), expected_result=result
+            )
+
+    def test_wrong_tree_parameters_and_producer_cannot_borrow_valid_digest(self):
+        capabilities = ["cpu-capacity"]
+        parameters = {"cpu-capacity": {"minimum_count": 1}}
+        result = self.bound_result(capabilities, parameters)
+        path = preflight.write_preflight(self.root, result)
+        original = json.loads(path.read_bytes())
+        for field, value in (
+            ("head_tree_sha", "f" * 40),
+            ("capability_parameters", {"cpu-capacity": {"minimum_count": 2}}),
+            ("capability_parameters", {"cpu-capacity": {"minimum_count": True}}),
+            ("producer", {**result["producer"], "sha256": "sha256:" + "f" * 64}),
+            ("execution_authority", "diagnostic"),
+        ):
+            with self.subTest(field=field):
+                changed = {**original, field: value}
+                self.rewrite_evidence(path, changed)
+                with self.assertRaisesRegex(ValueError, field):
+                    self.verify_persisted(capabilities)
+                with self.assertRaisesRegex(ValueError, field):
+                    self.historical(path, result)
+
+    def test_stale_future_and_missing_generation_fail_current_and_historical(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        original = json.loads(path.read_bytes())
+        now = int(time.time())
+        limit = preflight._freshness_limit(self.root, self.base)
+        for generated in (now - limit - 2, now + 10, None, True, 1.5):
+            with self.subTest(generated=generated):
+                self.rewrite_evidence(
+                    path, {**original, "generated_at_epoch": generated}
+                )
+                with self.assertRaisesRegex(ValueError, "freshness|stale"):
+                    self.verify_persisted()
+                with self.assertRaisesRegex(ValueError, "freshness|stale"):
+                    self.historical(path, result, merge_epoch=now)
+
+    def test_historical_signed_byte_digest_and_exact_bindings_are_mandatory(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        for mutation in (
+            {"expected_sha256": "sha256:" + "0" * 64},
+            {"expected_head_sha": "f" * 40},
+            {"expected_head_tree_sha": "f" * 40},
+            {"expected_base_sha": "f" * 40},
+            {"expected_branch": "feature/other"},
+            {"expected_package_id": "another-package"},
+            {"expected_package_digest": "sha256:" + "0" * 64},
+            {"expected_issue": 171},
+            {"expected_milestone": "M7"},
+            {"proof_path": self.root / ".context/unrelated.json"},
+        ):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                self.historical(path, result, **mutation)
+
+    def test_untrusted_head_module_cannot_claim_exact_base_execution(self):
+        result = self.trusted_result(execute_head=True)
+        self.assertEqual("FAIL", result["status"])
+        self.assertIn("not executing its exact-base producer", result["reason"])
+        diagnostic = self.run_preflight()
+        self.assertEqual("PASS", diagnostic["status"])
+        self.assertEqual("diagnostic", diagnostic["execution_authority"])
+        diagnostic.update(
+            work_package_id="wp-170",
+            work_package_digest="sha256:" + "a" * 64,
+            work_item_issue=170,
+            milestone="M2.5",
+        )
+        preflight.write_preflight(self.root, diagnostic)
+        with self.assertRaisesRegex(ValueError, "execution_authority"):
+            self.verify_persisted()
+
+    def test_current_and_historical_parse_digest_share_one_bounded_capture(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        original = path.read_bytes()
+        digest = "sha256:" + hashlib.sha256(original).hexdigest()
+        decoder = preflight._unique_json_object
+        replaced = False
+
+        def replace_after_read(pairs):
+            nonlocal replaced
+            if not replaced:
+                replaced = True
+                path.write_bytes(b'{"status":"FAIL"}\n')
+            return decoder(pairs)
+
+        for historical in (False, True):
+            with self.subTest(historical=historical):
+                path.write_bytes(original)
+                replaced = False
+                with mock.patch.object(
+                    preflight, "_unique_json_object", side_effect=replace_after_read
+                ):
+                    receipt = (
+                        self.historical(path, result, expected_sha256=digest)
+                        if historical
+                        else preflight.verify_preflight(
+                            self.root,
+                            **self.verification_arguments(),
+                            expected_result=result,
+                        )
+                    )
+                self.assertTrue(replaced)
+                self.assertEqual("PASS", receipt["status"])
+                self.assertEqual(digest, receipt["evidence_digest"])
+                self.assertNotEqual(
+                    digest, "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+                )
+
+    def test_symlink_oversized_duplicate_and_nonfinite_preflight_are_rejected(self):
+        result = self.bound_result()
+        path = preflight.write_preflight(self.root, result)
+        original = path.read_bytes()
+        path.unlink()
+        path.symlink_to(self.root / "source.txt")
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.verify_persisted()
+        path.unlink()
+        for content in (
+            b" " * (preflight._MAX_PROOF_BYTES + 1),
+            b'{"status":"PASS","status":"PASS"}',
+            b'{"generated_at_epoch":NaN}',
+        ):
+            with self.subTest(content=content[:60]), self.assertRaises(ValueError):
+                path.write_bytes(content)
+                self.verify_persisted()
+        path.write_bytes(original)
+        directory = path.parent
+        saved = directory.with_name("saved-preflight")
+        directory.rename(saved)
+        directory.symlink_to(saved, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            self.verify_persisted()
 
 
 if __name__ == "__main__":

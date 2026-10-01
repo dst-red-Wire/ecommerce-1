@@ -15,12 +15,6 @@ SPEC = importlib.util.spec_from_file_location("repoctl_pr_loop_test", ROOT / "sc
 assert SPEC and SPEC.loader
 REPOCTL = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(REPOCTL)
-# CI shards import this module in separate processes; isolate their simulated transitions.
-_TEST_SYNC_LOCK_DIRECTORY = tempfile.TemporaryDirectory()
-mock.patch.object(
-    REPOCTL, "_pr_sync_lock_path",
-    return_value=Path(_TEST_SYNC_LOCK_DIRECTORY.name) / "repoctl-sync-pr-base.lock",
-).start()
 RISK_SPEC = importlib.util.spec_from_file_location(
     "merge_risk_pr_loop_test", ROOT / "scripts/merge_risk.py"
 )
@@ -821,6 +815,16 @@ class PRLoopOrchestrationTests(unittest.TestCase):
     SHA_A = "a" * 40
     SHA_B = "b" * 40
 
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        (self.root / ".git").mkdir()
+        for name, value in (("ROOT", self.root), ("CONTEXT", self.root / ".context")):
+            patcher = mock.patch.object(REPOCTL, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def snapshot(self, sha=None, **overrides):
         value = {
             "number": 161,
@@ -877,13 +881,17 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             mock.patch.multiple(
                 REPOCTL,
                 _pr_loop_checkout_errors=mock.Mock(return_value=[]),
-                _remote_ref_sha=mock.Mock(return_value="c" * 40),
                 _delivery_pr_work_item_preflight=mock.Mock(return_value={
-                    "status": "PASS", "reason": "", "milestone": "M7",
+                    "status": "PASS",
+                    "reason": "",
+                    "work_package": "config/work-packages/M7/delivery-fixture.yaml",
+                    "work_package_id": "delivery-fixture",
                     "work_item_issue": 170,
-                    "work_package": "config/work-packages/M7/m7-verified-delivery-chain.yaml",
+                    "milestone": "M7",
+                    "pr": 161,
                     "preflight": {"status": "PASS"},
                 }),
+                _remote_ref_sha=mock.Mock(return_value="c" * 40),
                 _delivery_exact_bundle_gate=mock.Mock(return_value={
                     "status": "PASS",
                     "manifest": ".context/evidence/fixture/manifest.json",
@@ -893,12 +901,75 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                 _require_trusted_pr_execution=mock.Mock(
                     return_value={
                         "trusted_root": Path("/trusted/base"),
-                        "target_root": ROOT,
+                        "target_root": self.root,
                         "base_sha": "c" * 40,
                     }
                 ),
             ),
         )
+
+    def test_invalid_preflight_blocks_qualification_authorities_and_merge_readiness(self):
+        reviews = {
+            kind: {"status": "PASS", "blocking_findings": 0, "head_sha": self.SHA_A}
+            for kind in ("code", "security")
+        }
+        failures = (
+            "preflight evidence missing",
+            "preflight evidence stale",
+            "preflight head differs",
+            "preflight tree differs",
+            "preflight producer is invalid",
+        )
+        for reason in failures:
+            for dry_run in (False, True):
+                with self.subTest(reason=reason, dry_run=dry_run), contextlib.ExitStack() as stack:
+                    for patcher in self.common():
+                        stack.enter_context(patcher)
+                    stack.enter_context(mock.patch.object(
+                        REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
+                    ))
+                    preflight = stack.enter_context(mock.patch.object(
+                        REPOCTL, "_delivery_pr_work_item_preflight",
+                        side_effect=RuntimeError(reason),
+                    ))
+                    qualification = stack.enter_context(mock.patch.object(
+                        REPOCTL, "_pr_loop_qualification",
+                        return_value={"status": "PASS", "head_sha": self.SHA_A},
+                    ))
+                    authorities = stack.enter_context(mock.patch.object(
+                        REPOCTL, "pull_request_authority_evidence",
+                        return_value=(reviews, {"status": "PASS", "head_sha": self.SHA_A}),
+                    ))
+                    runner = stack.enter_context(mock.patch.object(
+                        REPOCTL, "run", return_value=self.completed()
+                    ))
+                    rc, payload = self.run_json(dry_run=dry_run)
+                    self.assertNotEqual(0, rc)
+                    self.assertFalse(payload["merge_ready"])
+                    self.assertNotEqual("MERGE_READY", payload["state"])
+                    self.assertIn(reason, " ".join(payload["blockers"]))
+                    preflight.assert_called_once()
+                    qualification.assert_not_called()
+                    authorities.assert_not_called()
+                    self.assertFalse(any(
+                        "finish-pr" in call.args[0] or "qualification-proof" in call.args[0]
+                        for call in runner.call_args_list
+                    ))
+
+    def test_isolated_pr_loop_keeps_real_lock_exclusion(self):
+        with (self.root / ".git/repoctl-sync-pr-base.lock").open("w") as held:
+            REPOCTL.fcntl.flock(held.fileno(), REPOCTL.fcntl.LOCK_EX | REPOCTL.fcntl.LOCK_NB)
+            with contextlib.ExitStack() as stack:
+                for patcher in self.common():
+                    stack.enter_context(patcher)
+                preflight = stack.enter_context(mock.patch.object(
+                    REPOCTL, "_delivery_pr_work_item_preflight"
+                ))
+                rc, payload = self.run_json(dry_run=False)
+            self.assertNotEqual(0, rc)
+            self.assertEqual("SYNC_BUSY", payload["state"])
+            self.assertFalse(payload["merge_ready"])
+            preflight.assert_not_called()
 
     def test_stale_main_sync_invalidates_all_prior_head_authorities(self):
         patches = self.common()
@@ -1548,7 +1619,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL, "output", side_effect=[json.dumps(before), json.dumps(after)]
         ), mock.patch.object(REPOCTL, "finish_pr", side_effect=noisy_finish), mock.patch.object(
             REPOCTL, "branch_cleanup", side_effect=noisy_cleanup
-        ), mock.patch.object(REPOCTL, "_roadmap_followup_after_merge", return_value=0):
+        ), mock.patch.object(REPOCTL, "_roadmap_followup_after_merge", return_value=0), mock.patch.object(
+            REPOCTL, "roadmap_check", return_value=0
+        ):
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 rc = REPOCTL._finish_pr_json("main")
         payload = json.loads(stdout.getvalue())
@@ -1615,7 +1688,9 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL", payload["cleanup_result"])
         self.assertEqual("FAIL", payload["output_contract"])
 
-    def _run_merged_closure(self, completion_status="CLOSED", roadmap_status=0):
+    def _run_merged_closure(
+        self, completion_status="CLOSED", roadmap_status=0, completion_errors=None
+    ):
         result = REPOCTL._pr_loop_empty_result(161)
         result.update({"head_sha": self.SHA_A, "merge_result": "PASS"})
         merged = self.snapshot(
@@ -1646,7 +1721,10 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             return_value=({"code": {}, "security": {}}, {}),
         ), mock.patch(
             "issue_completion.complete_work_item",
-            return_value={"status": completion_status, "issue": 170, "errors": []},
+            return_value={
+                "status": completion_status, "issue": 170,
+                "errors": list(completion_errors or []),
+            },
         ), mock.patch(
             "post_merge_verify.recover_post_merge_proof",
             return_value={
@@ -1672,10 +1750,31 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("CLOSED", payload["work_item_completion"]["status"])
         self.assertEqual("PASS", payload["post_merge_result"])
 
+    def test_preflight_blocked_closure_cannot_report_verified_closed_or_done(self):
+        for reason in (
+            "preflight_missing",
+            "preflight_stale",
+            "preflight_wrong_head",
+            "preflight_wrong_tree",
+            "preflight_invalid_producer",
+        ):
+            with self.subTest(reason=reason):
+                rc, payload = self._run_merged_closure(
+                    completion_status="BLOCKED", completion_errors=[reason]
+                )
+                self.assertNotEqual(0, rc)
+                self.assertEqual("MERGED", payload["state"])
+                self.assertNotIn(payload["state"], {"VERIFIED", "CLOSED", "DONE"})
+                self.assertEqual("PASS", payload["merge_result"])
+                self.assertEqual("PASS", payload["post_merge_result"])
+                self.assertEqual("BLOCKED", payload["work_item_completion"]["status"])
+                self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
+                self.assertIn(reason, " ".join(payload["blockers"]))
+
     def test_signed_merge_and_proof_do_not_finish_when_issue_closure_fails(self):
         rc, payload = self._run_merged_closure("BLOCKED")
         self.assertEqual(1, rc)
-        self.assertEqual("VERIFIED", payload["state"])
+        self.assertEqual("MERGED", payload["state"])
         self.assertEqual("CLOSE_WORK_ITEM", payload["next_action"])
         self.assertEqual("PASS", payload["post_merge_result"])
 
@@ -1912,13 +2011,17 @@ class PRLoopSourceContractTests(unittest.TestCase):
         self.assertIn("test workspace", payload["blockers"][0])
 
     def test_direct_pr_loop_requires_the_exact_base_wrapper(self):
-        with (
-            mock.patch.dict(REPOCTL.os.environ, {}, clear=True),
-            mock.patch.object(REPOCTL, "_TRUSTED_PR_EXECUTION_CONTEXT", None),
-        ):
-            stream = io.StringIO()
-            with contextlib.redirect_stdout(stream):
-                rc = REPOCTL.pr_loop(162, json_output=True)
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            (target / ".git").mkdir()
+            with (
+                mock.patch.object(REPOCTL, "ROOT", target),
+                mock.patch.dict(REPOCTL.os.environ, {}, clear=True),
+                mock.patch.object(REPOCTL, "_TRUSTED_PR_EXECUTION_CONTEXT", None),
+            ):
+                stream = io.StringIO()
+                with contextlib.redirect_stdout(stream):
+                    rc = REPOCTL.pr_loop(162, json_output=True)
         result = json.loads(stream.getvalue().strip().splitlines()[-1])
         self.assertEqual(1, rc)
         self.assertEqual("BLOCKED", result["state"])

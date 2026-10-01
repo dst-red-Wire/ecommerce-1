@@ -13224,32 +13224,71 @@ def _delivery_pr_work_item_preflight(
     if dependencies["status"] != "PASS":
         raise RuntimeError("work package dependencies are not verified: "
                            + "; ".join(dependencies.get("errors", [])))
-    package_digest = "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+    import post_merge_verify
+
+    package_bytes = post_merge_verify._record_bytes(path, label="work package")
+    import work_package
+    import yaml
+
+    try:
+        captured_package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("captured work package YAML is invalid") from exc
+    if captured_package != package:
+        raise RuntimeError("work package differs from its validated declaration")
+    committed_package = delivery_preflight._base_blob(
+        ROOT, snapshot["head_sha"], package_path
+    )
+    if committed_package != package_bytes:
+        raise RuntimeError("work package differs from exact HEAD blob")
+    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    tree_sha = git("rev-parse", f"{snapshot['head_sha']}^{{tree}}").strip()
     execution = package["execution"]
     preflight = delivery_preflight.run_preflight(
         ROOT,
         expected_head_sha=snapshot["head_sha"],
         expected_base_sha=snapshot["base_sha"],
         expected_branch=snapshot["head_branch"],
+        expected_head_tree_sha=tree_sha,
+        expected_package_id=package["id"],
+        expected_package_digest=package_digest,
+        expected_issue=package["work_item_issue"],
+        expected_milestone=package["milestone"],
         required_capabilities=execution.get("required_capabilities", []),
         capability_parameters=execution.get("capability_parameters", {}),
     )
     if (
-        "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest() != package_digest
+        post_merge_verify._record_bytes(path, label="work package") != package_bytes
         or git("rev-parse", "HEAD").strip() != snapshot["head_sha"]
         or git("rev-parse", "origin/main").strip() != snapshot["base_sha"]
         or git("branch", "--show-current").strip() != snapshot["head_branch"]
         or git("status", "--porcelain", "--untracked-files=all").strip()
     ):
         raise RuntimeError("work package or exact source changed during preflight")
-    preflight.update({
-        "work_package_id": package["id"],
-        "work_package_digest": package_digest,
-        "work_item_issue": package["work_item_issue"],
-        "milestone": package["milestone"],
-    })
+    receipt = {}
+    preflight_path = ""
+    preflight_digest = ""
     if persist:
-        delivery_preflight.write_preflight(ROOT, preflight)
+        destination = delivery_preflight.write_preflight(ROOT, preflight)
+        preflight_path = str(destination.relative_to(ROOT))
+        if preflight["status"] == "PASS":
+            receipt = delivery_preflight.verify_preflight(
+                ROOT,
+                expected_head_sha=snapshot["head_sha"],
+                expected_head_tree_sha=tree_sha,
+                expected_base_sha=snapshot["base_sha"],
+                expected_branch=snapshot["head_branch"],
+                expected_package_id=package["id"],
+                expected_package_digest=package_digest,
+                expected_issue=package["work_item_issue"],
+                expected_milestone=package["milestone"],
+                expected_capabilities=execution.get("required_capabilities", []),
+                expected_capability_parameters=execution.get("capability_parameters", {}),
+                expected_result=preflight,
+            )
+            if receipt.get("status") != "PASS":
+                raise RuntimeError("fresh BASE preflight verification failed")
+            preflight_digest = receipt["evidence_digest"]
     return {
         "status": preflight["status"],
         "reason": preflight.get("reason", ""),
@@ -13259,6 +13298,9 @@ def _delivery_pr_work_item_preflight(
         "milestone": package["milestone"],
         "pr": number,
         "preflight": preflight,
+        "preflight_verification": receipt,
+        "preflight_path": preflight_path,
+        "preflight_digest": preflight_digest,
     }
 
 
@@ -13274,8 +13316,17 @@ def _delivery_exact_bundle_gate(
     import delivery_preflight
     import evidence_bundle
     import issue_lifecycle
+    import post_merge_verify
     import runtime_authority
+    import work_package
+    import yaml
 
+    if create:
+        if type(work_item.get("pr")) is not int or work_item["pr"] < 1:
+            raise RuntimeError("fresh bundle requires an exact PR identity")
+        _require_trusted_pr_execution(
+            pr_number=work_item["pr"], base_sha=base_sha, head_sha=head_sha
+        )
     package, validation, package_path = _delivery_package_input(
         work_item["work_package"],
         issue=work_item["work_item_issue"],
@@ -13283,32 +13334,92 @@ def _delivery_exact_bundle_gate(
     )
     if validation["status"] != "VALID":
         raise RuntimeError("work package changed before evidence bundling")
+    package_bytes = post_merge_verify._record_bytes(package_path, label="work package")
+    try:
+        captured_package = yaml.load(
+            package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader
+        )
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("captured work package YAML is invalid") from exc
+    if captured_package != package:
+        raise RuntimeError("work package differs from its validated declaration")
+    package_relative = str(package_path.relative_to(ROOT))
+    if delivery_preflight._base_blob(ROOT, head_sha, package_relative) != package_bytes:
+        raise RuntimeError("work package differs from exact HEAD blob")
+    package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
+    tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
+    branch = git("branch", "--show-current").strip()
+    preflight_relative = f".context/evidence/preflight/{head_sha}.json"
+    execution = package["execution"]
+    expected_result = None
+    previous_receipt = work_item.get("preflight_verification")
+    if create:
+        expected_result = work_item.get("preflight")
+        if (
+            work_item.get("status") != "PASS"
+            or not isinstance(expected_result, dict)
+            or expected_result.get("execution_authority") != "exact-base"
+            or not isinstance(previous_receipt, dict)
+            or previous_receipt.get("status") != "PASS"
+            or previous_receipt.get("authority") != "current-preflight-verification"
+            or previous_receipt.get("fresh_execution_verified") is not True
+            or work_item.get("preflight_path") != preflight_relative
+            or previous_receipt.get("evidence_path") != preflight_relative
+            or work_item.get("preflight_digest")
+            != previous_receipt.get("evidence_digest")
+        ):
+            raise RuntimeError("fresh BASE preflight result and receipt required")
+    # Dry-run inspects the persisted proof without authorizing a fresh execution.
+    # Its nonpersisted probe result can legitimately have a different timestamp.
     preflight = delivery_preflight.verify_preflight(
         ROOT,
         expected_head_sha=head_sha,
+        expected_head_tree_sha=tree_sha,
         expected_base_sha=base_sha,
-        expected_branch=git("branch", "--show-current").strip(),
+        expected_branch=branch,
         expected_package_id=package["id"],
-        expected_package_digest="sha256:" + hashlib.sha256(package_path.read_bytes()).hexdigest(),
+        expected_package_digest=package_digest,
         expected_issue=package["work_item_issue"],
         expected_milestone=package["milestone"],
-        expected_capabilities=package["execution"].get("required_capabilities", []),
+        expected_capabilities=execution.get("required_capabilities", []),
+        expected_capability_parameters=execution.get("capability_parameters", {}),
+        expected_result=expected_result,
     )
+    if (
+        preflight.get("status") != "PASS"
+        or preflight.get("authority") != "current-preflight-verification"
+        or preflight.get("fresh_execution_verified") is not create
+        or preflight.get("evidence_path") != preflight_relative
+        or (
+            create
+            and preflight.get("evidence_digest") != previous_receipt["evidence_digest"]
+        )
+    ):
+        raise RuntimeError("BASE preflight receipt changed before evidence bundling")
+    preflight_bytes = post_merge_verify._record_bytes(
+        ROOT / preflight_relative, label="preflight proof"
+    )
+    preflight_digest = evidence_bundle.digest_bytes(preflight_bytes)
+    if preflight_digest != preflight["evidence_digest"]:
+        raise RuntimeError("preflight bytes changed after fresh verification")
     qualified_path = _valid_exact_evidence(base_sha, head_sha)
     if qualified_path is None:
         raise RuntimeError("exact-SHA qualification is missing or invalid")
-    qualification = json.loads(qualified_path.read_text(encoding="utf-8"))
+    qualification = json.loads(
+        post_merge_verify._record_bytes(qualified_path, label="qualification proof")
+    )
     if not isinstance(qualification, dict) or qualification.get("status") != "PASS":
         raise RuntimeError("exact-SHA qualification is not PASS")
     acceptance = issue_lifecycle.derive_premerge_acceptance(
-        package, qualification,
+        package,
+        qualification,
         issue_lifecycle.read_qualified_head_snapshot(ROOT, head_sha),
     )
     if acceptance["status"] != "PASS":
         raise RuntimeError(
             "work package acceptance is not PASS: " + "; ".join(acceptance["errors"])
         )
-    gate_paths = [f".context/evidence/preflight/{head_sha}.json"]
+    gate_paths = [preflight_relative]
     if qualification_workflow("qualification_proof").get("performance_audit_runs") == 1:
         audit = _valid_performance_audit(base_sha, head_sha)
         if audit is None:
@@ -13318,7 +13429,10 @@ def _delivery_exact_bundle_gate(
     runtime_digests = []
     for relative in runtime_paths:
         verdict = runtime_authority.verify_runtime_proof(
-            ROOT, package["milestone"], head_sha, relative,
+            ROOT,
+            package["milestone"],
+            head_sha,
+            relative,
             recovery_required=package["execution"]["recovery_required"],
         )
         if verdict["status"] != "PASS":
@@ -13339,7 +13453,10 @@ def _delivery_exact_bundle_gate(
             proof = reviews.get(kind)
             if proof is None or not _review_result_is_pass(proof):
                 continue
-            if proof.get("head_sha") != head_sha or type(proof.get("comment_id")) is not int:
+            if (
+                proof.get("head_sha") != head_sha
+                or type(proof.get("comment_id")) is not int
+            ):
                 raise RuntimeError(f"{kind} review is not an exact GitHub comment")
             relative = (
                 f".context/evidence/{head_sha}/reviews/"
@@ -13354,31 +13471,42 @@ def _delivery_exact_bundle_gate(
                     raise RuntimeError("review evidence directory is unsafe")
                 if create:
                     directory.mkdir(exist_ok=True)
-                if directory.exists() and not directory.resolve().is_relative_to(ROOT.resolve()):
+                if directory.exists() and not directory.resolve().is_relative_to(
+                    ROOT.resolve()
+                ):
                     raise RuntimeError("review evidence directory escapes repository")
             path = ROOT / relative
-            content = evidence_bundle.canonical_bytes({
-                "pr": work_item.get("pr"),
-                "provider": "ChatGPT",
-                "source": "github-pr-comment",
-                "review": proof,
-                "verdict_authority": False,
-            })
+            content = evidence_bundle.canonical_bytes(
+                {
+                    "pr": work_item.get("pr"),
+                    "provider": "ChatGPT",
+                    "source": "github-pr-comment",
+                    "review": proof,
+                    "verdict_authority": False,
+                }
+            )
             if path.exists() or path.is_symlink():
-                if path.is_symlink() or path.read_bytes() != content:
+                if (
+                    post_merge_verify._record_bytes(path, label="review snapshot")
+                    != content
+                ):
                     raise RuntimeError("review snapshot is immutable and differs")
             elif create:
                 evidence_bundle._atomic_write(path, content)
             else:
-                raise RuntimeError("review snapshot is missing for read-only bundle check")
+                raise RuntimeError(
+                    "review snapshot is missing for read-only bundle check"
+                )
             review_paths.append(relative)
     toolchain_digest = evidence_bundle.digest_file(
         evidence_bundle._safe_file(ROOT, "config/contracts/toolchain-lock.json")
     )
     runtime_identity = (
-        evidence_bundle.digest_bytes(evidence_bundle.canonical_bytes(
-            {"runtime_evidence": runtime_digests}
-        )) if runtime_digests else ""
+        evidence_bundle.digest_bytes(
+            evidence_bundle.canonical_bytes({"runtime_evidence": runtime_digests})
+        )
+        if runtime_digests
+        else ""
     )
     created = None
     if create:
@@ -13386,7 +13514,7 @@ def _delivery_exact_bundle_gate(
             ROOT,
             base_sha=base_sha,
             head_sha=head_sha,
-            tree_sha=git("rev-parse", "HEAD^{tree}").strip(),
+            tree_sha=tree_sha,
             qualification_identity=qualification["qualification_identity"],
             toolchain_digest=toolchain_digest,
             runtime_evidence=runtime_paths,
@@ -13395,22 +13523,40 @@ def _delivery_exact_bundle_gate(
             runtime_identity=runtime_identity,
         )
     verified = evidence_bundle.verify_bundle(
-        ROOT, head_sha,
+        ROOT,
+        head_sha,
         expected_identity={
             "base_sha": base_sha,
             "head_sha": head_sha,
-            "tree_sha": git("rev-parse", "HEAD^{tree}").strip(),
+            "tree_sha": tree_sha,
             "toolchain_digest": toolchain_digest,
             "qualification_identity": qualification["qualification_identity"],
             "runtime_identity": runtime_identity,
         },
     )
     if verified["status"] != "PASS" or (
-        created is not None and created["manifest_digest"] != verified["manifest_digest"]
+        created is not None
+        and created["manifest_digest"] != verified["manifest_digest"]
     ):
         raise RuntimeError("exact-SHA evidence bundle integrity did not PASS")
     manifest_relative = f".context/evidence/{head_sha}/manifest.json"
-    manifest = evidence_bundle._read_json(evidence_bundle._safe_file(ROOT, manifest_relative))
+    manifest_bytes = post_merge_verify._record_bytes(
+        ROOT / manifest_relative, label="evidence bundle manifest"
+    )
+    if evidence_bundle.digest_bytes(manifest_bytes) != verified["manifest_digest"]:
+        raise RuntimeError("evidence bundle manifest changed after verification")
+    manifest = json.loads(manifest_bytes)
+    preflight_references = [
+        item
+        for item in manifest["gate_evidence"]
+        if item.get("path") == preflight_relative
+    ]
+    if (
+        len(preflight_references) != 1
+        or preflight_references[0].get("sha256") != preflight_digest
+        or manifest["evidence_digests"].get(preflight_relative) != preflight_digest
+    ):
+        raise RuntimeError("bundle preflight differs from captured verified bytes")
     for field, required in (
         ("gate_evidence", gate_paths + [f".context/evidence/{head_sha}.json"]),
         ("runtime_evidence", runtime_paths),
@@ -13419,11 +13565,29 @@ def _delivery_exact_bundle_gate(
         found = {item.get("path") for item in manifest[field]}
         if not set(required) <= found:
             raise RuntimeError(f"exact-SHA bundle lacks required {field} references")
+    if (
+        post_merge_verify._record_bytes(package_path, label="work package")
+        != package_bytes
+        or post_merge_verify._record_bytes(
+            ROOT / preflight_relative, label="preflight proof"
+        )
+        != preflight_bytes
+        or git("rev-parse", "HEAD").strip() != head_sha
+        or git("rev-parse", "HEAD^{tree}").strip() != tree_sha
+        or git("rev-parse", "origin/main").strip() != base_sha
+        or git("branch", "--show-current").strip() != branch
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        raise RuntimeError(
+            "work package, preflight or exact source changed during bundling"
+        )
     return {
         "status": "PASS",
+        "authority": "bundle-integrity-only",
+        "preflight_verification": preflight,
         "manifest": manifest_relative,
         "manifest_digest": verified["manifest_digest"],
-        "preflight_evidence_digest": preflight["evidence_digest"],
+        "preflight_evidence_digest": preflight_digest,
         "acceptance": acceptance,
         "runtime_identity": runtime_identity,
         "review_evidence": review_paths,
@@ -13565,14 +13729,13 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return 1
 
     try:
-        _owner_login, repository = _github_repository_identity(gh)
         candidates = json.loads(output([
             gh, "pr", "list", "--head", branch, "--base", base_name,
             "--state", "open", "--limit", "2", "--json", "number",
         ]) or "[]")
         if not isinstance(candidates, list) or len(candidates) != 1:
             raise RuntimeError("exactly one open PR is required for the feature branch")
-        pre_pr = _github_pr_snapshot(gh, repository, int(candidates[0]["number"]))
+        pre_pr = _github_pr_snapshot(gh, name_with_owner, int(candidates[0]["number"]))
         if (
             pre_pr.get("state") != "OPEN"
             or pre_pr.get("draft")
@@ -13583,7 +13746,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         ):
             raise RuntimeError("PR exact head/base/branch changed before preflight")
         work_item = _delivery_pr_work_item_preflight(
-            gh, repository, pre_pr, persist=True
+            gh, name_with_owner, pre_pr, persist=True
         )
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr work-item/preflight gate failed: {exc}")
@@ -13605,13 +13768,6 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     audit = ROOT / qualification["performance_audit"]
     if _valid_exact_evidence(base_ref, head, evidence_path=evidence) is None:
         return fail(f"finish-pr archived exact PASS evidence changed for {head}")
-
-    try:
-        qualification_payload = json.loads(evidence.read_text(encoding="utf-8"))
-        if not isinstance(qualification_payload, dict):
-            raise ValueError("qualification evidence is not an object")
-    except (OSError, UnicodeError, ValueError) as exc:
-        return fail(f"finish-pr cannot capture exact qualification evidence: {exc}")
 
     proof_workflow = qualification_workflow("qualification_proof")
     if proof_workflow.get("merge_authoritative") is not True:
@@ -13769,29 +13925,80 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     if any(not _review_result_is_pass(fresh_reviews[kind]) for kind in ("code", "security")):
         return fail("finish-pr ChatGPT review authority changed during final revalidation")
     try:
+        import evidence_bundle
+        import post_merge_verify
+
         fresh_work_item = _delivery_pr_work_item_preflight(
             gh, name_with_owner, fresh_pr, persist=True
         )
         if fresh_work_item["status"] != "PASS":
-            raise RuntimeError(
-                f"preflight {fresh_work_item['status']}: {fresh_work_item['reason']}"
-            )
+            raise RuntimeError(f"final preflight failed: {fresh_work_item['reason']}")
+        for key in ("work_package", "work_package_id", "work_item_issue", "milestone"):
+            if fresh_work_item[key] != work_item[key]:
+                raise RuntimeError("primary work item changed during final revalidation")
+        if fresh_work_item["preflight"].get("work_package_digest") != work_item["preflight"].get("work_package_digest"):
+            raise RuntimeError("work package changed during final revalidation")
+        preflight_path = fresh_work_item["preflight_path"]
+        if preflight_path != f".context/evidence/preflight/{head}.json":
+            raise RuntimeError("final preflight path is not canonical")
+        captured_preflight = post_merge_verify._record_bytes(
+            evidence_bundle._safe_file(ROOT, preflight_path), label="final BASE preflight"
+        )
+        preflight_digest = evidence_bundle.digest_bytes(captured_preflight)
+        if preflight_digest != fresh_work_item["preflight_digest"]:
+            raise RuntimeError("final preflight differs from fresh BASE execution")
+
+        canonical_evidence = _valid_exact_evidence(base_ref, head)
+        canonical_audit = _valid_performance_audit(base_ref, head)
+        if canonical_evidence is None or canonical_audit is None:
+            raise RuntimeError("final canonical qualification or audit is missing")
+        captured_evidence = post_merge_verify._record_bytes(
+            canonical_evidence, label="final BASE qualification"
+        )
+        captured_audit = post_merge_verify._record_bytes(
+            canonical_audit, label="final BASE audit"
+        )
         if (
-            fresh_work_item["work_package"] != work_item["work_package"]
-            or fresh_work_item["work_item_issue"] != work_item["work_item_issue"]
+            captured_evidence != post_merge_verify._record_bytes(evidence, label="BASE qualification archive")
+            or captured_audit != post_merge_verify._record_bytes(audit, label="BASE audit archive")
         ):
-            raise RuntimeError("primary work item changed during final revalidation")
+            raise RuntimeError("canonical qualification/audit differs from validated BASE archive")
+        qualification_payload = json.loads(captured_evidence)
+        if not isinstance(qualification_payload, dict):
+            raise ValueError("qualification evidence is not an object")
         final_bundle = _delivery_exact_bundle_gate(
             fresh_pr["base_sha"], head, fresh_work_item, reviews=fresh_reviews
         )
         if len(final_bundle["review_evidence"]) != 2:
             raise RuntimeError("final evidence bundle lacks both review references")
-        latest_qualification = _valid_exact_evidence(base_ref, head)
-        if latest_qualification is None:
-            raise RuntimeError("exact qualification changed during final revalidation")
-        qualification_payload = json.loads(
-            latest_qualification.read_text(encoding="utf-8")
+        identity = {
+            "base_sha": fresh_pr["base_sha"],
+            "head_sha": head,
+            "tree_sha": git("rev-parse", "HEAD^{tree}").strip(),
+            "qualification_identity": qualification_payload["qualification_identity"],
+            "toolchain_digest": evidence_bundle.digest_file(evidence_bundle._safe_file(
+                ROOT, "config/contracts/toolchain-lock.json"
+            )),
+            "runtime_identity": final_bundle["runtime_identity"],
+        }
+        verified = evidence_bundle.verify_bundle(ROOT, head, expected_identity=identity)
+        if verified["manifest_digest"] != final_bundle["manifest_digest"]:
+            raise RuntimeError("final BASE evidence bundle changed")
+        manifest_bytes = post_merge_verify._record_bytes(
+            ROOT / final_bundle["manifest"], label="final BASE bundle"
         )
+        manifest = json.loads(manifest_bytes)
+        indexed_digests = manifest.get("evidence_digests") if isinstance(manifest, dict) else None
+        evidence_digest = evidence_bundle.digest_bytes(captured_evidence)
+        audit_digest = evidence_bundle.digest_bytes(captured_audit)
+        if (
+            not isinstance(indexed_digests, dict)
+            or evidence_bundle.digest_bytes(manifest_bytes) != final_bundle["manifest_digest"]
+            or indexed_digests.get(str(canonical_evidence.relative_to(ROOT))) != evidence_digest
+            or indexed_digests.get(str(canonical_audit.relative_to(ROOT))) != audit_digest
+            or indexed_digests.get(preflight_path) != preflight_digest
+        ):
+            raise RuntimeError("final BASE bundle does not retain the validated bytes")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr final work-item/evidence gate failed: {exc}")
     fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
@@ -13836,10 +14043,17 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     try:
         import post_merge_verify
 
-        post_merge_verify.write_pre_merge_witness(
+        witness = post_merge_verify.write_pre_merge_witness(
             ROOT, pr_number=number, snapshot=fresh_pr,
             qualification=qualification_payload,
         )
+        retained = json.loads(post_merge_verify._record_bytes(witness, label="signed pre-merge witness"))
+        if (
+            not isinstance(retained, dict)
+            or retained.get("evidence_sha256") != evidence_digest
+            or retained.get("manifest_sha256") != final_bundle["manifest_digest"]
+        ):
+            raise RuntimeError("signed pre-merge witness differs from validated BASE bytes")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr cannot retain signed pre-merge witness: {exc}")
     merged = run(
@@ -14049,6 +14263,8 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "draft": False,
         "sync": {"status": "NOT_REQUIRED", "old_head_sha": "", "main_sha": "", "new_head_sha": "", "push_result": "NOT_ATTEMPTED", "force_push_used": False, "rebase_used": False},
         "qualification": {"status": "UNKNOWN", "source": "none"},
+        "work_item": {"status": "UNKNOWN"},
+        "preflight": {"status": "UNKNOWN"},
         "code_review": {"status": "UNKNOWN", "head_sha": ""},
         "security_review": {"status": "UNKNOWN", "head_sha": ""},
         "risk": {
@@ -15006,7 +15222,9 @@ def _pr_loop_post_merge(
                 + "; ".join(completion.get("errors") or [completion["status"]])
             )
     except (OSError, RuntimeError, ValueError, KeyError) as exc:
-        result["state"] = "VERIFIED"
+        # A signed post-merge proof alone cannot establish work-item completion.
+        # In particular a rejected required preflight must never project VERIFIED.
+        result["state"] = "MERGED"
         result["next_action"] = "CLOSE_WORK_ITEM"
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
@@ -15821,7 +16039,16 @@ def _delivery_package_input(
     resolved = candidate.resolve(strict=True)
     if not resolved.is_relative_to(root) or not resolved.is_file():
         raise ValueError("work package must be a regular canonical-repository file")
-    package = work_package._read_yaml(resolved)
+    import delivery_preflight
+    import yaml
+
+    package_bytes = delivery_preflight._record_bytes(root, resolved)
+    try:
+        package = yaml.load(package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader)
+    except (UnicodeError, yaml.YAMLError) as exc:
+        raise ValueError("work package YAML is invalid") from exc
+    if not isinstance(package, dict):
+        raise ValueError("work package must contain a YAML mapping")
     status = work_package.work_package_status(
         package,
         root=root,
@@ -15829,6 +16056,8 @@ def _delivery_package_input(
         expected_issue=issue,
         expected_milestone=milestone,
     )
+    if delivery_preflight._record_bytes(root, resolved) != package_bytes:
+        raise RuntimeError("work package changed during declaration validation")
     return package, status, resolved
 
 
@@ -15854,6 +16083,9 @@ def _delivery_command_failure(reason: str) -> int:
 def preflight_command(package_arg: str, base_sha: str) -> int:
     """Fail before host probes unless the package and exact source scope validate."""
     import delivery_preflight
+    import post_merge_verify
+    import work_package
+    import yaml
 
     try:
         _, status, _ = _delivery_package_input(package_arg)
@@ -15862,13 +16094,26 @@ def preflight_command(package_arg: str, base_sha: str) -> int:
         if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
             return _delivery_command_failure("full exact base SHA required")
         head_sha = git("rev-parse", "HEAD").strip()
+        tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
         branch = git("branch", "--show-current").strip()
-        if run(["git", "merge-base", "--is-ancestor", base_sha, head_sha],
-               check=False, capture=True).returncode != 0:
+        if (
+            run(
+                ["git", "merge-base", "--is-ancestor", base_sha, head_sha],
+                check=False,
+                capture=True,
+            ).returncode
+            != 0
+        ):
             return _delivery_command_failure("exact base must be an ancestor of HEAD")
         changed = git(
-            "diff", "--no-ext-diff", "--no-renames", "--name-only", "-z",
-            base_sha, head_sha, "--",
+            "diff",
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            base_sha,
+            head_sha,
+            "--",
         )
         changed_paths = [item for item in changed.split(chr(0)) if item]
         package, status, path = _delivery_package_input(
@@ -15883,37 +16128,111 @@ def preflight_command(package_arg: str, base_sha: str) -> int:
             if not gh:
                 raise RuntimeError("GitHub CLI required to verify dependencies")
             _owner, repository = _github_repository_identity(gh)
-            dependencies = issue_completion.verify_dependencies(ROOT, gh, repository, package)
+            dependencies = issue_completion.verify_dependencies(
+                ROOT, gh, repository, package
+            )
             if dependencies["status"] != "PASS":
-                raise RuntimeError("work package dependencies are not verified: "
-                                   + "; ".join(dependencies.get("errors", [])))
-        package_digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                raise RuntimeError(
+                    "work package dependencies are not verified: "
+                    + "; ".join(dependencies.get("errors", []))
+                )
+        package_bytes = post_merge_verify._record_bytes(path, label="work package")
+        try:
+            captured_package = yaml.load(
+                package_bytes.decode("utf-8"), Loader=work_package._UniqueKeyLoader
+            )
+        except (UnicodeError, yaml.YAMLError) as exc:
+            raise ValueError("captured work package YAML is invalid") from exc
+        if captured_package != package:
+            raise RuntimeError("work package differs from its validated declaration")
+        relative = str(path.relative_to(ROOT))
+        if delivery_preflight._base_blob(ROOT, head_sha, relative) != package_bytes:
+            raise RuntimeError("work package differs from exact HEAD blob")
+        package_digest = "sha256:" + hashlib.sha256(package_bytes).hexdigest()
         execution = package["execution"]
         result = delivery_preflight.run_preflight(
             ROOT,
             expected_head_sha=head_sha,
             expected_base_sha=base_sha,
             expected_branch=branch,
+            expected_head_tree_sha=tree_sha,
+            expected_package_id=package["id"],
+            expected_package_digest=package_digest,
+            expected_issue=package["work_item_issue"],
+            expected_milestone=package["milestone"],
             required_capabilities=execution.get("required_capabilities", []),
             capability_parameters=execution.get("capability_parameters", {}),
         )
         if (
-            hashlib.sha256(path.read_bytes()).hexdigest() != package_digest
+            post_merge_verify._record_bytes(path, label="work package") != package_bytes
             or git("rev-parse", "HEAD").strip() != head_sha
+            or git("rev-parse", "HEAD^{tree}").strip() != tree_sha
             or git("rev-parse", "origin/main").strip() != base_sha
             or git("branch", "--show-current").strip() != branch
             or git("status", "--porcelain", "--untracked-files=all").strip()
         ):
-            return _delivery_command_failure("work package or exact source changed during preflight")
-        result["work_package_id"] = package["id"]
-        result["work_package_digest"] = "sha256:" + package_digest
-        result["work_item_issue"] = package["work_item_issue"]
-        result["milestone"] = package["milestone"]
-        delivery_preflight.write_preflight(ROOT, result)
+            return _delivery_command_failure(
+                "work package or exact source changed during preflight"
+            )
+        if result["status"] == "PASS" and result.get("execution_authority") not in {
+            "exact-base",
+            "diagnostic",
+        }:
+            raise RuntimeError("preflight execution authority is missing")
+        # Keep the original producer payload intact. Local diagnostics remain useful
+        # for publication and may be inventoried, but cannot authorize a merge.
+        destination = delivery_preflight.write_preflight(ROOT, result)
+        receipt = {}
+        if result["status"] == "PASS" and result["execution_authority"] == "exact-base":
+            _require_trusted_pr_execution(base_sha=base_sha, head_sha=head_sha)
+            receipt = delivery_preflight.verify_preflight(
+                ROOT,
+                expected_head_sha=head_sha,
+                expected_head_tree_sha=tree_sha,
+                expected_base_sha=base_sha,
+                expected_branch=branch,
+                expected_package_id=package["id"],
+                expected_package_digest=package_digest,
+                expected_issue=package["work_item_issue"],
+                expected_milestone=package["milestone"],
+                expected_capabilities=execution.get("required_capabilities", []),
+                expected_capability_parameters=execution.get(
+                    "capability_parameters", {}
+                ),
+                expected_result=result,
+            )
+            if (
+                receipt.get("status") != "PASS"
+                or receipt.get("authority") != "current-preflight-verification"
+                or receipt.get("fresh_execution_verified") is not True
+                or receipt.get("evidence_path") != str(destination.relative_to(ROOT))
+            ):
+                raise RuntimeError("fresh BASE preflight verification failed")
+            captured = post_merge_verify._record_bytes(
+                destination, label="preflight proof"
+            )
+            if (
+                "sha256:" + hashlib.sha256(captured).hexdigest()
+                != receipt["evidence_digest"]
+            ):
+                raise RuntimeError("preflight bytes changed after fresh verification")
+        rendered = {
+            **result,
+            "authority": receipt["authority"] if receipt else "diagnostic-only",
+            "preflight_path": str(destination.relative_to(ROOT)),
+            "preflight_digest": receipt.get("evidence_digest", ""),
+            "preflight_verification": receipt,
+        }
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         return _delivery_command_failure(str(exc))
-    print(json.dumps(result, sort_keys=True))
-    return 0 if result["status"] == "PASS" else 3 if result["status"] == "BLOCKED_RUNTIME" else 1
+    print(json.dumps(rendered, sort_keys=True))
+    return (
+        0
+        if result["status"] == "PASS"
+        else 3
+        if result["status"] == "BLOCKED_RUNTIME"
+        else 1
+    )
 
 
 def evidence_bundle_command(

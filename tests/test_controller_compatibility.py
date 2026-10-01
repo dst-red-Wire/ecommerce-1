@@ -980,6 +980,10 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
         self.assertIn("too many envelopes", result["reason"])
 
     def test_invalid_head_archive_reports_controlled_json_state(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        target = Path(temporary.name)
+        (target / ".git").mkdir()
         head_sha = "b" * 40
         base_sha = "a" * 40
         repository = "dst-red-Wire/ecommerce-1"
@@ -1001,6 +1005,8 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
         }
         output = io.StringIO()
         with (
+            mock.patch.object(repoctl, "ROOT", target),
+            mock.patch.object(repoctl, "CONTEXT", target / ".context"),
             mock.patch.object(
                 repoctl, "_require_trusted_pr_execution", return_value=trusted
             ),
@@ -1028,12 +1034,14 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
                 return_value={
                     "status": "PASS",
                     "reason": "",
-                    "milestone": "M7",
+                    "work_package": "config/work-packages/M7/archive-fixture.yaml",
+                    "work_package_id": "archive-fixture",
                     "work_item_issue": 170,
-                    "work_package": "config/work-packages/M7/m7-verified-delivery-chain.yaml",
+                    "milestone": "M7",
+                    "pr": 172,
                     "preflight": {"status": "PASS"},
                 },
-            ),
+            ) as preflight,
             mock.patch.object(
                 repoctl,
                 "_pr_loop_qualification",
@@ -1058,7 +1066,7 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
             mock.patch.object(
                 repoctl,
                 "_qualification_audit_path",
-                return_value=ROOT / ".context/performance" / (head_sha + ".json"),
+                return_value=target / ".context/performance" / (head_sha + ".json"),
             ),
             mock.patch.object(
                 compatibility,
@@ -1067,7 +1075,7 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
             ) as archive,
             contextlib.redirect_stdout(output),
         ):
-            exit_code = repoctl._pr_loop_impl_locked(
+            exit_code = repoctl._pr_loop_impl(
                 172, dry_run=False, json_output=True
             )
         self.assertEqual(1, exit_code)
@@ -1075,7 +1083,9 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
         self.assertEqual("BLOCKED", result["state"], result)
         self.assertEqual("FIX_QUALIFICATION_ARCHIVE", result["next_action"], result)
         self.assertIn("invalid head archive", result["blockers"], result)
+        preflight.assert_called_once()
         archive.assert_called_once()
+        self.assertTrue((target / ".git/repoctl-sync-pr-base.lock").is_file())
 
     def test_non_object_raw_proof_is_rejected_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -151,6 +151,16 @@ class IssueCompletionTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.manifest_path = Path(temporary.name) / "manifest.json"
         self.runtime_verdict = None
+        self.preflight_changes = {}
+        self.preflight_error = None
+        self.preflight_calls = []
+        self.write_manifest({
+            "base_sha": BASE, "head_sha": HEAD, "tree_sha": TREE,
+            "gate_evidence": [{
+                "path": f".context/evidence/preflight/{HEAD}.json",
+                "sha256": "sha256:" + "8" * 64,
+            }],
+        })
 
     def github(self, _root, _gh, _repository, endpoint, *, close=False):
         self.requests.append((endpoint, close))
@@ -180,11 +190,38 @@ class IssueCompletionTests(unittest.TestCase):
         raise AssertionError(f"unexpected GitHub request: {endpoint}, close={close}")
 
     def git_show(self, command, **kwargs):
-        self.assertEqual(["git", "show", f"{HEAD}:{self.path}"], command)
         self.assertEqual(ROOT, kwargs["cwd"])
+        if command == ["git", "show", "-s", "--format=%ct", MERGE]:
+            return subprocess.CompletedProcess(command, 0, stdout="1790762400", stderr="")
+        self.assertEqual(["git", "show", f"{HEAD}:{self.path}"], command)
+        serialized = yaml.safe_dump(self.package)
         return subprocess.CompletedProcess(
-            command, 0, stdout=yaml.safe_dump(self.package), stderr=""
+            command, 0,
+            stdout=serialized if kwargs.get("text") else serialized.encode(), stderr=""
         )
+
+    def preflight(self, _root, **kwargs):
+        self.preflight_calls.append(kwargs)
+        if self.preflight_error:
+            raise ValueError(self.preflight_error)
+        return {
+            "status": "PASS", "head_sha": HEAD, "head_tree_sha": TREE,
+            "base_sha": BASE,
+            "producer": "scripts/delivery_preflight.py:run_preflight",
+            "authority": "historical-preflight-verification",
+            "historical_verification": "VERIFIED",
+            "work_package_id": self.package["id"],
+            "work_package_digest": issue_completion.evidence_bundle.digest_bytes(
+                yaml.safe_dump(self.package).encode()
+            ),
+            "work_item_issue": self.package["work_item_issue"],
+            "milestone": self.package["milestone"],
+            "evidence_path": f".context/evidence/preflight/{HEAD}.json",
+            "evidence_digest": "sha256:" + "8" * 64,
+            "producer_fingerprint": "sha256:" + "9" * 64,
+            "generated_at_epoch": 1790762300,
+            **self.preflight_changes,
+        }
 
     def complete(self, *, runtime=None, recovery=None, operation=None):
         with (
@@ -216,6 +253,11 @@ class IssueCompletionTests(unittest.TestCase):
                 issue_completion.evidence_bundle,
                 "_safe_file",
                 return_value=self.manifest_path,
+            ),
+            mock.patch.object(
+                issue_completion.delivery_preflight,
+                "verify_historical_preflight",
+                side_effect=self.preflight,
             ),
             mock.patch.object(
                 issue_completion.runtime_authority,
@@ -266,6 +308,159 @@ class IssueCompletionTests(unittest.TestCase):
         )
         historical.assert_called_once()
         bundle.assert_called_once()
+
+    def test_required_preflight_is_verified_with_signed_bundle_and_git_identity(self):
+        result, _, _, _ = self.complete()
+        self.assertEqual("CLOSED", result["status"], result["errors"])
+        self.assertEqual("PASS", result["projection"]["proofs"]["preflight"])
+        self.assertEqual(1, len(self.preflight_calls))
+        call = self.preflight_calls[0]
+        self.assertEqual(f".context/evidence/preflight/{HEAD}.json", call["proof_path"])
+        self.assertEqual("sha256:" + "8" * 64, call["expected_sha256"])
+        self.assertEqual(HEAD, call["expected_head_sha"])
+        self.assertEqual(BASE, call["expected_base_sha"])
+        self.assertEqual(TREE, call["expected_head_tree_sha"])
+        self.assertEqual("feat/issue-close", call["expected_branch"])
+        self.assertEqual(1790762400, call["merge_epoch"])
+        self.assertEqual(
+            issue_completion.evidence_bundle.digest_bytes(yaml.safe_dump(self.package).encode()),
+            call["expected_package_digest"],
+        )
+
+    def test_real_base_preflight_receipt_survives_merge_and_rejects_tampering(self):
+        from tests.test_delivery_preflight import DeliveryPreflightTests
+
+        fixture = DeliveryPreflightTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        package_path = fixture.root / self.path
+        package_path.parent.mkdir(parents=True)
+        package_bytes = yaml.safe_dump(self.package).encode()
+        package_path.write_bytes(package_bytes)
+        fixture.git("add", self.path)
+        fixture.git(
+            "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-qm", "qualified package",
+        )
+        fixture.head = fixture.git("rev-parse", "HEAD")
+        fixture.tree = fixture.git("rev-parse", "HEAD^{tree}")
+        original_arguments = fixture.verification_arguments
+
+        def arguments(capabilities=None, parameters=None):
+            return {
+                **original_arguments(capabilities, parameters),
+                "expected_package_id": self.package["id"],
+                "expected_package_digest": issue_completion.evidence_bundle.digest_bytes(package_bytes),
+                "expected_issue": self.package["work_item_issue"],
+                "expected_milestone": self.package["milestone"],
+            }
+
+        fixture.verification_arguments = arguments
+        generated = fixture.bound_result()
+        path = issue_completion.delivery_preflight.write_preflight(fixture.root, generated)
+        current = issue_completion.delivery_preflight.verify_preflight(
+            fixture.root, **arguments(), expected_result=generated,
+        )
+        self.assertEqual("PASS", issue_lifecycle.preflight_proof_state(
+            current,
+            {"state": "OPEN", "head_sha": fixture.head, "base_sha": fixture.base},
+            self.package, {"head_tree_sha": fixture.tree},
+        ))
+        fixture.git("switch", "-q", "-c", "main", fixture.base)
+        fixture.git(
+            "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgsign=false", "merge", "--no-ff", "-qm", "merge proof",
+            fixture.branch,
+        )
+        merge = fixture.git("rev-parse", "HEAD")
+        proof = {
+            "head_sha": fixture.head, "head_tree_sha": fixture.tree,
+            "base_sha": fixture.base, "merge_sha": merge,
+        }
+        manifest = {
+            "head_sha": fixture.head, "tree_sha": fixture.tree,
+            "base_sha": fixture.base,
+            "gate_evidence": [{
+                "path": str(path.relative_to(fixture.root)),
+                "sha256": issue_completion.evidence_bundle.digest_bytes(path.read_bytes()),
+            }],
+        }
+        manifest_path = fixture.root / f".context/evidence/{fixture.head}/manifest.json"
+        manifest_path.parent.mkdir(parents=True)
+        manifest_bytes = issue_completion.evidence_bundle.canonical_bytes(manifest)
+        manifest_path.write_bytes(manifest_bytes)
+        digest = issue_completion.evidence_bundle.digest_bytes(manifest_bytes)
+        result = issue_completion._historical_preflight(
+            fixture.root, self.package, proof, digest, {"head_branch": fixture.branch},
+        )
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual("historical-preflight-verification", result["authority"])
+        self.assertEqual("PASS", issue_lifecycle.preflight_proof_state(
+            result,
+            {"state": "MERGED", "head_sha": fixture.head, "base_sha": fixture.base},
+            self.package, {"head_tree_sha": fixture.tree},
+        ))
+        path.write_bytes(path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(ValueError, "signed bundle digest"):
+            issue_completion._historical_preflight(
+                fixture.root, self.package, proof, digest, {"head_branch": fixture.branch},
+            )
+        original = copy.deepcopy(current["payload"])
+        for changes, message in (
+            ({"generated_at_epoch": 1}, "stale"),
+            ({"source_sha": "0" * 40}, "source_sha"),
+            ({"head_tree_sha": "0" * 40}, "head_tree_sha"),
+            ({"producer": {**original["producer"], "path": "scripts/unregistered.py"}}, "producer"),
+        ):
+            with self.subTest(changes=changes):
+                payload = {**original, **changes}
+                fixture.rewrite_evidence(path, payload)
+                manifest["gate_evidence"][0]["sha256"] = issue_completion.evidence_bundle.digest_bytes(path.read_bytes())
+                encoded = issue_completion.evidence_bundle.canonical_bytes(manifest)
+                manifest_path.write_bytes(encoded)
+                with self.assertRaisesRegex(ValueError, message):
+                    issue_completion._historical_preflight(
+                        fixture.root, self.package, proof,
+                        issue_completion.evidence_bundle.digest_bytes(encoded),
+                        {"head_branch": fixture.branch},
+                    )
+
+    def test_missing_or_ambiguous_preflight_bundle_reference_never_closes(self):
+        manifest = json.loads(self.manifest_path.read_bytes())
+        reference = manifest["gate_evidence"][0]
+        for entries in ([], [reference, reference]):
+            with self.subTest(entries=entries):
+                self.write_manifest({**manifest, "gate_evidence": entries})
+                result, _, _, _ = self.complete()
+                self.assertEqual("BLOCKED", result["status"], result)
+                self.assertFalse(result["mutation_attempted"])
+        self.assertEqual([], self.preflight_calls)
+        self.assertNotIn(("issues/170", True), self.requests)
+
+    def test_stale_or_invalid_preflight_producer_never_closes(self):
+        for reason in ("preflight is stale at merge", "preflight producer fingerprint differs", "preflight bytes differ from signed digest"):
+            with self.subTest(reason=reason):
+                self.preflight_error = reason
+                result, _, _, _ = self.complete()
+                self.assertEqual("BLOCKED", result["status"], result)
+                self.assertIn(reason, result["errors"])
+                self.assertFalse(result["mutation_attempted"])
+        self.assertNotIn(("issues/170", True), self.requests)
+
+    def test_preflight_wrong_sha_tree_package_or_producer_never_closes(self):
+        for change in (
+            {"status": "FAIL"}, {"head_sha": "0" * 40},
+            {"head_tree_sha": "0" * 40}, {"base_sha": "0" * 40},
+            {"producer": "unregistered"}, {"authority": "digest-only"},
+            {"work_package_digest": "sha256:" + "0" * 64},
+            {"evidence_digest": "sha256:" + "0" * 64},
+        ):
+            with self.subTest(change=change):
+                self.preflight_changes = change
+                result, _, _, _ = self.complete()
+                self.assertEqual("BLOCKED", result["status"], result)
+                self.assertFalse(result["mutation_attempted"])
+        self.assertNotIn(("issues/170", True), self.requests)
 
     def test_already_closed_is_idempotent_only_with_closed_projection(self):
         self.issue_state = "closed"
@@ -364,6 +559,10 @@ class IssueCompletionTests(unittest.TestCase):
             "tree_sha": TREE,
             "runtime_identity": identity,
             "runtime_evidence": [{"path": relative, "sha256": digest}],
+            "gate_evidence": [{
+                "path": f".context/evidence/preflight/{HEAD}.json",
+                "sha256": "sha256:" + "8" * 64,
+            }],
         }
         self.write_manifest(manifest)
         return manifest
@@ -480,6 +679,40 @@ class IssueCompletionTests(unittest.TestCase):
         read_proof.assert_called_once()
         historical.assert_called_once()
         bundle.assert_called_once()
+        self.assertNotIn(("issues/170", True), self.requests)
+
+    def test_dependency_closed_issue_still_requires_historical_preflight(self):
+        from scripts import chatgpt_review_dispatcher
+
+        self.issue_state = "closed"
+        reviews = {
+            "code": {**self.code, "created_at": "2026-09-30T10:00:00Z"},
+            "security": {**self.security, "created_at": "2026-09-30T10:01:00Z"},
+        }
+        with (
+            mock.patch.object(
+                issue_completion.work_package, "resolve_dependencies",
+                return_value=[self.package],
+            ),
+            mock.patch.object(
+                issue_completion, "_dependency_candidate",
+                return_value=(self.pr_snapshot, self.proof),
+            ),
+            mock.patch.object(
+                chatgpt_review_dispatcher, "github_owner_marker_lookup",
+                side_effect=lambda _binding, kind, **_kwargs: reviews[kind],
+            ),
+        ):
+            for reason in ("preflight missing", "preflight stale", "unregistered producer"):
+                with self.subTest(reason=reason):
+                    self.preflight_error = reason
+                    result, _, _, _ = self.complete(
+                        operation=lambda: issue_completion.verify_dependencies(
+                            ROOT, "gh", "owner/repo", {"dependencies": [self.package["id"]]}
+                        )
+                    )
+                    self.assertEqual("BLOCKED", result["status"], result)
+                    self.assertTrue(any(reason in error for error in result["errors"]))
         self.assertNotIn(("issues/170", True), self.requests)
 
     def test_dependency_open_issue_is_never_closed_as_a_side_effect(self):

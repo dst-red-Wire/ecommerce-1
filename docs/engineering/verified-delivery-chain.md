@@ -78,6 +78,14 @@ network and permissions relevant to those capabilities before expensive work or
 machine mutation. Missing capacity is `BLOCKED_RUNTIME`; an executed gate that
 fails is `FAIL`. Neither can be converted to `PASS`.
 
+The merge controller executes preflight from the exact BASE and compares the
+persisted bytes with that fresh producer result. The receipt binds the package,
+PR source, tree, capabilities and parameters. A HEAD-run diagnostic can support
+publication but cannot authorize a merge. A read-only bundle check validates
+retained integrity without claiming a fresh execution. Before merge, the controller
+reruns preflight and binds its exact bytes into the final bundle and signed witness.
+Closure verifies that retained BASE proof, including its freshness at merge time.
+
 ## Proof at one exact HEAD
 
 Qualification must be bound to the exact base SHA, head SHA, tree SHA, qualification

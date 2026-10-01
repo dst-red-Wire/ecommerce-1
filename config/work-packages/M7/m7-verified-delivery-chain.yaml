@@ -32,6 +32,7 @@ scope:
   - scripts/issue_completion.py
   - scripts/work_package.py
   - tests/test_delivery_preflight.py
+  - tests/test_delivery_witness_bootstrap.py
   - tests/test_chatgpt_review_authority.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
@@ -77,6 +78,7 @@ acceptance:
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
   - tests/test_delivery_preflight.py
+  - tests/test_delivery_witness_bootstrap.py
   - tests/test_evidence_bundle.py
   - tests/test_merge_risk.py
   - tests/test_post_merge_verify.py

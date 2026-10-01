@@ -38,4 +38,3 @@ validation:
   nonempty_acceptance: [contracts, qualification_gates, tests]
   runtime_evidence_required_if_runtime: true
   evidence_status: NOT_EVALUATED
-

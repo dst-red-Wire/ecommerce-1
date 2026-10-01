@@ -596,6 +596,7 @@ class RoadmapSyncTests(unittest.TestCase):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
         self.assertIn("_roadmap_followup_after_merge()", finish)
+        self.assertIn("if cleanup_rc or roadmap_rc:", finish)
         self.assertIn("post-merge cleanup or roadmap verification is incomplete", finish)
 
         followup = source[source.index("def _roadmap_followup_after_merge(") : source.index("def git_sync(")]
@@ -604,6 +605,58 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertIn("deliver(default_branch, title, title)", followup)
         self.assertNotIn("git push origin main", followup)
 
+
+    def test_document_only_cannot_be_used_to_sync(self):
+        with (
+            mock.patch.object(ROADMAP.sys, "argv", ["roadmap_sync", "sync", "--document-only"]),
+            mock.patch.object(ROADMAP, "sync") as sync,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            ROADMAP.main()
+        self.assertEqual(2, failure.exception.code)
+        sync.assert_not_called()
+
+    def test_document_only_cli_does_not_request_github_or_project_proofs(self):
+        with (
+            mock.patch.object(ROADMAP.sys, "argv", ["roadmap_sync", "check", "--quiet", "--document-only"]),
+            mock.patch.object(ROADMAP.shutil, "which", side_effect=AssertionError("GitHub lookup is forbidden")),
+            mock.patch.object(ROADMAP, "tracker_states", side_effect=AssertionError("proof recursion")),
+            mock.patch.object(ROADMAP, "_current_projection", side_effect=AssertionError("proof recursion")),
+            mock.patch.object(ROADMAP, "_write_projection") as writer,
+        ):
+            self.assertEqual(0, ROADMAP.main())
+        writer.assert_not_called()
+
+    def test_registered_m25_lab_proof_remains_not_deployed(self):
+        from tests import test_m25_runtime_evidence
+
+        fixture = test_m25_runtime_evidence.M25RuntimeEvidenceTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        contract = ROADMAP.policy()["status_derivation"]["runtime_evidence_contract"]
+        declaration = {
+            "path": ROADMAP.m25_runtime_evidence.OUTPUT.as_posix(),
+            "environments": ["lab"],
+            "proof_type": "lab-readiness",
+        }
+
+        def result():
+            fixture.write()
+            return ROADMAP._runtime_evidence_result(
+                fixture.root, declaration, "M2.5", test_m25_runtime_evidence.HEAD,
+                test_m25_runtime_evidence.TREE, contract, 86400,
+                datetime.now(timezone.utc),
+            )
+
+        valid, detail = result()
+        self.assertTrue(valid, detail)
+        self.assertEqual("NOT_DEPLOYED", fixture.evidence["deployment_state"])
+        fixture.evidence["deployment_state"] = "DEPLOYED"
+        self.assertFalse(result()[0])
+        fixture.evidence["deployment_state"] = "NOT_DEPLOYED"
+        source = fixture.root / ROADMAP.m25_runtime_evidence._paths(test_m25_runtime_evidence.VM)["rke2_result"]
+        source.unlink()
+        self.assertFalse(result()[0])
 
 class RoadmapFollowupTests(unittest.TestCase):
     """Use real local Git refs, package selection and preflight without GitHub writes."""
@@ -628,7 +681,12 @@ class RoadmapFollowupTests(unittest.TestCase):
         self.git("config", "core.hooksPath", "/dev/null")
         self.git("remote", "add", "origin", str(self.remote))
         shutil.copytree(ROOT / "config/contracts", self.root / "config/contracts")
-        for relative in ("architecture.lock.yaml", self.package_path):
+        # The canonical preflight binds the producer and runtime Git blobs,
+        # including for a publication diagnosis that grants no merge authority.
+        for relative in (
+            "architecture.lock.yaml", self.package_path,
+            "scripts/delivery_preflight.py", "scripts/runtime_orchestration.py",
+        ):
             destination = self.root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / relative, destination)
