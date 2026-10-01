@@ -127,6 +127,26 @@ class NativeShadowImportTest(unittest.TestCase):
                 self.campaign, laboratory_root=self.laboratory, shadow_root=self.shadows,
             )
 
+    def test_import_uses_current_head_with_recovered_older_shadow(self) -> None:
+        older_sha = "d" * 40
+        older_shadow = self.shadows / f"{self.campaign}-{older_sha}"
+        older_result = older_shadow / "evidence/network-smoke" / self.campaign / "result.json"
+        older_result.parent.mkdir(parents=True)
+        older_result.write_text('{"campaign_id":"' + self.campaign + '","status":"FAIL"}',
+                                encoding="utf-8")
+        older_state = older_shadow / "native-boot.json"
+        older_state.write_text(json.dumps({
+            "mode": "NETWORK_SMOKE_NATIVE", "campaign_id": self.campaign,
+            "source_sha": older_sha, "phase": "RECOVERED",
+            "shadow_root": repoctl._native_shadow_windows_path(older_shadow),
+            "vm_id": self.vm_id, "expected_vm_id": self.vm_id,
+        }), encoding="utf-8")
+        older_bytes = older_result.read_bytes()
+        self.assertEqual(0, self.import_result())
+        retained = self.root / ".context/evidence/network-smoke/current.json"
+        self.assertEqual(self.result_path.read_bytes(), retained.read_bytes())
+        self.assertEqual(older_bytes, older_result.read_bytes())
+
     def test_protected_result_is_imported_and_lab_result_is_ignored(self) -> None:
         stale = self.laboratory / "evidence/network-smoke" / self.campaign / "result.json"
         stale.parent.mkdir(parents=True)

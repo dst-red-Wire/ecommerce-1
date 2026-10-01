@@ -243,29 +243,146 @@ class NativeBootBootstrapTests(unittest.TestCase):
             self.assertNotEqual(repoctl.lab_network_native_boot(
                 "Prepare", CAMPAIGN, "1111"), 0)
 
-    def test_recover_uses_unique_persisted_source_sha(self):
+    def _write_shadow(self, root, sha, phase, *, vm_id=VM_ID):
+        shadow = root / f"{CAMPAIGN}-{sha}"
+        shadow.mkdir()
+        state = {
+            "mode": "NETWORK_SMOKE_NATIVE",
+            "source_sha": sha, "campaign_id": CAMPAIGN,
+            "shadow_root": repoctl._native_shadow_windows_path(shadow),
+            "phase": phase, "vm_id": vm_id, "expected_vm_id": vm_id,
+        }
+        state_path = shadow / "native-boot.json"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        return shadow, state_path
+
+    def test_single_shadow_recover_and_exact_head_reboot(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            shadow = root / f"{CAMPAIGN}-{SHA}"
-            shadow.mkdir()
-            (shadow / "native-boot.json").write_text(json.dumps({
-                "source_sha": SHA, "campaign_id": CAMPAIGN,
-                "shadow_root": repoctl._native_shadow_windows_path(shadow),
-                "phase": "PREPARED", "vm_id": VM_ID, "expected_vm_id": VM_ID,
-            }), encoding="utf-8")
+            _, state_path = self._write_shadow(root, SHA, "PREPARED")
+            with mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root):
+                self.assertEqual(repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Recover"), SHA)
+                self.assertEqual(
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", SHA), SHA)
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot")
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", BASE_SHA)
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["phase"] = "RECOVERED"
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                self.assertEqual(repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Recover"), SHA)
+
+    def test_recovered_old_shadow_allows_exact_head_reboot_and_recover(self):
+        new_sha = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, old_state = self._write_shadow(root, SHA, "RECOVERED")
+            self._write_shadow(root, new_sha, "PREPARED")
+            old_bytes = old_state.read_bytes()
             with mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root):
                 self.assertEqual(
-                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Recover"), SHA)
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", new_sha),
+                    new_sha)
                 self.assertEqual(
-                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot"), SHA)
-                (shadow / "native-boot.json").write_text(json.dumps({
-                    "source_sha": SHA, "campaign_id": CAMPAIGN,
-                    "shadow_root": repoctl._native_shadow_windows_path(shadow),
-                    "phase": "PREPARED", "vm_id": VM_ID,
-                    "expected_vm_id": "11111111-1111-1111-1111-111111111111",
-                }), encoding="utf-8")
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Recover"), new_sha)
                 with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", SHA)
+            self.assertEqual(old_state.read_bytes(), old_bytes)
+
+    def test_prepare_blocks_active_sibling_before_qualification_and_runtime(self):
+        new_sha = "c" * 40
+        context = {
+            "trusted_root": Path("/trusted/base"), "target_root": repoctl.ROOT,
+            "base_sha": BASE_SHA, "head_sha": new_sha, "pr_number": 177,
+        }
+        policy = {"runtime_orchestration": {"capabilities": {
+            "local-virtualization-serialization": {"global_lock": True}}}}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, old_state = self._write_shadow(root, SHA, "PREPARED")
+            with (mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root),
+                  mock.patch.object(repoctl, "_native_uac_trusted_context",
+                                    return_value=context),
+                  mock.patch.object(repoctl, "_native_uac_runtime_directory"),
+                  mock.patch.object(repoctl, "_native_uac_fresh_qualification",
+                                    return_value="f" * 64) as qualify,
+                  mock.patch.object(repoctl, "qualification_execution_policy",
+                                    return_value=policy),
+                  mock.patch.object(repoctl, "_execute_with_runtime",
+                                    return_value=0) as runtime,
+                  mock.patch.dict(repoctl.os.environ, {
+                      "ECOMMERCE_RUNTIME_ORCHESTRATED": ""})):
+                self.assertNotEqual(repoctl.lab_network_native_boot_with_runtime(
+                    "lab-network-native-boot-prepare", CAMPAIGN, VM_ID,
+                    "/trusted/base"), 0)
+                qualify.assert_not_called()
+                runtime.assert_not_called()
+                state = json.loads(old_state.read_text(encoding="utf-8"))
+                state["phase"] = "RECOVERED"
+                old_state.write_text(json.dumps(state), encoding="utf-8")
+                self.assertEqual(repoctl.lab_network_native_boot_with_runtime(
+                    "lab-network-native-boot-prepare", CAMPAIGN, VM_ID,
+                    "/trusted/base"), 0)
+                qualify.assert_called_once()
+                runtime.assert_called_once()
+                with self.assertRaisesRegex(ValueError, "VM differs"):
+                    repoctl._native_boot_prepare_preflight(
+                        CAMPAIGN, "11111111-1111-1111-1111-111111111111", new_sha)
+                with self.assertRaisesRegex(ValueError, "already exists"):
+                    repoctl._native_boot_prepare_preflight(CAMPAIGN, VM_ID, SHA)
+
+    def test_multiple_active_or_mismatched_sibling_shadows_fail_closed(self):
+        new_sha = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            _, old_state = self._write_shadow(root, SHA, "PREPARED")
+            self._write_shadow(root, new_sha, "PREPARED")
+            with mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root):
+                for action, expected in (("Recover", ""), ("Reboot", new_sha)):
+                    with self.assertRaises(ValueError):
+                        repoctl._native_boot_shadow_source_sha(CAMPAIGN, action, expected)
+                old = json.loads(old_state.read_text(encoding="utf-8"))
+                old["phase"] = "RECOVERED"
+                old["source_sha"] = BASE_SHA
+                old_state.write_text(json.dumps(old), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", new_sha)
+                old["source_sha"] = SHA
+                old["vm_id"] = "11111111-1111-1111-1111-111111111111"
+                old["expected_vm_id"] = old["vm_id"]
+                old_state.write_text(json.dumps(old), encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", new_sha)
+
+    def test_malformed_or_redirected_sibling_shadow_fails_closed(self):
+        new_sha = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            old_shadow, _ = self._write_shadow(root, SHA, "RECOVERED")
+            self._write_shadow(root, new_sha, "PREPARED")
+            with mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root):
+                malformed = root / f"{CAMPAIGN}-other"
+                malformed.mkdir()
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", new_sha)
+                malformed.rmdir()
+                redirected = root / f"{CAMPAIGN}-{'d' * 40}"
+                redirected.symlink_to(old_shadow, target_is_directory=True)
+                with self.assertRaises(ValueError):
+                    repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Reboot", new_sha)
+
+    def test_multiple_recovered_shadows_do_not_guess_base_controller_head(self):
+        new_sha = "c" * 40
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._write_shadow(root, SHA, "RECOVERED")
+            self._write_shadow(root, new_sha, "RECOVERED")
+            with (mock.patch.object(repoctl, "NATIVE_SHADOW_BASE", root),
+                  mock.patch.object(repoctl, "git") as git):
+                with self.assertRaisesRegex(ValueError, "ambiguous"):
                     repoctl._native_boot_shadow_source_sha(CAMPAIGN, "Recover")
+                git.assert_not_called()
 
 
 if __name__ == "__main__":
