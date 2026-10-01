@@ -5,6 +5,7 @@ work_item_issue: 170
 objective: Establish an exact-SHA, evidence-backed, fail-closed delivery chain from work item to verified merge.
 scope:
   allowed_paths:
+  - .agents/skills/chatgpt-exact-sha-review/references/review-runbook.md
   - architecture.lock.yaml
   - config/contracts/ci-evidence.yaml
   - config/contracts/execution-properties-policy.yaml
@@ -33,6 +34,7 @@ scope:
   - scripts/work_package.py
   - tests/test_delivery_preflight.py
   - tests/test_delivery_witness_bootstrap.py
+  - tests/test_architecture_authority.py
   - tests/test_chatgpt_review_authority.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
@@ -41,6 +43,7 @@ scope:
   - tests/test_execution_properties.py
   - tests/test_issue_lifecycle.py
   - tests/test_merge_risk.py
+  - tests/test_risk_content_assessment.py
   - tests/test_milestone_plan.py
   - tests/test_post_merge_verify.py
   - tests/test_pr_loop.py
@@ -74,6 +77,7 @@ acceptance:
   runtime_evidence: []
   tests:
   - tests/test_work_package.py
+  - tests/test_architecture_authority.py
   - tests/test_chatgpt_review_authority.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
@@ -81,6 +85,7 @@ acceptance:
   - tests/test_delivery_witness_bootstrap.py
   - tests/test_evidence_bundle.py
   - tests/test_merge_risk.py
+  - tests/test_risk_content_assessment.py
   - tests/test_post_merge_verify.py
   - tests/test_roadmap_sync.py
   - tests/test_issue_lifecycle.py

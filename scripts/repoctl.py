@@ -8006,6 +8006,7 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         "classifications",
         "required_inputs",
         "class_requirements",
+        "content_assessment",
         "privileged",
         "production",
         "low_risk",
@@ -8034,6 +8035,25 @@ def _merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
     ):
         return False
     if policy.get("class_requirements") != _RISK_CLASS_REQUIREMENTS:
+        return False
+    if policy.get("content_assessment") != {
+        "mode": "controlled-arbitration",
+        "scope": "content-findings-only",
+        "marker": "chatgpt-risk-content-assessment:v1",
+        "exact_binding": ["pr", "base_sha", "head_sha", "findings_sha256"],
+        "baseline_digest_field": "content_findings_sha256",
+        "required_kinds": ["code", "security"],
+        "independent_attestations": "required",
+        "dismissal": "matching-code-and-security",
+        "accepted_kinds": ["comment", "read-only-validation", "metadata"],
+        "path_matches": "immutable",
+        "minimum_classification": "SENSITIVE",
+        "owner_authorization": "explicit-repository-owner",
+        "owner_after_attestations": "required",
+        "invalid_or_missing": "retain-original-tier",
+        "max_findings": 128,
+        "max_attestation_bytes": 8192,
+    }:
         return False
     required_for = list(MERGE_RISK_CAPABILITIES)
     if owner_boundary.get("mode") != "risk-based":
@@ -9660,8 +9680,32 @@ def _validated_trusted_merge_risk_result(
         "matched_capabilities",
         "analysis_complete",
     }
-    if not isinstance(result, dict) or set(result) not in (required, required | {"requirements"}):
+    inventory_fields = {"content_findings", "content_findings_sha256"}
+    allowed = (required, required | {"requirements"},
+               required | inventory_fields, required | {"requirements"} | inventory_fields)
+    if not isinstance(result, dict) or set(result) not in allowed:
         raise RuntimeError("exact-base merge-risk controller returned an invalid envelope")
+    if "content_findings" in result:
+        findings = result["content_findings"]
+        if not isinstance(findings, list) or len(findings) > 128:
+            raise RuntimeError("exact-base risk finding inventory is invalid")
+        finding_keys = {"id", "tier", "capability", "path", "side", "line",
+                        "rule_index", "line_sha256"}
+        if any(not isinstance(item, dict) or set(item) != finding_keys
+               or any(type(item[key]) is not str or not item[key]
+                      for key in ("id", "tier", "capability", "path", "side", "line_sha256"))
+               or type(item["line"]) is not int or item["line"] < 1
+               or type(item["rule_index"]) is not int or item["rule_index"] < 0
+               for item in findings):
+            raise RuntimeError("exact-base risk finding fields are invalid")
+        identifiers = [item["id"] for item in findings]
+        if len(set(identifiers)) != len(identifiers):
+            raise RuntimeError("exact-base risk finding IDs are duplicated")
+        encoded = json.dumps(findings, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=True).encode("ascii")
+        digest = "sha256:" + hashlib.sha256(encoded).hexdigest()
+        if result["content_findings_sha256"] != digest:
+            raise RuntimeError("exact-base risk finding digest is invalid")
     if (
         result.get("classification") not in _RISK_CLASS_REQUIREMENTS
         or result.get("authority") != "repository-policy"
@@ -9696,6 +9740,8 @@ def _run_exact_base_merge_risk_controller(
     base_sha: str,
     head_sha: str,
     pr_number: int | None,
+    *,
+    assessment: dict | None = None,
 ) -> dict:
     """Execute only the classifier blob owned by the exact PR base commit."""
     for label, sha in (("base", base_sha), ("head", head_sha)):
@@ -9744,6 +9790,16 @@ def _run_exact_base_merge_risk_controller(
         ]
         if pr_number is not None:
             command.extend(["--pr", str(pr_number)])
+        if assessment is not None:
+            encoded = (json.dumps(assessment, sort_keys=True, separators=(",", ":"),
+                                  ensure_ascii=True) + "\n").encode("ascii")
+            if len(encoded) > 8192:
+                raise RuntimeError("risk assessment exceeds its byte budget")
+            assessment_path = Path(directory) / "assessment.json"
+            descriptor = os.open(assessment_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(encoded)
+            command.extend(["--assessment-file", str(assessment_path)])
         executed = run(command, env=environment, check=False, capture=True)
     if executed.returncode:
         detail = (executed.stderr or executed.stdout or "").strip()
@@ -9760,10 +9816,229 @@ def _run_exact_base_merge_risk_controller(
     )
 
 
-def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = None) -> dict:
-    """Classify only with exact-base executable authority; bootstrap/errors are sensitive."""
+def _unique_risk_assessment_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate risk assessment JSON key")
+        result[key] = value
+    return result
+
+
+def _risk_content_assessment_policy() -> dict | None:
+    document = _review_policy_document()
+    delivery = document.get("repository_delivery", {})
+    loop = delivery.get("pr_loop", {})
+    risk = loop.get("risk_classification", {})
+    owner = loop.get("owner_boundary", {})
+    if not _merge_risk_policy_is_valid(risk, owner):
+        return None
+    return risk["content_assessment"]
+
+
+def _risk_assessment_pr_is_exact(
+    snapshot: dict, repository: str, pr_number: int, base_sha: str, head_sha: str,
+) -> bool:
+    return (
+        snapshot.get("number") == pr_number
+        and snapshot.get("state") == "OPEN"
+        and snapshot.get("draft") is False
+        and snapshot.get("base") == "main"
+        and snapshot.get("base_sha") == base_sha
+        and snapshot.get("head_sha") == head_sha
+        and snapshot.get("head_repository") == repository
+    )
+
+
+def _risk_content_assessment_from_reviews(
+    gh: str, repository: str, pr_number: int, base_sha: str, head_sha: str,
+    baseline: dict, reviews: dict, authorization: dict,
+) -> tuple[dict, dict] | None:
+    """Use only two independently reviewed, immutable, exact-PR assessments."""
+    policy = _risk_content_assessment_policy()
+    findings = baseline.get("content_findings")
+    digest = baseline.get("content_findings_sha256")
+    if (
+        policy is None or not isinstance(findings, list) or not findings
+        or len(findings) > policy["max_findings"]
+        or not isinstance(digest, str)
+        or not isinstance(reviews, dict) or not isinstance(authorization, dict)
+        or not isinstance(repository, str) or repository.count("/") != 1
+        or type(pr_number) is not int or pr_number < 1
+    ):
+        return None
+    owner_command = (
+        f"/owner-authorization approve scope=pr-{pr_number} sha={head_sha}"
+    )
+    if (
+        authorization.get("status") != "PASS"
+        or authorization.get("scope") != f"pr-{pr_number}"
+        or authorization.get("head_sha") != head_sha
+        or authorization.get("command") != owner_command
+        or authorization.get("source") != "github-pr-comment"
+    ):
+        return None
+    first = _github_pr_snapshot(gh, repository, pr_number)
+    if not _risk_assessment_pr_is_exact(first, repository, pr_number, base_sha, head_sha):
+        return None
+    comments = _github_pr_comments(gh, repository, pr_number)
+    if len(comments) > 10000:
+        return None
+    by_id = {}
+    for comment in comments:
+        identifier = comment.get("id")
+        if type(identifier) is not int or identifier < 1 or identifier in by_id:
+            return None
+        by_id[identifier] = comment
+    owner_login = repository.split("/", 1)[0]
     try:
-        return _run_exact_base_merge_risk_controller(base_sha, head_sha, pr_number)
+        fresh_reviews = _chatgpt_review_evidence(comments, owner_login, head_sha)
+        fresh_owner = _owner_authorization_evidence(
+            comments, owner_login, pr_number, head_sha
+        )
+    except RuntimeError:
+        return None
+    if (
+        any(
+            not _review_result_is_pass(fresh_reviews[kind])
+            or fresh_reviews[kind].get("comment_id") != reviews.get(kind, {}).get("comment_id")
+            for kind in policy["required_kinds"]
+        )
+        or fresh_owner.get("status") != "PASS"
+        or fresh_owner.get("comment_id") != authorization.get("comment_id")
+    ):
+        return None
+    marker = policy["marker"]
+    finding_ids = {item["id"] for item in findings}
+    attestations = {}
+    selected = {}
+    for kind in policy["required_kinds"]:
+        proof = reviews.get(kind)
+        if (
+            not isinstance(proof, dict) or not _review_result_is_pass(proof)
+            or proof.get("head_sha") != head_sha
+            or type(proof.get("comment_id")) is not int
+        ):
+            return None
+        comment = by_id.get(proof["comment_id"])
+        if comment is None or _comment_author_login(comment).casefold() != owner_login.casefold():
+            return None
+        if (comment.get("author_association") != "OWNER"
+            or comment.get("updated_at") != comment.get("created_at")):
+            return None
+        body = comment.get("body")
+        if not isinstance(body, str) or body.count(marker) != 1:
+            return None
+        regular = _chatgpt_review_payloads(body)
+        if (
+            len(regular) != 1 or set(regular[0]) != _CHATGPT_REVIEW_KEYS
+            or regular[0].get("provider") != "ChatGPT"
+            or regular[0].get("kind") != kind
+            or regular[0].get("head_sha") != head_sha
+            or regular[0].get("status") != "PASS"
+            or regular[0].get("blocking_findings") != 0
+        ):
+            return None
+        prefix = "<!-- " + marker + " "
+        lines = [line.strip() for line in body.splitlines() if marker in line]
+        if len(lines) != 1 or not lines[0].startswith(prefix) or not lines[0].endswith(" -->"):
+            return None
+        raw = lines[0][len(prefix):-4]
+        if not raw or len(raw.encode("utf-8")) > policy["max_attestation_bytes"]:
+            return None
+        attestation = json.loads(raw, object_pairs_hook=_unique_risk_assessment_object)
+        if not isinstance(attestation, dict) or set(attestation) != {
+            "schema_version", "pr", "base_sha", "head_sha", "findings_sha256",
+            "dispositions", "review_kind",
+        }:
+            return None
+        if (
+            type(attestation["schema_version"]) is not int
+            or attestation["schema_version"] != 1
+            or type(attestation["pr"]) is not int or attestation["pr"] != pr_number
+            or attestation["base_sha"] != base_sha
+            or attestation["head_sha"] != head_sha
+            or attestation["findings_sha256"] != digest
+            or attestation["review_kind"] != kind
+        ):
+            return None
+        dispositions = attestation["dispositions"]
+        if not isinstance(dispositions, list) or len(dispositions) != len(finding_ids):
+            return None
+        disposition_ids = []
+        for item in dispositions:
+            if not isinstance(item, dict) or set(item) != {
+                "finding_id", "kind", "rationale", "effect_trace",
+            }:
+                return None
+            if (
+                type(item["finding_id"]) is not str
+                or item["finding_id"] not in finding_ids
+                or item["kind"] not in policy["accepted_kinds"]
+                or any(type(item[field]) is not str or not item[field].strip()
+                       for field in ("rationale", "effect_trace"))
+            ):
+                return None
+            disposition_ids.append(item["finding_id"])
+        if len(set(disposition_ids)) != len(finding_ids):
+            return None
+        attestations[kind] = {key: value for key, value in attestation.items()
+                              if key != "review_kind"}
+        selected[kind] = comment
+    if (selected["code"]["id"] == selected["security"]["id"]
+        or _immutable_comment_order_key(selected["security"])
+           <= _immutable_comment_order_key(selected["code"])
+        or attestations["code"] != attestations["security"]):
+        return None
+    owner_after_security = False
+    owner_comment_id = authorization.get("comment_id")
+    if authorization.get("status") == "PASS" and type(owner_comment_id) is int:
+        owner_comment = by_id.get(owner_comment_id)
+        owner_after_security = bool(
+            owner_comment is not None
+            and _comment_author_login(owner_comment).casefold() == owner_login.casefold()
+            and owner_comment.get("author_association") == "OWNER"
+            and owner_comment.get("updated_at") == owner_comment.get("created_at")
+            and str(owner_comment.get("body") or "").strip() == authorization.get("command")
+            and _immutable_comment_order_key(owner_comment)
+                > _immutable_comment_order_key(selected["security"])
+        )
+    if not owner_after_security:
+        return None
+    last = _github_pr_snapshot(gh, repository, pr_number)
+    if not _risk_assessment_pr_is_exact(last, repository, pr_number, base_sha, head_sha):
+        return None
+    return attestations["code"], {
+        "code_comment_id": selected["code"]["id"],
+        "security_comment_id": selected["security"]["id"],
+        "owner_comment_id": owner_comment_id if owner_after_security else None,
+        "owner_after_security": owner_after_security,
+        "findings_sha256": digest,
+    }
+
+
+def _risk_content_assessment_owner_gate(risk: dict, authorization: dict) -> dict:
+    applied = risk.get("content_assessment")
+    if not isinstance(applied, dict):
+        return authorization
+    if (authorization.get("status") == "PASS"
+        and applied.get("owner_after_security") is True
+        and authorization.get("comment_id") == applied.get("owner_comment_id")):
+        return authorization
+    result = dict(authorization)
+    result["status"] = "MISSING"
+    result["reason"] = "owner authorization must follow both exact-head risk assessments"
+    return result
+
+
+def classify_merge_risk(
+    base_sha: str, head_sha: str, pr_number: int | None = None,
+    *, gh: str | None = None, repository: str | None = None,
+    reviews: dict | None = None, authorization: dict | None = None,
+) -> dict:
+    """Preserve the exact-base tier unless two exact reviews justify an arbitration."""
+    try:
+        baseline = _run_exact_base_merge_risk_controller(base_sha, head_sha, pr_number)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         detail = re.sub(r"\s+", " ", str(exc)).strip()[:300] or type(exc).__name__
         return _sensitive_merge_risk(
@@ -9773,6 +10048,52 @@ def classify_merge_risk(base_sha: str, head_sha: str, pr_number: int | None = No
             changed_files=[],
             reason=f"trusted-base-classification-error:{detail}",
         )
+    if (not gh or not repository or not isinstance(reviews, dict)
+        or not isinstance(authorization, dict) or pr_number is None
+        or baseline.get("analysis_complete") is not True
+        or not baseline.get("content_findings")):
+        return baseline
+    try:
+        selected = _risk_content_assessment_from_reviews(
+            gh, repository, pr_number, base_sha, head_sha,
+            baseline, reviews, authorization,
+        )
+        if selected is None:
+            return baseline
+        assessment, receipt = selected
+        if (
+            not isinstance(receipt, dict)
+            or receipt.get("owner_after_security") is not True
+            or type(receipt.get("owner_comment_id")) is not int
+            or receipt["owner_comment_id"] < 1
+        ):
+            return baseline
+        adjudicated = _run_exact_base_merge_risk_controller(
+            base_sha, head_sha, pr_number, assessment=assessment,
+        )
+        if (
+            adjudicated.get("analysis_complete") is not True
+            or adjudicated.get("changed_files") != baseline.get("changed_files")
+            or adjudicated.get("content_findings") != baseline.get("content_findings")
+            or adjudicated.get("content_findings_sha256")
+               != baseline.get("content_findings_sha256")
+        ):
+            return baseline
+        rank = {"LOW_RISK": 0, "SENSITIVE": 1, "PRIVILEGED": 2, "PRODUCTION": 3}
+        if rank[adjudicated["classification"]] >= rank[baseline["classification"]]:
+            return adjudicated if rank[adjudicated["classification"]] > rank[baseline["classification"]] else baseline
+        if rank[adjudicated["classification"]] < rank["SENSITIVE"]:
+            return baseline
+        repeated = _risk_content_assessment_from_reviews(
+            gh, repository, pr_number, base_sha, head_sha,
+            baseline, reviews, authorization,
+        )
+        if repeated != selected:
+            return baseline
+        adjudicated["content_assessment"] = receipt
+        return adjudicated
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError, IndexError):
+        return baseline
 
 
 def _owner_authorization_for_risk(risk: dict, authorization: dict) -> dict:
@@ -13947,12 +14268,17 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     if len(bundle["review_evidence"]) != 2:
         return fail("finish-pr bundle lacks independent CODE and SECURITY review references")
 
-    risk = classify_merge_risk(exact_pr["base_sha"], head, number)
+    risk = classify_merge_risk(
+        exact_pr["base_sha"], head, number, gh=gh, repository=name_with_owner,
+        reviews=reviews, authorization=raw_owner_authorization,
+    )
     try:
         _delivery_risk_evidence_gate(exact_pr["base_sha"], head, risk, work_item, bundle)
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr risk runtime/recovery gate failed: {exc}")
-    owner_authorization = _owner_authorization_for_risk(risk, raw_owner_authorization)
+    owner_authorization = _risk_content_assessment_owner_gate(
+        risk, _owner_authorization_for_risk(risk, raw_owner_authorization)
+    )
     print(
         "PASS finish-pr: deterministic merge risk "
         f"{risk['classification']} for exact head {head}"
@@ -14097,7 +14423,10 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             raise RuntimeError("final BASE bundle does not retain the validated bytes")
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         return fail(f"finish-pr final work-item/evidence gate failed: {exc}")
-    fresh_risk = classify_merge_risk(fresh_pr["base_sha"], head, number)
+    fresh_risk = classify_merge_risk(
+        fresh_pr["base_sha"], head, number, gh=gh, repository=name_with_owner,
+        reviews=fresh_reviews, authorization=fresh_raw_owner_authorization,
+    )
     try:
         _delivery_risk_evidence_gate(
             fresh_pr["base_sha"], head, fresh_risk, fresh_work_item, final_bundle
@@ -14109,8 +14438,8 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             "finish-pr risk classification changed during final revalidation; "
             + str(fresh_raw_owner_authorization.get("command") or "owner authorization required")
         )
-    fresh_owner_authorization = _owner_authorization_for_risk(
-        fresh_risk, fresh_raw_owner_authorization
+    fresh_owner_authorization = _risk_content_assessment_owner_gate(
+        fresh_risk, _owner_authorization_for_risk(fresh_risk, fresh_raw_owner_authorization)
     )
     if (
         fresh_risk["classification"] != "LOW_RISK"
@@ -15567,15 +15896,17 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
         result["security_review"] = reviews["security"]
         if all(_review_result_is_pass(reviews[kind]) for kind in ("code", "security")):
             risk = classify_merge_risk(
-                snapshot["base_sha"], snapshot["head_sha"], snapshot["number"]
+                snapshot["base_sha"], snapshot["head_sha"], snapshot["number"],
+                gh=gh, repository=name_with_owner, reviews=reviews,
+                authorization=authorization,
             )
             result["risk"] = risk
             result["risk_classification"] = risk["classification"]
             owner_required = risk["classification"] != "LOW_RISK"
             result["owner_authorization_required"] = owner_required
             result["merge_mode"] = "OWNER_GATED" if owner_required else "AUTO"
-            result["owner_authorization"] = _owner_authorization_for_risk(
-                risk, authorization
+            result["owner_authorization"] = _risk_content_assessment_owner_gate(
+                risk, _owner_authorization_for_risk(risk, authorization)
             )
         else:
             result["owner_authorization"] = authorization
@@ -15720,7 +16051,12 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 },
                 create=not dry_run,
             )
-            if all(_review_result_is_pass(result[kind]) for kind in ("code_review", "security_review")):
+            if (
+                all(_review_result_is_pass(result[kind])
+                    for kind in ("code_review", "security_review"))
+                and result["owner_authorization"].get("status")
+                    in {"PASS", "NOT_REQUIRED_BY_POLICY"}
+            ):
                 result["risk_evidence"] = _delivery_risk_evidence_gate(
                     initial["base_sha"], initial_head_sha, result["risk"],
                     work_item, result["evidence_bundle"],
