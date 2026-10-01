@@ -11376,7 +11376,7 @@ function Assert-ShadowRunnerBytes {
     Assert-Protected -Path $manifestFile -Directory $false
     $stored = ConvertFrom-Json -InputObject ([IO.File]::ReadAllText($manifestFile)) -ErrorAction Stop
     if ($stored.source_sha -cne $sha -or $stored.campaign_id -cne $campaign -or
-        $stored.runner_files.PSObject.Properties.Count -ne 7) {
+        @($stored.runner_files.PSObject.Properties).Count -ne 7) {
         throw 'protected shadow runner manifest identity differs'
     }
     if ($Action -eq 'Recover') {
