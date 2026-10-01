@@ -20,9 +20,11 @@ from typing import Any
 if __package__:
     from .chatgpt_review_dispatcher import (
         ReviewDispatchError,
+        canonical_structured_handoff,
         dispatch_review_request,
         dispatch_status,
         github_owner_marker_lookup,
+        validate_legacy_bootstrap_binding,
     )
     from .exact_pr_binding import (
         CANONICAL_REPOSITORY,
@@ -35,9 +37,11 @@ if __package__:
 else:
     from chatgpt_review_dispatcher import (
         ReviewDispatchError,
+        canonical_structured_handoff,
         dispatch_review_request,
         dispatch_status,
         github_owner_marker_lookup,
+        validate_legacy_bootstrap_binding,
     )
     from exact_pr_binding import (
         CANONICAL_REPOSITORY,
@@ -147,11 +151,24 @@ def _trusted_transition(
     return result.returncode, payload
 
 
+def _validate_legacy_bootstrap_binding(
+    value: str | None, binding: ExactPRBinding
+) -> None:
+    try:
+        validate_legacy_bootstrap_binding(value, binding)
+    except ReviewDispatchError as exc:
+        raise ReviewTransitionError(str(exc)) from exc
+
+
 def _request_from_controller(
     controller: dict[str, Any],
     binding: ExactPRBinding,
+    *,
+    legacy_bootstrap_binding: str | None = None,
 ) -> dict[str, Any]:
-    """Add identity fields without changing the trusted handoff or marker."""
+    """Bind the trusted handoff; legacy requires an explicit bootstrap exception."""
+    if legacy_bootstrap_binding is not None:
+        _validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
     qualification = controller.get("qualification")
     original = controller.get("review_request")
     if (
@@ -192,10 +209,16 @@ def _request_from_controller(
         or not isinstance(original.get("handoff"), str)
         or not isinstance(original.get("handoff_sha256"), str)
         or _DIGEST.fullmatch(original["handoff_sha256"]) is None
+        or original["handoff_bytes"] != len(original["handoff"].encode("utf-8"))
         or hashlib.sha256(original["handoff"].encode("utf-8")).hexdigest()
         != original["handoff_sha256"]
     ):
         raise ReviewTransitionError("trusted controller review request is malformed")
+    if (
+        controller.get("review_kind", original["review_kind"])
+        != original["review_kind"]
+    ):
+        raise ReviewTransitionError("trusted controller review kind conflicts")
     if original["review_kind"] == "SECURITY":
         code = controller.get("code_review")
         if (
@@ -205,7 +228,7 @@ def _request_from_controller(
             or code.get("blocking_findings") != 0
         ):
             raise ReviewTransitionError("SECURITY dispatch requires exact CODE PASS")
-    return {
+    request = {
         **original,
         "schema_version": 1,
         "repository": binding.repository,
@@ -213,6 +236,32 @@ def _request_from_controller(
         "base_sha": binding.base_sha,
         "head_branch": binding.head_branch,
     }
+    if "compatibility_digest" in qualification and "handoff" not in controller:
+        raise ReviewTransitionError("trusted controller omitted structured handoff")
+    if "handoff" not in controller:
+        _validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
+    if "handoff" in controller:
+        try:
+            handoff = canonical_structured_handoff(
+                controller["handoff"],
+                binding,
+                qualification_digest=qualification.get("compatibility_digest"),
+            )
+        except ReviewDispatchError as exc:
+            raise ReviewTransitionError(
+                "trusted structured handoff is malformed"
+            ) from exc
+        if controller["handoff"]["review_kind"] != request["review_kind"]:
+            raise ReviewTransitionError(
+                "trusted structured handoff review kind conflicts"
+            )
+        encoded = handoff.encode("utf-8")
+        request.update(
+            handoff=handoff,
+            handoff_bytes=len(encoded),
+            handoff_sha256=hashlib.sha256(encoded).hexdigest(),
+        )
+    return request
 
 
 def dispatch_controller_result(
@@ -226,6 +275,7 @@ def dispatch_controller_result(
     dispatcher: Callable[..., dict[str, Any]] = dispatch_review_request,
     marker_lookup: Callable[..., Any] = github_owner_marker_lookup,
     binding: ExactPRBinding | None = None,
+    legacy_bootstrap_binding: str | None = None,
 ) -> dict[str, Any]:
     """Dispatch a trusted review request while keeping its verdict external."""
     if controller.get("state") != "CHATGPT_REVIEW_REQUIRED":
@@ -268,9 +318,27 @@ def dispatch_controller_result(
         raise ReviewTransitionError(
             "resolved exact PR number differs from requested PR"
         )
-    request = _request_from_controller(controller, binding)
+    request = _request_from_controller(
+        controller, binding, legacy_bootstrap_binding=legacy_bootstrap_binding
+    )
+    protocol = {
+        "handoff_protocol": "structured-v1"
+        if "handoff" in controller
+        else "legacy-bootstrap",
+        "legacy_bootstrap_binding": (
+            None if "handoff" in controller else legacy_bootstrap_binding
+        ),
+    }
+    if "handoff" in controller:
+        tree_sha = _git(target_root, "show", "-s", "--format=%T", "HEAD")
+        if controller["handoff"]["tree_sha"] != tree_sha:
+            raise ReviewTransitionError(
+                "structured handoff tree differs from exact HEAD"
+            )
+    controller["review_request"] = request
     if dry_run:
         controller["review_dispatch"] = {
+            **protocol,
             "status": "NOT_REQUESTED",
             "provider": "ChatGPT",
             "kind": request["review_kind"],
@@ -292,6 +360,7 @@ def dispatch_controller_result(
         transport=transport,
         owner_marker_lookup=lookup,
         binding_revalidator=lambda bound: revalidate_exact_open_pr(bound, gh=gh),
+        legacy_bootstrap_binding=legacy_bootstrap_binding,
     )
     if not isinstance(record, dict) or record.get("verdict_authority") is not False:
         raise ReviewTransitionError(
@@ -309,6 +378,7 @@ def dispatch_controller_result(
     }:
         raise ReviewTransitionError("dispatcher returned an unsupported request state")
     controller["review_dispatch"] = {
+        **protocol,
         "status": status,
         "reason": str(record.get("reason") or ""),
         "provider": "ChatGPT",
@@ -359,6 +429,7 @@ def transition(
     *,
     dry_run: bool = False,
     transport: Any = None,
+    legacy_bootstrap_binding: str | None = None,
     preflight: Callable[[Path, int], ExactPRBinding] = _preflight_owner_markers,
 ) -> tuple[int, dict[str, Any]]:
     """Advance one bounded trusted transition, repeating only after a real marker."""
@@ -366,6 +437,8 @@ def transition(
     target_root = target_root.resolve()
     previous_kind = ""
     binding = preflight(target_root, pr_number)
+    if legacy_bootstrap_binding is not None:
+        _validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
     for attempt in range(3):
         if attempt and preflight(target_root, pr_number) != binding:
             raise ReviewTransitionError("exact PR binding changed during transition")
@@ -382,10 +455,17 @@ def transition(
             and controller.get("state") == "CHATGPT_REVIEW_REQUIRED"
             and isinstance(qualification, dict)
             and qualification.get("source") == "executed"
+            and "handoff" not in controller
+            and "compatibility_digest" not in qualification
         ):
-            # The exact-base controller's first handoff includes source=executed.
-            # A later rerun would say source=reused and change the handoff digest.
-            # Let the controller produce its stable handoff before any dispatch.
+            # Only the legacy text handoff changes with source=executed/reused.
+            # A structured handoff must use this response: its qualification
+            # witness is process-local and cannot survive a controller rerun.
+            _request_from_controller(
+                controller,
+                binding,
+                legacy_bootstrap_binding=legacy_bootstrap_binding,
+            )
             if preflight(target_root, pr_number) != binding:
                 raise ReviewTransitionError(
                     "exact PR binding changed while stabilizing review request"
@@ -429,6 +509,7 @@ def transition(
             dry_run=dry_run,
             transport=transport,
             binding=binding,
+            legacy_bootstrap_binding=legacy_bootstrap_binding,
         )
         dispatch = result.get("review_dispatch", {})
         if dispatch.get("status") == "PASS":
@@ -502,13 +583,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--kind", choices=("CODE", "SECURITY"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--legacy-bootstrap-binding",
+        metavar="BASE_SHA:HEAD_SHA",
+        help="explicit legacy transport exception for PR 172 on its fixed pre-v1 base",
+    )
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.status:
-            if args.kind is None or args.dry_run:
+            if (
+                args.kind is None
+                or args.dry_run
+                or args.legacy_bootstrap_binding is not None
+            ):
                 raise ReviewTransitionError(
-                    "status requires --kind and disallows --dry-run"
+                    "status requires --kind and disallows transition options"
                 )
             result = review_dispatch_status(args.target_root, args.pr, args.kind)
             rc = 0
@@ -522,6 +612,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.target_root,
                 args.pr,
                 dry_run=args.dry_run,
+                legacy_bootstrap_binding=args.legacy_bootstrap_binding,
             )
     except (
         OSError,

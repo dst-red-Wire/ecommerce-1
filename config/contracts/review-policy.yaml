@@ -212,6 +212,43 @@ repository_delivery:
         - changed_files
         - exact_head_verified
       payload_digest: sha256
+      structured_compatibility_handoff:
+        helper: scripts/pr_monitor.py#build_handoff
+        schema_version: 1
+        event: CHATGPT_REVIEW_REQUIRED
+        provider: ChatGPT
+        review_kinds: [CODE, SECURITY]
+        qualification: verified-exact-base-envelope-PASS
+        qualification_evidence_digest: sha256-prefixed
+        identity_fields: [repository, pr, base_sha, head_sha, tree_sha]
+        changed_files: sorted-unique-repository-relative
+        delta: numeric-counts-only
+        digest: sha256-canonical-json-without-digest-field
+        canonical_json: sorted-keys-compact-ascii
+        payload_budget_bytes: 8192
+        security_requires: exact-head-CODE_PASS
+        local_transport: unavailable
+        consumer: external-orchestrator
+        verdict_authority: false
+      legacy_bootstrap_exception:
+        default: forbidden
+        activation: explicit-invocation-only
+        cli_argument: --legacy-bootstrap-binding
+        make_variable: LEGACY_BOOTSTRAP_BINDING
+        argument_format: exact-base-sha:exact-head-sha
+        repository: dst-red-Wire/ecommerce-1
+        pr: 172
+        base: main
+        base_sha: ced96d663c1dca1c885d450104f344c10431738d
+        head_branch: feat/controller-compat-bootstrap
+        head_sha: exact-live-GitHub-and-clean-checkout-binding
+        allowed_only_when: trusted-controller-omits-structured-handoff-and-compatibility-digest
+        scope: transport-format-only
+        qualification: exact-base-controller-PASS
+        outbox_binding: audit-data-never-invocation-authorization
+        changed_binding: reject
+        malformed_v1: reject-without-fallback
+        review_and_merge_rules: unchanged
       fail_if_payload_unavailable: true
       consumer: external-automatic
       invocation_binding: exact-pr-and-head-sha

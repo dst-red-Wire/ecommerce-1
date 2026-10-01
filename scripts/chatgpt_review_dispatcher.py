@@ -16,7 +16,7 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
 import yaml
@@ -41,6 +41,13 @@ OUTBOX_ROOT = ROOT / ".context/review-dispatch"
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _REPOSITORY = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+_LEGACY_BOOTSTRAP_SCOPE = (
+    "dst-red-Wire/ecommerce-1",
+    172,
+    "main",
+    "ced96d663c1dca1c885d450104f344c10431738d",
+    "feat/controller-compat-bootstrap",
+)
 _REQUEST_KEYS = frozenset(
     {
         "schema_version",
@@ -60,6 +67,36 @@ _REQUEST_KEYS = frozenset(
         "expected_marker",
         "verdict_authority",
         "rerun",
+    }
+)
+_STRUCTURED_HANDOFF_KEYS = frozenset(
+    {
+        "schema_version",
+        "event",
+        "provider",
+        "verdict_authority",
+        "repository",
+        "pr",
+        "review_kind",
+        "base_sha",
+        "head_sha",
+        "tree_sha",
+        "exact_head_verified",
+        "changed_files",
+        "qualification",
+        "previous_validated_verdict",
+        "previous_head",
+        "delta",
+        "handoff_sha256",
+    }
+)
+_DELTA_COUNT_KEYS = frozenset(
+    {
+        "changed_file_count",
+        "open_finding_count",
+        "new_finding_count",
+        "resolved_finding_count",
+        "superseded_finding_count",
     }
 )
 _POLICY = {
@@ -108,6 +145,43 @@ def _digest(value: Any) -> bool:
     return isinstance(value, str) and _DIGEST.fullmatch(value) is not None
 
 
+def validate_legacy_bootstrap_binding(
+    value: str | None, binding: ExactPRBinding
+) -> None:
+    """Validate explicit transport-only consent for this exact bootstrap PR."""
+    if (
+        not isinstance(binding, ExactPRBinding)
+        or (
+            binding.repository,
+            binding.pr_number,
+            binding.base,
+            binding.base_sha,
+            binding.head_branch,
+        )
+        != _LEGACY_BOOTSTRAP_SCOPE
+        or not _sha(binding.head_sha)
+        or type(value) is not str
+        or value != f"{binding.base_sha}:{binding.head_sha}"
+    ):
+        raise ReviewDispatchError(
+            "legacy handoff requires the explicit exact bootstrap base:head binding"
+        )
+
+
+def _handoff_protocol(
+    request: Mapping[str, Any],
+    binding: ExactPRBinding,
+    legacy_bootstrap_binding: str | None,
+) -> str:
+    """Require invocation consent independently of any saved outbox record."""
+    if legacy_bootstrap_binding is not None:
+        validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
+    if request["handoff"].startswith("{"):
+        return "structured-v1"
+    validate_legacy_bootstrap_binding(legacy_bootstrap_binding, binding)
+    return "legacy-bootstrap"
+
+
 def _load_policy(path: Path) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -122,7 +196,147 @@ def _load_policy(path: Path) -> dict[str, Any]:
     return value
 
 
-def _canonical_handoff(request: Mapping[str, Any], budget: int) -> None:
+def _canonical_json(value: Mapping[str, Any]) -> str:
+    try:
+        return json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReviewDispatchError("structured handoff is not canonical JSON") from exc
+
+
+def _structured_handoff(
+    payload: Any,
+    binding: ExactPRBinding,
+    budget: int,
+    *,
+    qualification_digest: str | None = None,
+) -> str:
+    """Validate v1 metadata independently of its producer and serialize it."""
+    if type(payload) is not dict or set(payload) != _STRUCTURED_HANDOFF_KEYS:
+        raise ReviewDispatchError("structured handoff v1 has invalid fields")
+    qualification = payload["qualification"]
+    evidence_digest = (
+        qualification.get("evidence_digest") if type(qualification) is dict else None
+    )
+    if (
+        type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 1
+        or payload["event"] != "CHATGPT_REVIEW_REQUIRED"
+        or payload["provider"] != "ChatGPT"
+        or payload["verdict_authority"] is not False
+        or payload["repository"] != binding.repository
+        or type(payload["pr"]) is not int
+        or payload["pr"] != binding.pr_number
+        or type(payload["review_kind"]) is not str
+        or payload["review_kind"] not in {"CODE", "SECURITY"}
+        or payload["base_sha"] != binding.base_sha
+        or payload["head_sha"] != binding.head_sha
+        or not _sha(payload["tree_sha"])
+        or payload["base_sha"] == payload["head_sha"]
+        or payload["exact_head_verified"] is not True
+        or type(qualification) is not dict
+        or set(qualification) != {"status", "evidence_digest"}
+        or qualification["status"] != "PASS"
+        or not isinstance(evidence_digest, str)
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", evidence_digest) is None
+        or (
+            qualification_digest is not None and evidence_digest != qualification_digest
+        )
+    ):
+        raise ReviewDispatchError("structured handoff v1 is not bound to the exact PR")
+    paths = payload["changed_files"]
+    if type(paths) is not list or not 1 <= len(paths) <= 256:
+        raise ReviewDispatchError("structured handoff changed_files is invalid")
+    for path in paths:
+        if type(path) is not str:
+            raise ReviewDispatchError("structured handoff has an unsafe path")
+        try:
+            path_bytes = path.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ReviewDispatchError("structured handoff has an unsafe path") from exc
+        if (
+            not path
+            or path != path.strip()
+            or len(path_bytes) > 512
+            or path.startswith("/")
+            or "\\" in path
+            or ":" in path
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or str(PurePosixPath(path)) != path
+        ):
+            raise ReviewDispatchError("structured handoff has an unsafe path")
+    if paths != sorted(set(paths)):
+        raise ReviewDispatchError("structured handoff changed_files is not canonical")
+    delta = payload["delta"]
+    if (
+        type(delta) is not dict
+        or not set(delta) <= _DELTA_COUNT_KEYS
+        or delta.get("changed_file_count") != len(paths)
+        or any(
+            type(count) is not int or not 0 <= count <= 1_000_000
+            for count in delta.values()
+        )
+    ):
+        raise ReviewDispatchError("structured handoff delta counts are invalid")
+    prior = payload["previous_validated_verdict"]
+    previous_head = payload["previous_head"]
+    if (
+        (
+            prior is not None
+            and (
+                type(prior) is not str
+                or prior not in {"CODE_PASS", "SECURITY_PASS", "READY"}
+            )
+        )
+        or (previous_head is not None and not _sha(previous_head))
+        or (prior is not None and previous_head is None)
+        or (
+            payload["review_kind"] == "SECURITY"
+            and (prior != "CODE_PASS" or previous_head != binding.head_sha)
+        )
+    ):
+        raise ReviewDispatchError("structured handoff lacks valid prior review context")
+    internal_digest = payload["handoff_sha256"]
+    unsigned = {key: value for key, value in payload.items() if key != "handoff_sha256"}
+    if (
+        not _digest(internal_digest)
+        or hashlib.sha256(_canonical_json(unsigned).encode("ascii")).hexdigest()
+        != internal_digest
+    ):
+        raise ReviewDispatchError("structured handoff internal digest mismatch")
+    text = _canonical_json(payload)
+    if not 0 < len(text.encode("ascii")) <= budget:
+        raise ReviewDispatchError("structured handoff exceeds its byte budget")
+    return text
+
+
+def canonical_structured_handoff(
+    payload: Any,
+    binding: ExactPRBinding,
+    *,
+    qualification_digest: str,
+) -> str:
+    """Prepare v1 transport text from the exact-base controller result."""
+    if not isinstance(qualification_digest, str):
+        raise ReviewDispatchError("exact qualification digest is required")
+    policy = _load_policy(POLICY_PATH)
+    return _structured_handoff(
+        payload,
+        binding,
+        int(policy["handoff_max_bytes"]),
+        qualification_digest=qualification_digest,
+    )
+
+
+def _canonical_handoff(
+    request: Mapping[str, Any], binding: ExactPRBinding, budget: int
+) -> None:
     handoff = request["handoff"]
     if not isinstance(handoff, str) or not handoff:
         raise ReviewDispatchError("handoff must be nonempty UTF-8 text")
@@ -141,6 +355,16 @@ def _canonical_handoff(request: Mapping[str, Any], budget: int) -> None:
         or request["handoff_sha256"] != hashlib.sha256(encoded).hexdigest()
     ):
         raise ReviewDispatchError("handoff digest mismatch")
+    if handoff.startswith("{"):
+        try:
+            payload = json.loads(handoff)
+        except json.JSONDecodeError as exc:
+            raise ReviewDispatchError("structured handoff JSON is malformed") from exc
+        if _structured_handoff(payload, binding, budget) != handoff:
+            raise ReviewDispatchError("structured handoff JSON is not canonical")
+        if payload["review_kind"] != request["review_kind"]:
+            raise ReviewDispatchError("structured handoff review kind differs")
+        return
     instruction, separator, payload_text = handoff.rpartition("\n")
     if not separator or not payload_text:
         raise ReviewDispatchError("canonical handoff payload is missing")
@@ -281,7 +505,7 @@ def _validate_request(
         or len(rerun["command"]) > 4096
     ):
         raise ReviewDispatchError("controller rerun metadata is malformed")
-    _canonical_handoff(request, int(policy["handoff_max_bytes"]))
+    _canonical_handoff(request, binding, int(policy["handoff_max_bytes"]))
 
 
 def dispatch_identity(request: Mapping[str, Any]) -> str:
@@ -379,6 +603,33 @@ def _read(path: Path, identity: str) -> dict[str, Any]:
             }
         )
         _validate_request(request, binding, _POLICY)
+        structured = request["handoff"].startswith("{")
+        if "handoff_protocol" not in value and "legacy_bootstrap_binding" not in value:
+            # Historical data can be read or superseded without invocation consent.
+            value["handoff_protocol"] = (
+                "structured-v1" if structured else "legacy-historical"
+            )
+            value["legacy_bootstrap_binding"] = None
+        protocol = value.get("handoff_protocol")
+        if "legacy_bootstrap_binding" not in value:
+            raise ReviewDispatchError("review dispatch protocol trace is incomplete")
+        if structured:
+            if (
+                protocol != "structured-v1"
+                or value["legacy_bootstrap_binding"] is not None
+            ):
+                raise ReviewDispatchError("review dispatch protocol trace was changed")
+        elif protocol == "legacy-historical":
+            if value["legacy_bootstrap_binding"] is not None:
+                raise ReviewDispatchError(
+                    "historical legacy record claims an exception"
+                )
+        elif protocol == "legacy-bootstrap":
+            validate_legacy_bootstrap_binding(
+                value["legacy_bootstrap_binding"], binding
+            )
+        else:
+            raise ReviewDispatchError("review dispatch protocol trace was changed")
         if dispatch_identity(request) != identity or any(
             value.get(key) != request[key]
             for key in ("repository", "pr", "head_sha", "review_kind", "handoff_sha256")
@@ -637,7 +888,8 @@ def _owner_proof(
         or re.fullmatch(
             r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
             proof["created_at"],
-        ) is None
+        )
+        is None
         or proof.get("updated_at") != proof["created_at"]
         or proof.get("is_latest_for_kind") is not True
         or type(proof.get("blocking_findings")) is not int
@@ -748,6 +1000,7 @@ def dispatch_review_request(
     request: Mapping[str, Any],
     *,
     binding: ExactPRBinding,
+    legacy_bootstrap_binding: str | None = None,
     transport: ReviewTransport | None = None,
     outbox_root: Path = OUTBOX_ROOT,
     policy_path: Path = POLICY_PATH,
@@ -766,6 +1019,8 @@ def dispatch_review_request(
     if not isinstance(binding, ExactPRBinding):
         raise ReviewDispatchError("exact PR binding is required")
     _validate_request(request, binding, policy)
+    protocol = _handoff_protocol(request, binding, legacy_bootstrap_binding)
+    trace_binding = legacy_bootstrap_binding if protocol == "legacy-bootstrap" else None
     identity = dispatch_identity(request)
     root = Path(outbox_root).absolute()
     _assert_no_symlink(root)
@@ -793,7 +1048,20 @@ def dispatch_review_request(
         _supersede_old_heads(pr_root, request["head_sha"])
         if path.exists():
             record = _read(path, identity)
-            if record.get("request") != request:
+            if (
+                record.get("request") == request
+                and record.get("handoff_protocol") == "legacy-historical"
+                and protocol == "legacy-bootstrap"
+            ):
+                # Fresh explicit consent was validated before any outbox read.
+                # Preserve submission metadata to avoid submitting the same work twice.
+                record["handoff_protocol"] = protocol
+                record["legacy_bootstrap_binding"] = trace_binding
+            if (
+                record.get("request") != request
+                or record.get("handoff_protocol") != protocol
+                or record.get("legacy_bootstrap_binding") != trace_binding
+            ):
                 raise ReviewDispatchError(
                     "review dispatch record does not match request"
                 )
@@ -807,6 +1075,8 @@ def dispatch_review_request(
                 "review_kind": request["review_kind"],
                 "handoff_sha256": request["handoff_sha256"],
                 "request": dict(request),
+                "handoff_protocol": protocol,
+                "legacy_bootstrap_binding": trace_binding,
                 "state": "NOT_REQUESTED",
                 "reason": "",
                 "submission_id": "",
@@ -834,9 +1104,10 @@ def dispatch_review_request(
                 return _superseded_request(
                     path, identity, request["head_sha"], changed_head, record
                 )
-            if kind == "SECURITY" and (
-                proof["created_at"], proof["comment_id"]
-            ) <= (code["created_at"], code["comment_id"]):
+            if kind == "SECURITY" and (proof["created_at"], proof["comment_id"]) <= (
+                code["created_at"],
+                code["comment_id"],
+            ):
                 record.pop("owner_comment_id", None)
                 record["state"] = "BLOCKED"
                 record["reason"] = "SECURITY_REVIEW_PREDATES_CODE"

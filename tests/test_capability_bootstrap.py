@@ -113,27 +113,32 @@ class CapabilityGraphTest(unittest.TestCase):
     def test_versions_env_projection_drift_fails_closed(self):
         lock = MOD.load_toolchain_lock()
         with tempfile.TemporaryDirectory() as directory:
-            projection = Path(directory) / "versions.env"
+            target = Path(directory)
+            projection = target / "config/toolchain/versions.env"
+            projection.parent.mkdir(parents=True)
             source = MOD.VERSIONS.read_text(encoding="utf-8")
             self.assertIn("GO_VERSION=", source)
             projection.write_text(
                 re.sub(r"^GO_VERSION=.*$", "GO_VERSION=0.0.0", source, count=1, flags=re.MULTILINE),
                 encoding="utf-8",
             )
-            with mock.patch.object(MOD, "VERSIONS", projection):
-                with self.assertRaisesRegex(ValueError, "versions.env drifted"):
-                    MOD.validate_toolchain_projections(lock)
+            with self.assertRaisesRegex(ValueError, "versions.env drifted"):
+                MOD.validate_toolchain_projections(lock, root=target)
 
     def test_ansible_collection_projection_drift_fails_closed(self):
         lock = MOD.load_toolchain_lock()
         with tempfile.TemporaryDirectory() as directory:
-            projection = Path(directory) / "requirements.yml"
+            target = Path(directory)
+            versions = target / "config/toolchain/versions.env"
+            versions.parent.mkdir(parents=True)
+            versions.write_bytes(MOD.VERSIONS.read_bytes())
+            projection = target / "platform/ansible/requirements.yml"
+            projection.parent.mkdir(parents=True)
             source = MOD.ANSIBLE_COLLECTIONS.read_text(encoding="utf-8")
             self.assertIn("community.docker", source)
             projection.write_text(source.replace("version: 3.7.0", "version: 0.0.0", 1), encoding="utf-8")
-            with mock.patch.object(MOD, "ANSIBLE_COLLECTIONS", projection):
-                with self.assertRaisesRegex(ValueError, "requirements.yml drifted"):
-                    MOD.validate_toolchain_projections(lock)
+            with self.assertRaisesRegex(ValueError, "requirements.yml drifted"):
+                MOD.validate_toolchain_projections(lock, root=target)
 
     def test_bazel_native_files_are_toolchain_projections(self):
         lock = MOD.load_toolchain_lock()
@@ -1368,9 +1373,8 @@ class CapabilityClosureTest(unittest.TestCase):
             source.write_text('require_command("unknown-tool")\n')
             canonical = MOD.load_contract()
             canonical["gate_sources"] = ["wrapper.py"]
-            with mock.patch.object(MOD, "ROOT", Path(tmp)):
-                with self.assertRaisesRegex(ValueError, "unknown-tool"):
-                    MOD.validate_contract(canonical)
+            with self.assertRaisesRegex(ValueError, "unknown-tool"):
+                MOD.validate_contract(canonical, MOD.load_versions(), root=Path(tmp))
 
     def test_seed_prerequisite_requires_justification(self):
         canonical = MOD.load_contract()

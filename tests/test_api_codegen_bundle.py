@@ -161,6 +161,10 @@ class ApiCodegenBundleTest(unittest.TestCase):
             root = pathlib.Path(temp_name)
             (root / "scripts").mkdir(parents=True)
             shutil.copy2(ROOT / "scripts/repoctl.py", root / "scripts/repoctl.py")
+            shutil.copy2(
+                ROOT / "scripts/capability_bootstrap.py",
+                root / "scripts/capability_bootstrap.py",
+            )
             shutil.copy2(ROOT / "scripts/native_workspace.py", root / "scripts/native_workspace.py")
             shutil.copy2(ROOT / "scripts/canonical_workspace.py", root / "scripts/canonical_workspace.py")
             shutil.copy2(
@@ -255,8 +259,8 @@ class ApiCodegenBundleTest(unittest.TestCase):
                 cwd=root,
                 env=env,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
+                check=False,
             )
             self.assertEqual(0, result.returncode, result.stderr)
             self.assertIn("PASS generated API bindings target=go", result.stdout)
@@ -268,8 +272,8 @@ class ApiCodegenBundleTest(unittest.TestCase):
                 cwd=root,
                 env=ci_env,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
+                check=False,
             )
             self.assertEqual(1, denied.returncode)
             self.assertIn("command api-generate forbidden in ci scope", denied.stderr)

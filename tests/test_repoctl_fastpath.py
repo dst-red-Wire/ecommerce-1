@@ -15,6 +15,38 @@ SPEC.loader.exec_module(MOD)
 
 
 class DeveloperStateFastPathTest(unittest.TestCase):
+    def test_changed_paths_include_deleted_files_for_review_scope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            for key, value in (
+                ("user.email", "test@example.invalid"),
+                ("user.name", "Test"),
+                ("commit.gpgsign", "false"),
+            ):
+                subprocess.run(["git", "config", key, value], cwd=repo, check=True)
+            deleted = repo / "config" / "contracts" / "retired-policy.yaml"
+            deleted.parent.mkdir(parents=True)
+            deleted.write_text("status: retired\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "baseline"], cwd=repo, check=True)
+            base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+            deleted.unlink()
+            with mock.patch.object(MOD, "ROOT", repo):
+                self.assertEqual(
+                    ["config/contracts/retired-policy.yaml"],
+                    MOD.changed_paths(base, "WORKTREE"),
+                )
+            subprocess.run(["git", "add", "-u"], cwd=repo, check=True)
+            subprocess.run(["git", "commit", "-qm", "delete policy"], cwd=repo, check=True)
+            head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+            with mock.patch.object(MOD, "ROOT", repo):
+                self.assertEqual(
+                    ["config/contracts/retired-policy.yaml"],
+                    MOD.changed_paths(base, head),
+                )
+
     def test_ruby_runner_prerequisite_present_is_returned(self):
         with mock.patch.object(MOD.shutil, "which", return_value="/usr/bin/ruby"):
             self.assertEqual("/usr/bin/ruby", MOD.require("ruby"))
