@@ -15,6 +15,15 @@ output "mgmt_contract_guard" {
 
   precondition {
     condition = try(
+      local.access_gateways["wg-01"].mgmt_vlan == 401 &&
+      local.mgmt_segments[tostring(local.access_gateways["wg-01"].mgmt_vlan)].name == "mgmt",
+      false
+    )
+    error_message = "wg-01 must attach to the canonical MGMT VLAN 401."
+  }
+
+  precondition {
+    condition = try(
       local.access_gateways["wg-01"].mgmt_ip == local.mgmt_static_ips["401"]["wg-01"] &&
       local.access_gateways["wg-01"].mgmt_ip == local.wireguard.gateway_mgmt_ip,
       false

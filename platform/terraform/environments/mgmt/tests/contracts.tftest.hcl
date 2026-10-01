@@ -38,6 +38,13 @@ run "canonical_mgmt_contract_plans_without_provider_mutation" {
   }
 
   assert {
+    condition = local.access_gateways["wg-01"].mgmt_vlan == tonumber(one([
+      for vlan, segment in local.mgmt_segments : vlan if segment.name == "mgmt"
+    ]))
+    error_message = "The WireGuard gateway must attach to the canonical management segment."
+  }
+
+  assert {
     condition     = module.hcloud_mgmt.runtime_transport.gateway.private_address == local.mgmt_static_ips["401"]["wg-01"]
     error_message = "The WireGuard gateway must use its canonical private management address."
   }
