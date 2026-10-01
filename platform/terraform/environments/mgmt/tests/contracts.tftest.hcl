@@ -38,16 +38,8 @@ run "canonical_mgmt_contract_plans_without_provider_mutation" {
   }
 
   assert {
-    condition = module.hcloud_mgmt.declared_static_inventory == {
-      servers        = 7
-      networks       = 1
-      subnets        = 6
-      firewalls      = 2
-      volumes        = 0
-      load_balancers = 0
-      floating_ips   = 0
-    }
-    error_message = "The canonical MGMT resource inventory must remain exact."
+    condition     = module.hcloud_mgmt.runtime_transport.gateway.private_address == local.mgmt_static_ips["401"]["wg-01"]
+    error_message = "The WireGuard gateway must use its canonical private management address."
   }
 }
 

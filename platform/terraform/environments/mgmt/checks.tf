@@ -9,6 +9,29 @@ output "mgmt_contract_guard" {
   }
 
   precondition {
+    condition     = toset(keys(local.access_gateways)) == toset(["wg-01"])
+    error_message = "MGMT access inventory must contain exactly the wg-01 gateway."
+  }
+
+  precondition {
+    condition = try(
+      local.access_gateways["wg-01"].mgmt_ip == local.mgmt_static_ips["401"]["wg-01"] &&
+      local.access_gateways["wg-01"].mgmt_ip == local.wireguard.gateway_mgmt_ip,
+      false
+    )
+    error_message = "wg-01 management IP must match the canonical static allocation and WireGuard return path."
+  }
+
+  precondition {
+    condition = try(
+      cidrhost(format("%s/%s", local.access_gateways["wg-01"].mgmt_ip, split("/", local.mgmt_segments["401"].cidr)[1]), 0) ==
+      cidrhost(local.mgmt_segments["401"].cidr, 0),
+      false
+    )
+    error_message = "wg-01 management IP must belong to VLAN/segment 401."
+  }
+
+  precondition {
     condition = !var.bootstrap_ssh_enabled || (
       var.bootstrap_ssh_human_gate_confirmed && length(var.bootstrap_ssh_allowed_cidrs) > 0
     )
@@ -75,8 +98,9 @@ output "mgmt_contract_guard" {
       [for node in values(local.nodes) : node.k8s_ip],
       [for node in values(local.workers) : node.storage_ip],
       [for node in values(local.workers) : node.backup_ip],
-    ))) == 18
-    error_message = "MGMT static node IP addresses must be globally unique."
+      [for gateway in values(local.access_gateways) : gateway.mgmt_ip],
+    ))) == 18 + length(local.access_gateways)
+    error_message = "MGMT static node and gateway IP addresses must be globally unique."
   }
 
   precondition {

@@ -7,6 +7,7 @@ scope:
   allowed_paths:
     - platform/terraform/environments/mgmt/checks.tf
     - platform/terraform/environments/mgmt/tests/contracts.tftest.hcl
+    - tests/test_terraform_network_checks.py
     - platform/terraform/environments/mgmt/README.md
     - config/work-packages/M2.5/m25-runtime-ready-for-provisioning.yaml
   forbidden_paths: []
