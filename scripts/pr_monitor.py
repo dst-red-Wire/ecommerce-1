@@ -6,9 +6,10 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 import copy
+import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
@@ -410,6 +411,168 @@ def chatgpt_review_handoff(
     }
     encoded = bounded_payload(payload, budget=PROMPT_BUDGET_BYTES - len(instruction.encode()))
     return instruction + encoded
+
+
+REPOSITORY = "dst-red-Wire/ecommerce-1"
+MAX_HANDOFF_BYTES = min(PROMPT_BUDGET_BYTES, 8192)
+MAX_CHANGED_FILES = 256
+MAX_PATH_BYTES = 512
+MAX_DELTA_COUNT = 1_000_000
+
+_SHA = re.compile(r"[0-9a-f]{40}\Z")
+_DIGEST = re.compile(r"sha256:[0-9a-f]{64}\Z")
+_DELTA_COUNT_KEYS = frozenset(
+    {
+        "changed_file_count",
+        "open_finding_count",
+        "new_finding_count",
+        "resolved_finding_count",
+        "superseded_finding_count",
+    }
+)
+_PRIOR_VERDICTS = frozenset({"CODE_PASS", "SECURITY_PASS", "READY"})
+
+
+class ReviewHandoffError(ValueError):
+    """The requested handoff is ambiguous, unsafe, or too large."""
+
+
+def _canonical_bytes(value: dict[str, Any]) -> bytes:
+    return _encode_payload(value).encode("utf-8")
+
+
+def _require_sha(name: str, value: object) -> str:
+    if type(value) is not str or _SHA.fullmatch(value) is None:
+        raise ReviewHandoffError(f"{name} must be a full lowercase Git SHA")
+    return value
+
+
+def _changed_paths(value: object) -> list[str]:
+    if type(value) not in (list, tuple) or not value or len(value) > MAX_CHANGED_FILES:
+        raise ReviewHandoffError("changed_files must be a nonempty bounded sequence")
+    seen: set[str] = set()
+    paths: list[str] = []
+    for path in value:
+        if type(path) is not str:
+            raise ReviewHandoffError("changed_files contains an unsafe path")
+        try:
+            byte_count = len(path.encode("utf-8"))
+        except UnicodeEncodeError as exc:
+            raise ReviewHandoffError("changed_files contains invalid UTF-8") from exc
+        if (
+            not path
+            or path != path.strip()
+            or byte_count > MAX_PATH_BYTES
+            or path.startswith("/")
+            or "\\" in path
+            or ":" in path
+            or any(ord(character) < 32 or ord(character) == 127 for character in path)
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or str(PurePosixPath(path)) != path
+            or path in seen
+        ):
+            raise ReviewHandoffError("changed_files contains an unsafe or duplicate path")
+        seen.add(path)
+        paths.append(path)
+    return sorted(paths)
+
+
+def _delta_counts(value: object, changed_file_count: int) -> dict[str, int]:
+    if value is None:
+        supplied: dict[str, int] = {}
+    elif type(value) is dict:
+        supplied = value
+    else:
+        raise ReviewHandoffError("delta must contain counts only")
+    if set(supplied) - _DELTA_COUNT_KEYS:
+        raise ReviewHandoffError("delta contains non-count fields")
+    counts = {"changed_file_count": changed_file_count}
+    for key, count in supplied.items():
+        if type(count) is not int or not 0 <= count <= MAX_DELTA_COUNT:
+            raise ReviewHandoffError("delta counts must be bounded nonnegative integers")
+        if key == "changed_file_count" and count != changed_file_count:
+            raise ReviewHandoffError("delta changed_file_count disagrees with changed_files")
+        counts[key] = count
+    return counts
+
+
+def build_handoff(
+    repository: str,
+    pr: int,
+    review_kind: str,
+    base_sha: str,
+    head_sha: str,
+    tree_sha: str,
+    changed_files: list[str] | tuple[str, ...],
+    qualification_status: str,
+    qualification_evidence_digest: str,
+    previous_validated_verdict: str | None = None,
+    previous_head: str | None = None,
+    delta: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Build an integrity-bound metadata request after the caller verifies evidence.
+
+    Only paths and numeric change counts are included; source, diff, comments,
+    credentials, and executable instructions are outside this protocol.
+    """
+    if type(repository) is not str or repository != REPOSITORY:
+        raise ReviewHandoffError("repository must be the canonical repository")
+    if type(pr) is not int or not 1 <= pr <= 2_147_483_647:
+        raise ReviewHandoffError("pr must be a positive GitHub PR number")
+    if type(review_kind) is not str or review_kind not in {"CODE", "SECURITY"}:
+        raise ReviewHandoffError("review_kind must be CODE or SECURITY")
+    base = _require_sha("base_sha", base_sha)
+    head = _require_sha("head_sha", head_sha)
+    tree = _require_sha("tree_sha", tree_sha)
+    if base == head:
+        raise ReviewHandoffError("base_sha and head_sha must differ")
+    if type(qualification_status) is not str or qualification_status != "PASS":
+        raise ReviewHandoffError("verified exact qualification PASS is required")
+    if (
+        type(qualification_evidence_digest) is not str
+        or _DIGEST.fullmatch(qualification_evidence_digest) is None
+    ):
+        raise ReviewHandoffError("qualification evidence digest must be SHA-256")
+    paths = _changed_paths(changed_files)
+    if previous_head is not None:
+        _require_sha("previous_head", previous_head)
+    if previous_validated_verdict is not None:
+        if (
+            type(previous_validated_verdict) is not str
+            or previous_validated_verdict not in _PRIOR_VERDICTS
+            or previous_head is None
+        ):
+            raise ReviewHandoffError("previous verdict requires a validated prior head")
+    if review_kind == "SECURITY" and (
+        previous_validated_verdict != "CODE_PASS" or previous_head != head
+    ):
+        raise ReviewHandoffError("SECURITY handoff requires exact-head CODE PASS")
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "event": "CHATGPT_REVIEW_REQUIRED",
+        "provider": "ChatGPT",
+        "verdict_authority": False,
+        "repository": repository,
+        "pr": pr,
+        "review_kind": review_kind,
+        "base_sha": base,
+        "head_sha": head,
+        "tree_sha": tree,
+        "exact_head_verified": True,
+        "changed_files": paths,
+        "qualification": {
+            "status": "PASS",
+            "evidence_digest": qualification_evidence_digest,
+        },
+        "previous_validated_verdict": previous_validated_verdict,
+        "previous_head": previous_head,
+        "delta": _delta_counts(delta, len(paths)),
+    }
+    payload["handoff_sha256"] = hashlib.sha256(_canonical_bytes(payload)).hexdigest()
+    if len(_canonical_bytes(payload)) > MAX_HANDOFF_BYTES:
+        raise ReviewHandoffError("canonical handoff exceeds 8192 bytes")
+    return payload
 
 
 def _supports_color() -> bool:

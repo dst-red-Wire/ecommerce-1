@@ -57,6 +57,26 @@ bundle:
   missing_or_mismatched_digest: FAIL
   wrong_head_or_tree: FAIL
 
+controller_compatibility:
+  schema_version: 1
+  kind: QualificationCompatibilityEnvelope
+  authority: exact-pr-base-sha-controller
+  head_controller_authority: forbidden
+  root: .context/evidence/controller-compatibility/v1
+  envelope_path: .context/evidence/controller-compatibility/v1/envelopes/<pr>/<head>/<digest>.json
+  raw_proof_path: .context/evidence/controller-compatibility/v1/raw/<head>/<digest>.json
+  performance_audit_path: .context/evidence/controller-compatibility/v1/audit/<head>/<digest>.json
+  prior_head_artifacts: data-only-content-addressed-history
+  canonicalization: sorted-keys-compact-ascii
+  digest: sha256-of-canonical-envelope-without-envelope_sha256
+  required_binding: [repository, pr, base_sha, head_sha, tree_sha]
+  qualification_source: independently-validated-exact-base-proof
+  required_qualification: [identity, raw_proof_sha256, performance_audit_sha256, gate_results]
+  provenance: [controller_source, controller_path, controller_sha256, raw_evidence_kind]
+  timestamp_role: informational-only
+  self_declared_pass: forbidden
+  missing_or_invalid: fail_closed
+
 gate_records:
   required:
     - gate

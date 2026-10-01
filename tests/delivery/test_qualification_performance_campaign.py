@@ -57,7 +57,9 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
     def test_status_color_is_tty_only_and_respects_no_color(self):
         with (
             mock.patch.object(CAMPAIGN.sys.stdout, "isatty", return_value=True),
-            mock.patch.dict(CAMPAIGN.os.environ, {"TERM": "xterm-256color"}, clear=False),
+            mock.patch.dict(
+                CAMPAIGN.os.environ, {"TERM": "xterm-256color"}, clear=False
+            ),
         ):
             CAMPAIGN.os.environ.pop("NO_COLOR", None)
             self.assertEqual("\033[32mPASS\033[0m", CAMPAIGN._paint("PASS", "32"))
@@ -71,7 +73,9 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertEqual(4.0, comparison["speedup"])
 
     def test_campaign_is_python_only_and_preserves_native_dependency_caches(self):
-        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
+        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn(".sh", source)
         self.assertIn("qualification_cache.cache_root()", source)
         self.assertNotIn("GOMODCACHE", source)
@@ -80,15 +84,21 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
         self.assertIn("ECOMMERCE_FORCE_FULL_QUALIFICATION", source)
 
     def test_synthetic_product_impact_targets_handwritten_source_only(self):
-        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
-        self.assertIn('services" / "product" / "internal" / "domain" / "product.go', source)
+        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'services" / "product" / "internal" / "domain" / "product.go', source
+        )
         self.assertIn("qualificationPerformanceCampaignMarker", source)
         self.assertIn('"/generated/"', source)
         self.assertIn('"/sqlcgen/"', source)
         self.assertNotIn('rglob("*.go")', source)
 
     def test_final_markdown_report_contains_required_29th_point_sections(self):
-        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(encoding="utf-8")
+        source = (ROOT / "scripts" / "qualification_performance_campaign.py").read_text(
+            encoding="utf-8"
+        )
         for heading in (
             "BRANCH",
             "HEAD",
@@ -123,24 +133,39 @@ class QualificationPerformanceCampaignTests(unittest.TestCase):
     def test_finish_pr_uses_central_qualification_workflow(self):
         repoctl = (ROOT / "scripts" / "repoctl.py").read_text(encoding="utf-8")
         self.assertIn('qualification_workflow("qualification_proof")', repoctl)
-        self.assertIn("_valid_performance_audit(base_ref, head)", repoctl)
-        self.assertIn("run make qualification-proof on the exact clean head", repoctl)
-        self.assertIn('proof_workflow.get("performance_campaign_required") is True', repoctl)
-        self.assertIn("run make perf-campaign on the exact clean head", repoctl)
+        self.assertIn(
+            "_fresh_qualification_for_finish(base_ref, head, name_with_owner)", repoctl
+        )
+        self.assertIn(
+            "_valid_exact_evidence(base_ref, head, evidence_path=evidence)", repoctl
+        )
+        self.assertIn(
+            "_valid_performance_audit(base_ref, head, audit_path=audit)", repoctl
+        )
+        self.assertIn(
+            'proof_workflow.get("performance_campaign_required") is True', repoctl
+        )
 
-    def test_ci_evidence_makes_exact_proof_merge_authoritative_and_campaign_optional(self):
-        contract = (ROOT / "config" / "contracts" / "ci-evidence.yaml").read_text(encoding="utf-8")
+    def test_ci_evidence_makes_exact_proof_merge_authoritative_and_campaign_optional(
+        self,
+    ):
+        contract = (ROOT / "config" / "contracts" / "ci-evidence.yaml").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("qualification_proof:", contract)
         self.assertIn("exact_pass_evidence_required: true", contract)
         self.assertIn("performance_campaign:", contract)
         self.assertIn("required_before_merge: false", contract)
         self.assertIn("budget_failure_blocks_readiness: false", contract)
-        self.assertIn("repetitions_source: workflows.performance_campaign.repetitions", contract)
+        self.assertIn(
+            "repetitions_source: workflows.performance_campaign.repetitions", contract
+        )
         self.assertIn(
             "performance_audit_output_source: workflows.qualification_proof.performance_audit_output",
             contract,
         )
         self.assertIn("conditional_content_cache_fields:", contract)
+
 
 if __name__ == "__main__":
     unittest.main()
