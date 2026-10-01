@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import subprocess
@@ -19,6 +20,30 @@ POLICY_PATH = "config/contracts/review-policy.yaml"
 CONTROLLER_PATH = "scripts/merge_risk.py"
 MAX_CHANGED_FILES = 10_000
 MAX_CHANGED_CONTENT_BYTES = 16 * 1024 * 1024
+MAX_CONTENT_FINDINGS = 128
+MAX_ASSESSMENT_BYTES = 8192
+CONTENT_ASSESSMENT_KINDS = frozenset(
+    {"comment", "read-only-validation", "metadata"}
+)
+
+CONTENT_ASSESSMENT_POLICY = {
+    "mode": "controlled-arbitration",
+    "scope": "content-findings-only",
+    "marker": "chatgpt-risk-content-assessment:v1",
+    "exact_binding": ["pr", "base_sha", "head_sha", "findings_sha256"],
+    "baseline_digest_field": "content_findings_sha256",
+    "required_kinds": ["code", "security"],
+    "independent_attestations": "required",
+    "dismissal": "matching-code-and-security",
+    "accepted_kinds": ["comment", "read-only-validation", "metadata"],
+    "path_matches": "immutable",
+    "minimum_classification": "SENSITIVE",
+    "owner_authorization": "explicit-repository-owner",
+    "owner_after_attestations": "required",
+    "invalid_or_missing": "retain-original-tier",
+    "max_findings": MAX_CONTENT_FINDINGS,
+    "max_attestation_bytes": MAX_ASSESSMENT_BYTES,
+}
 
 RISK_CLASSES = ("LOW_RISK", "SENSITIVE", "PRIVILEGED", "PRODUCTION")
 RISK_REQUIREMENTS = {
@@ -127,6 +152,7 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
         "classifications",
         "required_inputs",
         "class_requirements",
+        "content_assessment",
         "low_risk",
         "sensitive",
         "privileged",
@@ -154,6 +180,8 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
             != ["pr", "base_sha", "head_sha", "changed_files", "resolved_capabilities"],
         )
     ):
+        return False
+    if policy.get("content_assessment") != CONTENT_ASSESSMENT_POLICY:
         return False
     required_for = list(MERGE_RISK_CAPABILITIES)
     if owner_boundary.get("mode") != "risk-based":
@@ -333,6 +361,207 @@ def merge_risk_policy_is_valid(policy: object, owner_boundary: object) -> bool:
     return True
 
 
+def _canonical_sha256(value: object) -> str:
+    raw = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+
+
+def _changed_line_records(diff: str) -> list[dict] | None:
+    """Keep the exact side and hunk line for each changed line."""
+    records: list[dict] = []
+    old_line = new_line = None
+    old_end = new_end = 0
+    for raw in diff.splitlines():
+        if raw.startswith("@@ "):
+            if old_line is not None and (old_line != old_end or new_line != new_end):
+                return None
+            hunk = re.match(
+                r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@",
+                raw,
+            )
+            if hunk is None:
+                return None
+            old_line, old_count, new_line, new_count = (
+                int(hunk.group(1)), int(hunk.group(2) or 1),
+                int(hunk.group(3)), int(hunk.group(4) or 1),
+            )
+            old_end = old_line + old_count
+            new_end = new_line + new_count
+            continue
+        if old_line is None:
+            continue
+        if raw.startswith("\\ No newline at end of file"):
+            continue
+        if raw.startswith("-"):
+            records.append({"side": "-", "line": old_line, "text": raw[1:]})
+            old_line += 1
+        elif raw.startswith("+"):
+            records.append({"side": "+", "line": new_line, "text": raw[1:]})
+            new_line += 1
+        elif raw.startswith(" "):
+            old_line += 1
+            new_line += 1
+        else:
+            return None
+        if old_line > old_end or new_line > new_end:
+            return None
+    if old_line is not None and (old_line != old_end or new_line != new_end):
+        return None
+    return records
+
+
+def _content_findings(
+    policy: dict,
+    changed_files: list[str],
+    file_changes: dict[str, str],
+    changed_lines: dict[str, list[dict]] | None,
+) -> tuple[list[dict], set[tuple[str, str]], bool]:
+    """Inventory only bounded, single-line high-tier content matches."""
+    if not isinstance(changed_lines, dict) or set(changed_lines) != set(changed_files):
+        return [], set(), False
+    spans: dict[str, list[tuple[int, int, dict]]] = {}
+    for path in changed_files:
+        records = changed_lines[path]
+        if not isinstance(records, list) or any(
+            not isinstance(item, dict)
+            or set(item) != {"side", "line", "text"}
+            or item["side"] not in {"+", "-"}
+            or type(item["line"]) is not int
+            or item["line"] < 1
+            or not isinstance(item["text"], str)
+            for item in records
+        ):
+            return [], set(), False
+        if "\n".join(item["text"] for item in records) != file_changes[path]:
+            return [], set(), False
+        offset = 0
+        spans[path] = []
+        for item in records:
+            end = offset + len(item["text"])
+            spans[path].append((offset, end, item))
+            offset = end + 1
+    findings: dict[str, dict] = {}
+    unmapped: set[tuple[str, str]] = set()
+    for tier, name in (("PRODUCTION", "production"), ("PRIVILEGED", "privileged")):
+        for capability, rule in policy[name]["capabilities"].items():
+            for path in changed_files:
+                if not _path_matches(path, rule.get("content_paths", [])):
+                    continue
+                blob = file_changes[path]
+                for rule_index, pattern in enumerate(rule.get("content_patterns", [])):
+                    for match in re.finditer(
+                        pattern, blob, flags=re.IGNORECASE | re.MULTILINE
+                    ):
+                        matching = [
+                            item for start, end, item in spans[path]
+                            if match.start() >= start
+                            and match.end() <= end
+                            and match.start() < match.end()
+                        ]
+                        if len(matching) != 1:
+                            unmapped.add((tier, capability))
+                            continue
+                        item = matching[0]
+                        identity = {
+                            "tier": tier,
+                            "capability": capability,
+                            "path": path,
+                            "side": item["side"],
+                            "line": item["line"],
+                            "rule_index": rule_index,
+                            "line_sha256": "sha256:" + hashlib.sha256(
+                                item["text"].encode("utf-8")
+                            ).hexdigest(),
+                        }
+                        finding = {"id": _canonical_sha256(identity), **identity}
+                        findings[finding["id"]] = finding
+                        if len(findings) > MAX_CONTENT_FINDINGS:
+                            return [], set(), False
+    result = sorted(findings.values(), key=lambda item: item["id"])
+    return result, unmapped, True
+
+
+def _disposed_finding_ids(
+    assessment: object,
+    *,
+    base_sha: str,
+    head_sha: str,
+    pr_number: int | None,
+    findings: list[dict],
+) -> set[str]:
+    """A bad or incomplete assessment never changes the original risk tier."""
+    if not isinstance(assessment, dict) or set(assessment) != {
+        "schema_version", "pr", "base_sha", "head_sha",
+        "findings_sha256", "dispositions",
+    }:
+        return set()
+    try:
+        if len(json.dumps(assessment, ensure_ascii=True).encode("utf-8")) > MAX_ASSESSMENT_BYTES:
+            return set()
+    except (TypeError, ValueError):
+        return set()
+    if (
+        type(assessment["schema_version"]) is not int
+        or assessment["schema_version"] != 1
+        or type(assessment["pr"]) is not int
+        or assessment["pr"] != pr_number
+        or assessment["base_sha"] != base_sha
+        or assessment["head_sha"] != head_sha
+        or assessment["findings_sha256"] != _canonical_sha256(findings)
+        or not isinstance(assessment["dispositions"], list)
+        or len(assessment["dispositions"]) != len(findings)
+    ):
+        return set()
+    known = {item["id"] for item in findings}
+    disposed: set[str] = set()
+    for item in assessment["dispositions"]:
+        if not isinstance(item, dict) or set(item) != {
+            "finding_id", "kind", "rationale", "effect_trace",
+        }:
+            return set()
+        finding_id = item["finding_id"]
+        if (
+            not isinstance(finding_id, str)
+            or finding_id not in known
+            or finding_id in disposed
+            or not isinstance(item["kind"], str)
+            or item["kind"] not in CONTENT_ASSESSMENT_KINDS
+            or any(
+                not isinstance(item[field], str)
+                or not item[field].strip()
+                for field in ("rationale", "effect_trace")
+            )
+        ):
+            return set()
+        disposed.add(finding_id)
+    return disposed if disposed == known else set()
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate content assessment key")
+        value[key] = item
+    return value
+
+
+def _read_assessment_file(path: Path | None) -> object:
+    if path is None:
+        return None
+    try:
+        if path.stat().st_size > MAX_ASSESSMENT_BYTES:
+            return None
+        raw = path.read_bytes()
+        if len(raw) > MAX_ASSESSMENT_BYTES:
+            return None
+        return json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return None
+
+
 def _path_matches(path: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, pattern) for pattern in patterns)
 
@@ -370,7 +599,9 @@ def _result(
     reasons: list[str],
     matched_capabilities: list[str],
     analysis_complete: bool,
+    content_findings: list[dict] | None = None,
 ) -> dict:
+    inventory = content_findings or []
     return {
         "classification": classification,
         "requirements": dict(RISK_REQUIREMENTS[classification]),
@@ -385,6 +616,8 @@ def _result(
         "reasons": sorted(set(reasons)),
         "matched_capabilities": sorted(set(matched_capabilities)),
         "analysis_complete": analysis_complete,
+        "content_findings": inventory,
+        "content_findings_sha256": _canonical_sha256(inventory),
     }
 
 
@@ -432,7 +665,7 @@ def _policy_at_base(root: Path, base_sha: str) -> dict:
 
 def _git_inputs(
     root: Path, base_sha: str, head_sha: str
-) -> tuple[list[str], dict[str, str]]:
+) -> tuple[list[str], dict[str, str], dict[str, list[dict]] | None]:
     for label, sha in (("base", base_sha), ("head", head_sha)):
         if re.fullmatch(r"[0-9a-f]{40}", sha or "") is None:
             raise RuntimeError(f"{label} SHA is not exact")
@@ -478,6 +711,8 @@ def _git_inputs(
     if len(changed_files) != len(set(changed_files)):
         raise RuntimeError("diff contains duplicate or ambiguous paths")
     changes: dict[str, str] = {}
+    records_by_path: dict[str, list[dict]] = {}
+    inventory_supported = True
     changed_content_bytes = 0
     for path in sorted(changed_files):
         numstat = _git(
@@ -508,12 +743,18 @@ def _git_inputs(
             "--",
             path,
         )
-        changed_lines = [
-            line[1:]
-            for line in diff.splitlines()
-            if (line.startswith("+") and not line.startswith("+++"))
-            or (line.startswith("-") and not line.startswith("---"))
-        ]
+        records = _changed_line_records(diff)
+        if records is None:
+            inventory_supported = False
+            changed_lines = [
+                line[1:]
+                for line in diff.splitlines()
+                if (line.startswith("+") and not line.startswith("+++"))
+                or (line.startswith("-") and not line.startswith("---"))
+            ]
+        else:
+            records_by_path[path] = records
+            changed_lines = [item["text"] for item in records]
         changes[path] = "\n".join(changed_lines)
         changed_content_bytes += len(changes[path].encode("utf-8"))
         if changed_content_bytes > MAX_CHANGED_CONTENT_BYTES:
@@ -522,7 +763,9 @@ def _git_inputs(
             )
     if set(changes) != set(changed_files):
         raise RuntimeError("partial exact-SHA changed-file analysis")
-    return sorted(changed_files), changes
+    return sorted(changed_files), changes, (
+        records_by_path if inventory_supported else None
+    )
 
 
 def evaluate_merge_risk(
@@ -533,8 +776,10 @@ def evaluate_merge_risk(
     pr_number: int | None,
     changed_files: list[str],
     file_changes: dict[str, str],
+    changed_lines: dict[str, list[dict]] | None = None,
+    assessment: object = None,
 ) -> dict:
-    """Pure deterministic capability/path classification over complete exact-SHA inputs."""
+    """Pure exact-SHA classification; an assessed content signal never hides a path anchor."""
     if re.fullmatch(r"[0-9a-f]{40}", base_sha or "") is None:
         return sensitive_result(
             base_sha=base_sha,
@@ -582,14 +827,42 @@ def evaluate_merge_risk(
             changed_files=changed_files if isinstance(changed_files, list) else [],
             reason="partial-or-ambiguous-diff",
         )
+    findings, unmapped, inventory_complete = _content_findings(
+        policy, changed_files, file_changes, changed_lines
+    )
+    disposed = (
+        _disposed_finding_ids(
+            assessment, base_sha=base_sha, head_sha=head_sha,
+            pr_number=pr_number, findings=findings,
+        )
+        if inventory_complete else set()
+    )
     for classification, tier_name in (
         ("PRODUCTION", "production"),
         ("PRIVILEGED", "privileged"),
         ("SENSITIVE", "sensitive"),
     ):
-        matched = _matched_capabilities(
-            policy[tier_name]["capabilities"], changed_files, file_changes
-        )
+        capabilities = policy[tier_name]["capabilities"]
+        matched = _matched_capabilities(capabilities, changed_files, file_changes)
+        if classification in {"PRODUCTION", "PRIVILEGED"} and disposed:
+            for capability in tuple(matched):
+                rule = capabilities[capability]
+                anchored = any(
+                    _path_matches(path, rule.get("paths", []))
+                    for path in changed_files
+                )
+                associated = [
+                    item for item in findings
+                    if item["tier"] == classification
+                    and item["capability"] == capability
+                ]
+                if (
+                    not anchored
+                    and (classification, capability) not in unmapped
+                    and associated
+                    and all(item["id"] in disposed for item in associated)
+                ):
+                    matched.remove(capability)
         if matched:
             return _result(
                 classification,
@@ -597,9 +870,10 @@ def evaluate_merge_risk(
                 head_sha=head_sha,
                 pr_number=pr_number,
                 changed_files=changed_files,
-                reasons=sorted(matched),
+                reasons=sorted(matched | ({"content-assessment-applied"} if disposed else set())),
                 matched_capabilities=sorted(matched),
                 analysis_complete=True,
+                content_findings=findings,
             )
     unclassified = [
         path
@@ -613,9 +887,23 @@ def evaluate_merge_risk(
             head_sha=head_sha,
             pr_number=pr_number,
             changed_files=changed_files,
-            reasons=[f"unclassified-path:{path}" for path in unclassified],
+            reasons=[f"unclassified-path:{path}" for path in unclassified]
+            + (["content-assessment-applied"] if disposed else []),
             matched_capabilities=[],
             analysis_complete=True,
+            content_findings=findings,
+        )
+    if disposed:
+        return _result(
+            "SENSITIVE",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            pr_number=pr_number,
+            changed_files=changed_files,
+            reasons=["content-assessment-applied"],
+            matched_capabilities=[],
+            analysis_complete=True,
+            content_findings=findings,
         )
     return _result(
         "LOW_RISK",
@@ -626,6 +914,7 @@ def evaluate_merge_risk(
         reasons=[],
         matched_capabilities=[],
         analysis_complete=True,
+        content_findings=findings,
     )
 
 
@@ -635,13 +924,16 @@ def classify_merge_risk(
     pr_number: int | None = None,
     *,
     root: Path | None = None,
+    assessment_file: Path | None = None,
 ) -> dict:
     """Classify with this exact-base controller; every incomplete input is sensitive."""
     repository = (root or Path.cwd()).resolve()
     changed_files: list[str] = []
     try:
         policy = _policy_at_base(repository, base_sha)
-        changed_files, file_changes = _git_inputs(repository, base_sha, head_sha)
+        changed_files, file_changes, changed_lines = _git_inputs(
+            repository, base_sha, head_sha
+        )
         return evaluate_merge_risk(
             policy,
             base_sha=base_sha,
@@ -649,6 +941,8 @@ def classify_merge_risk(
             pr_number=pr_number,
             changed_files=changed_files,
             file_changes=file_changes,
+            changed_lines=changed_lines,
+            assessment=_read_assessment_file(assessment_file),
         )
     except (
         OSError,
@@ -672,10 +966,14 @@ def main() -> int:
     parser.add_argument("--base-sha", required=True)
     parser.add_argument("--head-sha", required=True)
     parser.add_argument("--pr", type=int)
+    parser.add_argument("--assessment-file", type=Path)
     args = parser.parse_args()
     print(
         json.dumps(
-            classify_merge_risk(args.base_sha, args.head_sha, args.pr),
+            classify_merge_risk(
+                args.base_sha, args.head_sha, args.pr,
+                assessment_file=args.assessment_file,
+            ),
             sort_keys=True,
             separators=(",", ":"),
         )

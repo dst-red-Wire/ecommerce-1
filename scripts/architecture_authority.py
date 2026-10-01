@@ -1536,6 +1536,29 @@ def validate(root):
         pr_loop = review_policy.get("repository_delivery", {}).get("pr_loop", {})
         owner_boundary = pr_loop.get("owner_boundary", {})
         risk_classification = pr_loop.get("risk_classification", {})
+        expected_content_assessment = {
+            "mode": "controlled-arbitration",
+            "scope": "content-findings-only",
+            "marker": "chatgpt-risk-content-assessment:v1",
+            "exact_binding": ["pr", "base_sha", "head_sha", "findings_sha256"],
+            "baseline_digest_field": "content_findings_sha256",
+            "required_kinds": ["code", "security"],
+            "independent_attestations": "required",
+            "dismissal": "matching-code-and-security",
+            "accepted_kinds": ["comment", "read-only-validation", "metadata"],
+            "path_matches": "immutable",
+            "minimum_classification": "SENSITIVE",
+            "owner_authorization": "explicit-repository-owner",
+            "owner_after_attestations": "required",
+            "invalid_or_missing": "retain-original-tier",
+            "max_findings": 128,
+            "max_attestation_bytes": 8192,
+        }
+        if risk_classification.get("content_assessment") != expected_content_assessment:
+            errors.append(
+                "review policy must preserve bounded exact-SHA content assessment "
+                "without path dismissal or owner bypass"
+            )
         required_risk_capabilities = [
             "governance",
             "delivery-authority",

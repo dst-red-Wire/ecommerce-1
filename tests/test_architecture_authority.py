@@ -548,6 +548,59 @@ graph LR
                 monitor.unlink()
             self.assertEqual([], authority.validate(root))
 
+    def test_content_assessment_contract_cannot_weaken_risk_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.copy_repository(directory)
+            policy = root / "config/contracts/review-policy.yaml"
+            original = policy.read_text(encoding="utf-8")
+            prefix, remainder = original.split("      content_assessment:\n", 1)
+            block, suffix = remainder.split("      classifications:", 1)
+            assessment = "      content_assessment:\n" + block
+            expected = (
+                "review policy must preserve bounded exact-SHA content assessment "
+                "without path dismissal or owner bypass"
+            )
+            self.assertEqual([], authority.validate(root))
+            mutations = (
+                ("scope: content-findings-only", "scope: all-findings"),
+                ("chatgpt-risk-content-assessment:v1", "untrusted-assessment:v1"),
+                ("head_sha, findings_sha256", "head_sha"),
+                ("baseline_digest_field: content_findings_sha256",
+                 "baseline_digest_field: arbitrary_digest"),
+                ("required_kinds: [code, security]", "required_kinds: [code]"),
+                ("independent_attestations: required",
+                 "independent_attestations: optional"),
+                ("dismissal: matching-code-and-security", "dismissal: either-review"),
+                ("accepted_kinds: [comment, read-only-validation, metadata]",
+                 "accepted_kinds: [comment, executable-change]"),
+                ("path_matches: immutable", "path_matches: disposable"),
+                ("minimum_classification: SENSITIVE",
+                 "minimum_classification: LOW_RISK"),
+                ("owner_authorization: explicit-repository-owner",
+                 "owner_authorization: not-required-by-policy"),
+                ("owner_after_attestations: required",
+                 "owner_after_attestations: optional"),
+                ("invalid_or_missing: retain-original-tier",
+                 "invalid_or_missing: SENSITIVE"),
+                ("max_findings: 128", "max_findings: 129"),
+                ("max_attestation_bytes: 8192", "max_attestation_bytes: 8193"),
+            )
+            for before, after in mutations:
+                with self.subTest(before=before):
+                    self.assertIn(before, assessment)
+                    candidate = assessment.replace(before, after, 1)
+                    policy.write_text(
+                        prefix + candidate + "      classifications:" + suffix,
+                        encoding="utf-8",
+                    )
+                    self.assertIn(expected, authority.validate(root))
+            policy.write_text(
+                prefix + "      classifications:" + suffix, encoding="utf-8"
+            )
+            self.assertIn(expected, authority.validate(root))
+            policy.write_text(original, encoding="utf-8")
+            self.assertEqual([], authority.validate(root))
+
     def test_codex_is_execution_fallback_only_when_chatgpt_cannot_execute(self):
         with tempfile.TemporaryDirectory() as directory:
             root = self.copy_repository(directory)

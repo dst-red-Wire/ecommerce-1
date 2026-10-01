@@ -308,6 +308,23 @@ repository_delivery:
       unknown_or_ambiguous: sensitive
       partial_analysis: sensitive
       git_error: sensitive
+      content_assessment:
+        mode: controlled-arbitration
+        scope: content-findings-only
+        marker: chatgpt-risk-content-assessment:v1
+        exact_binding: [pr, base_sha, head_sha, findings_sha256]
+        baseline_digest_field: content_findings_sha256
+        required_kinds: [code, security]
+        independent_attestations: required
+        dismissal: matching-code-and-security
+        accepted_kinds: [comment, read-only-validation, metadata]
+        path_matches: immutable
+        minimum_classification: SENSITIVE
+        owner_authorization: explicit-repository-owner
+        owner_after_attestations: required
+        invalid_or_missing: retain-original-tier
+        max_findings: 128
+        max_attestation_bytes: 8192
       classifications: [LOW_RISK, SENSITIVE, PRIVILEGED, PRODUCTION]
       required_inputs:
         - pr
