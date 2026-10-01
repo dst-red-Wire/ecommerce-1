@@ -564,3 +564,21 @@ repository_delivery:
       sync_on_drift: required
       delivery: qualified-pull-request
       direct_default_branch_write: forbidden
+    verification:
+      required_after_finish_pr: true
+      output: .context/evidence/post-merge/<merge_sha>.json
+      github_merged_state_alone: insufficient
+      required_checks:
+        - github-pr-merged-exact-head
+        - merge-commit-known
+        - merge-commit-signed
+        - signature-verified
+        - main-contains-merge
+        - qualified-head-tree
+        - intended-merged-tree
+        - no-unexpected-mutation
+        - remote-branch-deleted
+        - local-branch-deleted
+        - clean-worktree
+        - roadmap-sync
+      work_item_close_requires_pass: true

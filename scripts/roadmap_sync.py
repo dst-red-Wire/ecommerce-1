@@ -177,7 +177,14 @@ def policy() -> dict[str, Any]:
             if set(capabilities) - qce_capabilities:
                 raise RuntimeError(f"roadmap milestone {milestone_id} references unknown QCE capabilities")
             for evidence in runtime:
-                if not isinstance(evidence, dict) or set(evidence) != {"path", "environments"}:
+                if (
+                    not isinstance(evidence, dict)
+                    or not {"path", "environments"}.issubset(evidence)
+                    or set(evidence) - {"path", "environments", "proof_type"}
+                    or evidence.get("proof_type", "runtime") not in {
+                        "runtime", "lab-readiness", "persistent-deployment"
+                    }
+                ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} runtime evidence is invalid")
                 evidence_path = Path(str(evidence["path"]))
                 environments = evidence["environments"]
@@ -191,12 +198,34 @@ def policy() -> dict[str, Any]:
                     or not all(isinstance(environment, str) and environment for environment in environments)
                 ):
                     raise RuntimeError(f"roadmap milestone {milestone_id} runtime evidence is unsafe")
+                if evidence.get("proof_type") == "lab-readiness" and (
+                    milestone_id != "M2.5" or environments != ["lab"]
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} lab readiness is invalid")
+                if (
+                    evidence.get("proof_type") == "persistent-deployment"
+                    and environments != ["management"]
+                ):
+                    raise RuntimeError(f"roadmap milestone {milestone_id} deployment must target management")
             if milestone_id in {"M2.5", "M3", "M4", "M5", "M6", "M7", "M8", "M9"} and not runtime:
                 raise RuntimeError(f"roadmap milestone {milestone_id} requires runtime evidence")
-            if milestone_id == "M2.5" and runtime != [{
-                "path": m25_runtime_evidence.OUTPUT.as_posix(), "environments": ["lab"]
-            }]:
-                raise RuntimeError("M2.5 requires the canonical lab runtime evidence")
+            if milestone_id == "M2.5":
+                expected = [
+                    {
+                        "path": m25_runtime_evidence.OUTPUT.as_posix(),
+                        "environments": ["lab"],
+                        "proof_type": "lab-readiness",
+                    },
+                    {
+                        "path": ".context/evidence/roadmap/M2.5-persistent-mgmt.json",
+                        "environments": ["management"],
+                        "proof_type": "persistent-deployment",
+                    },
+                ]
+                if runtime != expected:
+                    raise RuntimeError(
+                        "M2.5 requires canonical lab and persistent deployment evidence"
+                    )
         elif milestone_id != "M0" or item.get("fixed_status") != "DONE":
             raise RuntimeError("only completed architecture sync may use a fixed roadmap status")
     return value
@@ -320,6 +349,13 @@ def _runtime_evidence_result(
 ) -> tuple[bool, str]:
     path = root / str(declaration["path"])
     relative = path.relative_to(root).as_posix()
+    if declaration.get("proof_type") == "persistent-deployment":
+        # A deployment claim has no authority until a canonical producer can
+        # independently revalidate the persistent runtime identity and state.
+        return False, (
+            "persistent deployment has no registered producer and state verifier: "
+            + relative
+        )
     if not path.is_file():
         return False, f"runtime evidence missing: {relative}"
     try:
@@ -359,12 +395,15 @@ def _runtime_evidence_result(
     age = now.timestamp() - float(created)
     if age < 0 or age > maximum_age:
         return False, f"runtime evidence is stale or future-dated: {relative}"
-    if milestone_id == "M2.5":
+    if milestone_id == "M2.5" and declaration.get("proof_type") != "persistent-deployment":
         try:
             m25_runtime_evidence.validate(root, evidence, head, tree)
         except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError) as exc:
             return False, f"M2.5 runtime sources are invalid: {exc}"
-        if evidence.get("deployment_state") != contract["m25_deployment_state"]:
+        if declaration.get("proof_type") == "lab-readiness":
+            if evidence.get("deployment_state") != "NOT_DEPLOYED":
+                return False, "M2.5 lab evidence must remain NOT_DEPLOYED"
+        elif evidence.get("deployment_state") != contract["m25_deployment_state"]:
             return False, "M2.5 lab readiness does not prove persistent MGMT deployment"
     return True, relative
 
@@ -708,13 +747,11 @@ def _write_projection(roadmap_policy: dict[str, Any], projection: dict[str, Any]
     return destination
 
 
-def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
-    roadmap_policy = policy()
+def _document_rendering(roadmap_policy: dict[str, Any]) -> tuple[Path, str]:
+    """Render policy-owned documentation without deriving proof status."""
     path = ROOT / str(roadmap_policy["document"])
     if not path.is_file():
         raise RuntimeError(f"roadmap document is missing: {path.relative_to(ROOT)}")
-    states = tracker_states(gh, roadmap_policy)
-    projection = _current_projection(roadmap_policy, states)
     documentation_statuses = {
         str(milestone["id"]): (
             str(milestone["fixed_status"])
@@ -726,6 +763,30 @@ def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any
     expected = render_document(
         path.read_text(encoding="utf-8"), roadmap_policy, documentation_statuses
     )
+    return path, expected
+
+
+def check_document(*, quiet: bool = False) -> int:
+    """Check rendering only, allowing proof verification without recursion.
+
+    This does not create an evidence projection or establish milestone status.
+    Full check/sync remains responsible for fetching GitHub and deriving proofs.
+    """
+    path, expected = _document_rendering(policy())
+    if path.read_text(encoding="utf-8") != expected:
+        if not quiet:
+            print("ROADMAP_DRIFT")
+        return 1
+    if not quiet:
+        print("PASS roadmap document rendering")
+    return 0
+
+
+def expected_document(gh: str) -> tuple[Path, str, dict[str, Any], dict[str, Any]]:
+    roadmap_policy = policy()
+    path, expected = _document_rendering(roadmap_policy)
+    states = tracker_states(gh, roadmap_policy)
+    projection = _current_projection(roadmap_policy, states)
     return path, expected, projection, roadmap_policy
 
 
@@ -780,7 +841,16 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=["check", "sync"])
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument("--document-only", action="store_true")
     args = parser.parse_args()
+    if args.document_only and args.action != "check":
+        parser.error("--document-only is available only with check")
+    if args.document_only:
+        try:
+            return check_document(quiet=args.quiet)
+        except (RuntimeError, KeyError, ValueError) as exc:
+            print(f"FAIL {exc}", file=sys.stderr)
+            return 2
     gh = shutil.which("gh") or shutil.which("gh.exe")
     if not gh:
         print("FAIL roadmap synchronization requires GitHub CLI", file=sys.stderr)

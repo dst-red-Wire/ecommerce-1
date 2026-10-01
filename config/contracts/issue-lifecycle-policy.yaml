@@ -1,0 +1,40 @@
+version: 1
+kind: IssueLifecyclePolicy
+status: enforced
+architecture_authority: architecture.lock.yaml
+roadmap_authority: config/contracts/roadmap-policy.yaml
+work_package_authority: config/contracts/work-package-policy.yaml
+
+categories: [milestone-tracker, work-item, defect, follow-up]
+hierarchy: [milestone, milestone-tracker, work-item, work-package, pr]
+idempotency:
+  fields: [milestone, work_package_id]
+  existing_open_or_closed_issue: reuse
+  duplicate_key: fail
+relations:
+  milestone_tracker: roadmap-tracker-number
+  work_item_parent: exact-milestone-tracker
+  work_package_binding: exact-work-item-and-milestone
+  pr_primary_work_item: required
+  structured_fields_required: true
+  issue_state_is_technical_proof: false
+  issue_label_is_technical_proof: false
+finding_disposition:
+  blocking_to_follow_up: forbidden
+  follow_up_requires: [non_blocking, outside_scope, deferrable, governance_decision, linked_pr]
+completion:
+  progression: [CONTRACTED, PR_OPEN, QUALIFIED, REVIEWED, MERGED, VERIFIED, CLOSED]
+  invalid_state: BLOCKED
+  required_exact_head_proofs: [qualification, code_review, security_review, acceptance, evidence_bundle]
+  preflight_if_required: true
+  runtime_if_required: true
+  recovery_if_required: true
+  post_merge_required: true
+  post_merge_required_checks:
+    - signature_verified
+    - main_contains_change
+    - qualified_tree_matches
+    - clean_worktree
+    - roadmap_sync
+  manual_issue_close_is_proof: false
+  tracker_close_is_proof: false

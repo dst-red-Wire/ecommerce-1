@@ -78,6 +78,7 @@ repository_governance:
         - product-benchmark
         - branch-cleanup
         - roadmap-check
+        - post-merge-verify
         - m25-runtime-evidence
         - roadmap-sync
         - qce-status
@@ -845,6 +846,8 @@ machine_contracts:
   rate_limit_policy: config/contracts/rate-limit-policy.yaml
   resilience_governance: config/contracts/resilience-governance.yaml
   roadmap_policy: config/contracts/roadmap-policy.yaml
+  issue_lifecycle_policy: config/contracts/issue-lifecycle-policy.yaml
+  work_package_policy: config/contracts/work-package-policy.yaml
   review_budget: config/contracts/review-budget.json
   chatgpt_review_dispatch_policy: config/contracts/chatgpt-review-dispatch-policy.yaml
   review_policy: config/contracts/review-policy.yaml

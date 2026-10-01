@@ -400,7 +400,8 @@ class RoadmapSyncTests(unittest.TestCase):
         source = (ROOT / "scripts/repoctl.py").read_text(encoding="utf-8")
         finish = source[source.index("def finish_pr(") : source.index("def precommit(")]
         self.assertIn("_roadmap_followup_after_merge()", finish)
-        self.assertIn("automatic roadmap synchronization failed", finish)
+        self.assertIn("if cleanup_rc or roadmap_rc:", finish)
+        self.assertIn("post-merge cleanup or roadmap verification is incomplete", finish)
 
         followup = source[source.index("def _roadmap_followup_after_merge(") : source.index("def git_sync(")]
         self.assertIn("roadmap_check(quiet=True)", followup)
@@ -408,6 +409,176 @@ class RoadmapSyncTests(unittest.TestCase):
         self.assertIn("deliver(default_branch, title, title)", followup)
         self.assertNotIn("git push origin main", followup)
 
+
+    def test_m2_5_lab_proof_and_closed_tracker_do_not_prove_deployment(self):
+        policy = self._runtime_policy("M2.5")
+        declaration = policy["milestones"][0]["requirements"]["runtime_evidence"][0]
+        declaration["environments"] = ["management"]
+        declaration["proof_type"] = "persistent-deployment"
+        head, tree = "a" * 40, "b" * 40
+        now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "impl").mkdir()
+            evidence_path = root / declaration["path"]
+            evidence_path.parent.mkdir(parents=True)
+            payload = {
+                "schema_version": 1,
+                "status": "PASS",
+                "exact_commit_evidence": True,
+                "runtime_execution": True,
+                "head_sha": head,
+                "head_tree_sha": tree,
+                "created_at_epoch": now.timestamp(),
+                "milestone": "M2.5",
+                "environment": "lab",
+                "runtime_identity": {"kind": "rke2-cluster", "id": "lab-01"},
+                "outcome": "PASS",
+                "deployment_state": "NOT_DEPLOYED",
+                "deployment_persistence": "ephemeral",
+                "deployment_verified": False,
+            }
+
+            def status(tracker_state: str) -> str:
+                evidence_path.write_text(json.dumps(payload), encoding="utf-8")
+                projection = ROADMAP.derive_projection(
+                    policy,
+                    {99: {"state": tracker_state, "state_reason": "completed", "title": "M2.5"}},
+                    root=root,
+                    qualification_gates={"governance": "PASS"},
+                    head=head,
+                    tree=tree,
+                    now=now,
+                )
+                return projection["milestones"][0]["status"]
+
+            self.assertEqual("IMPLEMENTED", status("closed"))
+            payload["environment"] = "management"
+            payload["deployment_verified"] = True
+            self.assertEqual("IMPLEMENTED", status("closed"))
+            payload["deployment_state"] = "DEPLOYED"
+            self.assertEqual("IMPLEMENTED", status("closed"))
+            payload["deployment_persistence"] = "persistent"
+            self.assertEqual("PARTIAL", status("open"))
+            self.assertEqual("IMPLEMENTED", status("closed"))
+            valid, detail = ROADMAP._runtime_evidence_result(
+                root, declaration, "M2.5", head, tree,
+                policy["status_derivation"]["runtime_evidence_contract"], 86400, now,
+            )
+            self.assertFalse(valid)
+            self.assertIn("no registered producer and state verifier", detail)
+
+    def test_policy_requires_persistent_mgmt_proof(self):
+        policy = ROADMAP.policy()
+        milestone = next(item for item in policy["milestones"] if item["id"] == "M2.5")
+        self.assertEqual(32, milestone["tracker"])
+        self.assertEqual(
+            ["lab-readiness", "persistent-deployment"],
+            [
+                declaration["proof_type"]
+                for declaration in milestone["requirements"]["runtime_evidence"]
+            ],
+        )
+        broken = json.loads(json.dumps(policy))
+        requirement = next(
+            item for item in broken["milestones"] if item["id"] == "M2.5"
+        )["requirements"]
+        requirement["runtime_evidence"] = requirement["runtime_evidence"][:1]
+        with (
+            mock.patch.object(
+                ROADMAP,
+                "load_yaml",
+                side_effect=[
+                    {"machine_contracts": {"roadmap_policy": "config/contracts/roadmap-policy.yaml"}},
+                    broken,
+                    ROADMAP.load_yaml("config/contracts/qualification-execution-policy.yaml"),
+                ],
+            ),
+            self.assertRaisesRegex(RuntimeError, "M2.5 requires canonical lab and persistent"),
+        ):
+            ROADMAP.policy()
+
+    def test_document_only_checks_rendering_without_projecting_proofs(self):
+        with (
+            mock.patch.object(ROADMAP, "tracker_states") as tracker,
+            mock.patch.object(ROADMAP, "_current_projection") as projection,
+            mock.patch.object(ROADMAP, "_write_projection") as writer,
+        ):
+            self.assertEqual(0, ROADMAP.check_document(quiet=True))
+        tracker.assert_not_called()
+        projection.assert_not_called()
+        writer.assert_not_called()
+
+    def test_document_only_rejects_actual_rendering_drift(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = ROOT / "docs/project/MASTER_EXECUTION_PLAN.md"
+            path = root / "docs/project/MASTER_EXECUTION_PLAN.md"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                source.read_text(encoding="utf-8").replace(
+                    "Canonical tracker: GitHub issue `#32`.",
+                    "Canonical tracker: GitHub issue `#15`.", 1,
+                ), encoding="utf-8",
+            )
+            policy = ROADMAP.policy()
+            with (
+                mock.patch.object(ROADMAP, "ROOT", root),
+                mock.patch.object(ROADMAP, "policy", return_value=policy),
+            ):
+                self.assertEqual(1, ROADMAP.check_document(quiet=True))
+
+    def test_document_only_cli_does_not_request_github_or_project_proofs(self):
+        with (
+            mock.patch.object(ROADMAP.sys, "argv", ["roadmap_sync", "check", "--quiet", "--document-only"]),
+            mock.patch.object(ROADMAP.shutil, "which", side_effect=AssertionError("GitHub lookup is forbidden")),
+            mock.patch.object(ROADMAP, "tracker_states", side_effect=AssertionError("proof recursion")),
+            mock.patch.object(ROADMAP, "_current_projection", side_effect=AssertionError("proof recursion")),
+            mock.patch.object(ROADMAP, "_write_projection") as writer,
+        ):
+            self.assertEqual(0, ROADMAP.main())
+        writer.assert_not_called()
+
+    def test_document_only_cannot_be_used_to_sync(self):
+        with (
+            mock.patch.object(ROADMAP.sys, "argv", ["roadmap_sync", "sync", "--document-only"]),
+            mock.patch.object(ROADMAP, "sync") as sync,
+            self.assertRaises(SystemExit) as failure,
+        ):
+            ROADMAP.main()
+        self.assertEqual(2, failure.exception.code)
+        sync.assert_not_called()
+
+    def test_registered_m25_lab_proof_remains_not_deployed(self):
+        from tests import test_m25_runtime_evidence
+
+        fixture = test_m25_runtime_evidence.M25RuntimeEvidenceTests(methodName="runTest")
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        contract = ROADMAP.policy()["status_derivation"]["runtime_evidence_contract"]
+        declaration = {
+            "path": ROADMAP.m25_runtime_evidence.OUTPUT.as_posix(),
+            "environments": ["lab"],
+            "proof_type": "lab-readiness",
+        }
+
+        def result():
+            fixture.write()
+            return ROADMAP._runtime_evidence_result(
+                fixture.root, declaration, "M2.5", test_m25_runtime_evidence.HEAD,
+                test_m25_runtime_evidence.TREE, contract, 86400,
+                datetime.now(timezone.utc),
+            )
+
+        valid, detail = result()
+        self.assertTrue(valid, detail)
+        self.assertEqual("NOT_DEPLOYED", fixture.evidence["deployment_state"])
+        fixture.evidence["deployment_state"] = "DEPLOYED"
+        self.assertFalse(result()[0])
+        fixture.evidence["deployment_state"] = "NOT_DEPLOYED"
+        source = fixture.root / ROADMAP.m25_runtime_evidence._paths(test_m25_runtime_evidence.VM)["rke2_result"]
+        source.unlink()
+        self.assertFalse(result()[0])
 
 if __name__ == "__main__":
     unittest.main()
