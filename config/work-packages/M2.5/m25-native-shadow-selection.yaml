@@ -1,0 +1,69 @@
+id: m25-native-shadow-selection
+milestone: M2.5
+tracker_issue: 32
+work_item_issue: 180
+objective: Select one protected native campaign generation and derive exact-source host recovery evidence from prospective protected observations while retaining the original VM, box, and historical shadows.
+scope:
+  allowed_paths:
+    - scripts/repoctl.py
+    - scripts/native_recovery_evidence.py
+    - scripts/runtime_authority.py
+    - scripts/issue_completion.py
+    - scripts/windows/LabNativeBoot.ps1
+    - docs/engineering/native-recovery-evidence.md
+    - tests/test_native_recovery_evidence.py
+    - tests/test_native_recovery_observations.py
+    - tests/test_runtime_authority.py
+    - tests/test_verified_pr_integration.py
+    - tests/test_issue_completion.py
+    - tests/test_native_boot_bootstrap.py
+    - tests/test_native_network_status.py
+    - tests/test_native_shadow_import.py
+    - config/work-packages/M2.5/m25-native-shadow-selection.yaml
+  forbidden_paths: []
+dependencies: [m25-native-bootstrap-manifest-count]
+acceptance:
+  contracts:
+    - config/contracts/review-policy.yaml
+    - config/contracts/execution-properties-policy.yaml
+    - config/contracts/work-package-policy.yaml
+    - config/contracts/qualification-execution-policy.yaml
+  qualification_gates: [governance, contracts, automation, security, system]
+  runtime_evidence:
+    - .context/evidence/native-recovery/current.json
+  tests:
+    - tests/test_native_boot_bootstrap.py
+    - tests/test_native_network_status.py
+    - tests/test_native_shadow_import.py
+    - tests/test_work_package.py
+    - tests/test_native_recovery_evidence.py
+    - tests/test_native_recovery_observations.py
+    - tests/test_runtime_authority.py
+    - tests/test_verified_pr_integration.py
+    - tests/test_issue_completion.py
+  qce_capabilities: []
+execution:
+  preflight_required: true
+  runtime_required: true
+  recovery_required: true
+  required_capabilities: [toolchain-pinned]
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+  - A recovered old shadow and a new exact-head PREPARED shadow select only the new head for Reboot.
+  - Offline Recover selects the sole active state; a single recovered state is idempotent, while multiple recovered states fail as ambiguous.
+  - Prepare refuses an unrecovered sibling, different retained VM, or reused exact-head shadow before qualification, staging, and elevation.
+  - Malformed, redirected, conflicting-VM, or multiple active shadows fail closed before native elevation.
+  - Status from the target checkout cannot show historical PASS as the new run; completed status and import bind the current exact head.
+  - The original campaign, retained VM, verified box, and historical protected evidence remain intact.
+  - Exact-head FULL qualification, CODE and SECURITY reviews, owner authorization, and merge checks pass.
+  - The registered producer derives capture, restoration, and independent restoration verification from exact-source protected observations and immutable digests.
+  - Missing prospective observations, failed native execution, caller-declared recovery, ambiguous identities, or changed bytes block runtime acceptance.
+  - The deterministic risk remains PRIVILEGED with host-runtime-before-mutation and capture-restore-verify requirements.
+  - No Hetzner provisioning or paid resource mutation occurs.

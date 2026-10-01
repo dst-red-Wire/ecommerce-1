@@ -54,9 +54,29 @@ class NativeNetworkStatusTests(unittest.TestCase):
             state["run_status"] = run_status
         self.state_path.write_text(json.dumps(state), encoding="utf-8")
 
-    def status(self) -> tuple[int, dict | None]:
+    def add_shadow(self, sha: str, phase: str, run_status: str | None = None) -> tuple[Path, Path]:
+        shadow = self.shadows / f"{self.campaign}-{sha}"
+        result_path = shadow / "evidence/network-smoke" / self.campaign / "result.json"
+        result_path.parent.mkdir(parents=True)
+        result_path.write_bytes(self.protected_result.read_bytes())
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state.update({
+            "source_sha": sha, "shadow_root": repoctl._native_shadow_windows_path(shadow),
+            "phase": phase,
+        })
+        state.pop("result_sha256", None)
+        if run_status is None:
+            state.pop("run_status", None)
+        else:
+            state["run_status"] = run_status
+        state_path = shadow / "native-boot.json"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        return state_path, result_path
+
+    def status(self, head_sha: str | None = None) -> tuple[int, dict | None]:
         output = io.StringIO()
         with (contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()),
+              mock.patch.object(repoctl, "git", return_value=head_sha or self.sha),
               mock.patch.object(repoctl.subprocess, "run", return_value=subprocess.CompletedProcess(
                   [], 0, 'VMState="running"\n', ""))):
             code = repoctl.lab_network_status(
@@ -95,6 +115,17 @@ class NativeNetworkStatusTests(unittest.TestCase):
         self.protected_result.write_text(json.dumps(result), encoding="utf-8")
         self.assertNotEqual(self.status()[0], 0)
 
+    def test_single_recovered_shadow_is_historical_for_new_checkout_head(self) -> None:
+        self.create_shadow(phase="RECOVERED", run_status="PASS")
+        result = json.loads(self.protected_result.read_text(encoding="utf-8"))
+        result["resume_runner_source_sha"] = self.sha
+        self.protected_result.write_text(json.dumps(result), encoding="utf-8")
+        state = json.loads(self.state_path.read_text(encoding="utf-8"))
+        state["result_sha256"] = hashlib.sha256(self.protected_result.read_bytes()).hexdigest()
+        self.state_path.write_text(json.dumps(state), encoding="utf-8")
+        self.assertEqual(self.status(head_sha=self.sha)[0], 0)
+        self.assertNotEqual(self.status(head_sha="c" * 40)[0], 0)
+
     def test_failed_native_run_does_not_show_old_protected_result(self) -> None:
         self.create_shadow(phase="RECOVERED", run_status="FAIL")
         code, status = self.status()
@@ -128,9 +159,60 @@ class NativeNetworkStatusTests(unittest.TestCase):
         self.state_path.symlink_to(self.legacy_result)
         self.assertNotEqual(self.status()[0], 0)
 
-    def test_multiple_shadows_fail_closed(self) -> None:
+    def test_state_change_during_status_read_fails_closed(self) -> None:
         self.create_shadow()
-        (self.shadows / f"{self.campaign}-{'c' * 40}").mkdir()
+        original_read_text = Path.read_text
+        reads = 0
+
+        def changed_read(path: Path, *args, **kwargs) -> str:
+            nonlocal reads
+            if path == self.state_path:
+                reads += 1
+                if reads == 2:
+                    state = json.loads(original_read_text(path, *args, **kwargs))
+                    state["phase"] = "RECOVERED"
+                    return json.dumps(state)
+            return original_read_text(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", autospec=True, side_effect=changed_read):
+            self.assertNotEqual(self.status()[0], 0)
+        self.assertEqual(reads, 2)
+
+    def test_recovered_old_shadow_yields_to_new_pending_shadow(self) -> None:
+        self.create_shadow(phase="RECOVERED", run_status="FAIL")
+        old_bytes = self.state_path.read_bytes()
+        new_sha = "c" * 40
+        new_state, new_result = self.add_shadow(new_sha, "PREPARED")
+        code, status = self.status()
+        self.assertEqual(code, 0)
+        self.assertEqual(status["source_sha"], new_sha)
+        self.assertEqual(status["native_phase"], "PREPARED")
+        self.assertEqual(status["native_status"], "PENDING")
+        self.assertEqual(status["evidence"], str(new_result))
+        self.assertIsNone(status["guest_security"])
+        self.assertEqual(self.state_path.read_bytes(), old_bytes)
+        self.assertTrue(new_state.is_file())
+
+    def test_multiple_recovered_shadows_report_only_current_head(self) -> None:
+        self.create_shadow(phase="RECOVERED", run_status="FAIL")
+        new_sha = "c" * 40
+        new_state_path, new_result_path = self.add_shadow(new_sha, "RECOVERED", "PASS")
+        result = json.loads(new_result_path.read_text(encoding="utf-8"))
+        result["resume_runner_source_sha"] = new_sha
+        new_result_path.write_text(json.dumps(result), encoding="utf-8")
+        state = json.loads(new_state_path.read_text(encoding="utf-8"))
+        state["result_sha256"] = hashlib.sha256(new_result_path.read_bytes()).hexdigest()
+        new_state_path.write_text(json.dumps(state), encoding="utf-8")
+        code, status = self.status(head_sha=new_sha)
+        self.assertEqual(code, 0)
+        self.assertEqual(status["source_sha"], new_sha)
+        self.assertEqual(status["native_status"], "PASS")
+        self.assertEqual(status["evidence"], str(new_result_path))
+        self.assertNotEqual(self.status(head_sha="d" * 40)[0], 0)
+
+    def test_multiple_active_shadows_fail_closed(self) -> None:
+        self.create_shadow()
+        self.add_shadow("c" * 40, "PREPARED")
         self.assertNotEqual(self.status()[0], 0)
 
     def test_legacy_result_is_used_only_without_shadow(self) -> None:

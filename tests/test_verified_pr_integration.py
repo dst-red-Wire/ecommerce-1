@@ -546,5 +546,45 @@ class RiskEvidenceGateTests(unittest.TestCase):
                     finish.assert_not_called()
 
 
+class NativeRecoveryRiskPolicyTests(unittest.TestCase):
+    def test_windows_native_changes_keep_privileged_capture_restore_gate(self):
+        import merge_risk
+        import yaml
+
+        document = yaml.safe_load(
+            (ROOT / "config/contracts/review-policy.yaml").read_text(encoding="utf-8")
+        )
+        policy = document["repository_delivery"]["pr_loop"]["risk_classification"]
+        path = "scripts/windows/LabNativeBoot.ps1"
+        result = merge_risk.evaluate_merge_risk(
+            policy, base_sha=BASE, head_sha=HEAD, pr_number=181,
+            changed_files=[path], file_changes={path: "record native recovery observations"},
+        )
+        self.assertEqual("PRIVILEGED", result["classification"], result)
+        self.assertEqual("exact-pr-base-sha", result["controller_source"])
+        self.assertEqual("exact-pr-base-sha", result["policy_source"])
+        self.assertIn("host-mutation", result["matched_capabilities"])
+        requirements = {
+            "owner_authorization": "explicit-repository-owner",
+            "review_depth": "privileged",
+            "runtime_evidence": "host-runtime-before-mutation",
+            "recovery": "capture-restore-verify",
+        }
+        self.assertEqual(requirements, result["requirements"])
+        self.assertEqual(requirements, REPOCTL._RISK_CLASS_REQUIREMENTS["PRIVILEGED"])
+        execution = yaml.safe_load(
+            (ROOT / "config/contracts/execution-properties-policy.yaml").read_text(encoding="utf-8")
+        )
+        recovery = execution["properties"]["recovery"]
+        self.assertEqual("required", recovery["capture_before_mutation"])
+        self.assertEqual("required", recovery["restore_on_failure"])
+        self.assertEqual("required", recovery["restore_verification"])
+        self.assertEqual(
+            ["recovery.capture", "recovery.restore", "recovery.restore_verification"],
+            recovery["proof_fields"],
+        )
+        self.assertEqual("PASS", recovery["proof_success_status"])
+
+
 if __name__ == "__main__":
     unittest.main()

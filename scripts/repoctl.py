@@ -11851,38 +11851,123 @@ def _native_boot_elevation_command(powershell: Path, bootstrap: str) -> list[str
     return command
 
 
-def _native_boot_shadow_state(campaign_id: str, action: str) -> dict:
-    """Locate the one protected prepared state without consulting a later Git HEAD."""
-    matches = list(NATIVE_SHADOW_BASE.glob(f"{campaign_id}-" + "[0-9a-f]" * 40))
-    if len(matches) != 1:
-        raise ValueError("native boot requires one protected state for the campaign")
-    shadow = matches[0]
-    state_path = shadow / "native-boot.json"
-    if (not _native_shadow_path_safe(NATIVE_SHADOW_BASE, state_path)
-        or not state_path.is_file() or state_path.stat().st_size > 1024 * 1024):
-        raise ValueError("native boot protected state is absent or redirected")
-    state = json.loads(state_path.read_text(encoding="utf-8-sig"))
-    if not isinstance(state, dict):
-        raise ValueError("native boot protected state is malformed")
-    source_sha = state.get("source_sha")
-    if (not isinstance(source_sha, str)
-        or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
-        or state.get("campaign_id") != campaign_id
-        or not isinstance(state.get("shadow_root"), str)
-        or state["shadow_root"].casefold() != _native_shadow_windows_path(shadow).casefold()
-        or not isinstance(state.get("vm_id"), str)
+_NATIVE_BOOT_PHASES = {
+    "PREPARED", "BOOT_PENDING", "RUNNING", "RETURN_PENDING", "FAILED", "RECOVERED",
+}
+
+
+def _native_boot_shadow_candidates(campaign_id: str, shadow_root: Path) -> list[tuple[Path, dict]]:
+    """Validate every protected state before selecting one campaign generation."""
+    if re.fullmatch(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}", campaign_id or "") is None:
+        raise ValueError("native boot campaign ID is invalid")
+    if shadow_root.is_symlink() or (shadow_root.exists() and not shadow_root.is_dir()):
+        raise ValueError("native boot protected shadow root is unsafe")
+    matches = sorted(shadow_root.glob(f"{campaign_id}-*"))
+    candidates: list[tuple[Path, dict]] = []
+    for shadow in matches:
+        if re.fullmatch(r"[0-9a-f]{40}", shadow.name[len(campaign_id) + 1:]) is None:
+            raise ValueError("native boot shadow name is invalid")
+        state_path = shadow / "native-boot.json"
+        if (not _native_shadow_path_safe(shadow_root, state_path)
+            or not shadow.is_dir() or not state_path.is_file()
+            or state_path.stat().st_size > 1024 * 1024):
+            raise ValueError("native boot protected state is absent or redirected")
+        state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+        if not isinstance(state, dict):
+            raise ValueError("native boot protected state is malformed")
+        source_sha = state.get("source_sha")
+        phase = state.get("phase")
+        vm_id = state.get("vm_id")
+        if (not isinstance(source_sha, str)
+            or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+            or source_sha != shadow.name[len(campaign_id) + 1:]
+            or state.get("mode") != "NETWORK_SMOKE_NATIVE"
+            or not isinstance(phase, str) or phase not in _NATIVE_BOOT_PHASES
+            or state.get("campaign_id") != campaign_id
+            or not isinstance(state.get("shadow_root"), str)
+            or state["shadow_root"].rstrip("\\").casefold()
+               != _native_shadow_windows_path(shadow).rstrip("\\").casefold()
+            or not isinstance(vm_id, str)
+            or re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", vm_id
+            ) is None
+            or not isinstance(state.get("expected_vm_id"), str)
+            or vm_id.casefold() != state["expected_vm_id"].casefold()):
+            raise ValueError("native boot protected state identity or phase differs")
+        candidates.append((shadow, state))
+    if len({state["vm_id"].casefold() for _, state in candidates}) > 1:
+        raise ValueError("native boot shadows disagree on the retained VM")
+    return candidates
+
+
+def _native_boot_select_shadow(campaign_id: str, action: str, shadow_root: Path,
+                               expected_source_sha: str = "") -> tuple[Path, dict] | None:
+    candidates = _native_boot_shadow_candidates(campaign_id, shadow_root)
+    if not candidates:
+        return None
+    active = [candidate for candidate in candidates if candidate[1]["phase"] != "RECOVERED"]
+    if len(active) > 1:
+        raise ValueError("native boot has multiple unrecovered states for the campaign")
+    if action == "Reboot":
+        if re.fullmatch(r"[0-9a-f]{40}", expected_source_sha or "") is None:
+            raise ValueError("native reboot requires the exact reviewed head SHA")
+        selected = [candidate for candidate in candidates
+                    if candidate[1]["source_sha"] == expected_source_sha]
+        if len(selected) != 1 or active != selected or selected[0][1]["phase"] != "PREPARED":
+            raise ValueError("native reboot protected state differs from the reviewed head")
+        return selected[0]
+    if action not in {"Recover", "Status"}:
+        raise ValueError("unsupported native boot shadow selection")
+    if active:
+        return active[0]
+    if action == "Recover":
+        if len(candidates) == 1:
+            return candidates[0]
+        # Recovery runs from the exact-base controller, whose HEAD is main.
+        # Once all generations are recovered, no offline cleanup is pending.
+        raise ValueError("native boot recovery is ambiguous after multiple recovered states")
+    # Status is a direct checkout query; its HEAD must identify the completed
+    # generation, even when only one historical shadow exists.
+    try:
+        head = git("rev-parse", "HEAD").strip()
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        raise ValueError("native boot status requires an exact checkout HEAD") from exc
+    selected = [candidate for candidate in candidates if candidate[1]["source_sha"] == head]
+    if len(selected) != 1:
+        raise ValueError("native boot recovered states are ambiguous for the current HEAD")
+    return selected[0]
+
+
+def _native_boot_prepare_preflight(campaign_id: str, expected_vm_id: str,
+                                   source_sha: str) -> None:
+    """Require recovered history before preparing a new protected generation."""
+    if (re.fullmatch(r"[0-9a-f]{40}", source_sha or "") is None
         or re.fullmatch(
-            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", state["vm_id"]
-        ) is None
-        or not isinstance(state.get("expected_vm_id"), str)
-        or state["vm_id"].casefold() != state["expected_vm_id"].casefold()
-        or (action == "Reboot" and state.get("phase") != "PREPARED")):
-        raise ValueError("native boot protected state identity or phase differs")
-    return state
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}",
+            expected_vm_id or "",
+        ) is None):
+        raise ValueError("native preparation requires exact source and VM identities")
+    for _, state in _native_boot_shadow_candidates(campaign_id, NATIVE_SHADOW_BASE):
+        if state["phase"] != "RECOVERED":
+            raise ValueError("native preparation requires recovery of the active shadow")
+        if state["vm_id"].casefold() != expected_vm_id.casefold():
+            raise ValueError("native preparation retained VM differs from recovered history")
+        if state["source_sha"] == source_sha:
+            raise ValueError("native preparation exact-head shadow already exists")
 
 
-def _native_boot_shadow_source_sha(campaign_id: str, action: str) -> str:
-    return str(_native_boot_shadow_state(campaign_id, action)["source_sha"])
+def _native_boot_shadow_state(campaign_id: str, action: str,
+                              expected_source_sha: str = "") -> dict:
+    selected = _native_boot_select_shadow(
+        campaign_id, action, NATIVE_SHADOW_BASE, expected_source_sha)
+    if selected is None:
+        raise ValueError("native boot protected state is absent")
+    return selected[1]
+
+
+def _native_boot_shadow_source_sha(campaign_id: str, action: str,
+                                   expected_source_sha: str = "") -> str:
+    return str(_native_boot_shadow_state(campaign_id, action, expected_source_sha)["source_sha"])
 
 
 def _native_uac_worktree_matches(binding) -> tuple[bool, str]:
@@ -12008,7 +12093,7 @@ def _native_uac_fresh_qualification(context: dict[str, object], campaign_id: str
     if not stable:
         raise RuntimeError(reason)
     if action == "Reboot":
-        state = _native_boot_shadow_state(campaign_id, action)
+        state = _native_boot_shadow_state(campaign_id, action, source_sha)
         if state["source_sha"] != source_sha or state["expected_vm_id"] != expected_vm_id:
             raise RuntimeError("native UAC protected state changed before qualification")
     authorized, reason = _native_uac_review_gate(
@@ -12088,7 +12173,7 @@ def lab_network_native_boot(action: str, campaign_id: str,
             from exact_pr_binding import resolve_exact_open_pr
 
             if action == "Reboot":
-                state = _native_boot_shadow_state(campaign_id, action)
+                state = _native_boot_shadow_state(campaign_id, action, str(context["head_sha"]))
                 source_sha = str(state["source_sha"])
                 expected_vm_id = str(state["expected_vm_id"])
             else:
@@ -12118,6 +12203,10 @@ def lab_network_native_boot(action: str, campaign_id: str,
             return fail(review_reason)
         print(f"PASS native UAC PR #{binding.pr_number} exact-SHA review authority: {review_reason}")
     if action == "Prepare":
+        try:
+            _native_boot_prepare_preflight(campaign_id, expected_vm_id, source_sha)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return fail(f"native UAC Prepare shadow preflight failed: {exc}")
         if lab_network_native_prepare(campaign_id):
             return 2
         try:
@@ -12187,6 +12276,11 @@ def lab_network_native_boot(action: str, campaign_id: str,
             gh, binding, campaign_id, expected_vm_id)
         if not review_ready:
             return fail(review_reason)
+    if action == "Prepare":
+        try:
+            _native_boot_prepare_preflight(campaign_id, expected_vm_id, source_sha)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return fail(f"native UAC Prepare shadow changed before elevation: {exc}")
     return run(command, cwd=Path("/mnt/c/Windows"),
                env=_windows_powershell_environment(), check=False).returncode
 
@@ -12277,9 +12371,15 @@ def lab_network_native_boot_with_runtime(command: str, campaign_id: str,
     if (os.environ.get("ECOMMERCE_RUNTIME_ORCHESTRATED") == "1"
         or _NATIVE_UAC_RUNTIME_LOCK_HELD.get()):
         return fail("native UAC caller cannot bypass the runtime lock")
+    if action == "Prepare":
+        try:
+            _native_boot_prepare_preflight(
+                campaign_id, expected_vm_id, str(context["head_sha"]))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return fail(f"native UAC Prepare shadow preflight failed: {exc}")
     if action == "Reboot":
         try:
-            state = _native_boot_shadow_state(campaign_id, action)
+            state = _native_boot_shadow_state(campaign_id, action, str(context["head_sha"]))
             expected_vm_id = str(state["expected_vm_id"])
         except (OSError, ValueError, KeyError, json.JSONDecodeError) as exc:
             return fail(f"native UAC protected reboot state is unavailable: {exc}")
@@ -12333,17 +12433,11 @@ def _native_network_status_snapshot(campaign_id: str, shadow_root: Path) -> tupl
     """Read one protected native campaign without using its historical result as proof."""
     if shadow_root.is_symlink() or (shadow_root.exists() and not shadow_root.is_dir()):
         raise ValueError("native network-smoke shadow root is unsafe")
-    shadows = list(shadow_root.glob(f"{campaign_id}-*")) if shadow_root.is_dir() else []
-    if not shadows:
+    selected = _native_boot_select_shadow(campaign_id, "Status", shadow_root)
+    if selected is None:
         return None
-    if len(shadows) != 1:
-        raise ValueError("native network-smoke requires one protected shadow for the campaign")
-    shadow = shadows[0]
-    source_sha = shadow.name[len(campaign_id) + 1:]
-    if (re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
-        or not _native_shadow_path_safe(shadow_root, shadow)
-        or not shadow.is_dir()):
-        raise ValueError("native network-smoke shadow identity is invalid")
+    shadow, selected_state = selected
+    source_sha = selected_state["source_sha"]
     state_path = shadow / "native-boot.json"
     evidence = shadow / "evidence/network-smoke" / campaign_id / "result.json"
     for path in (state_path, evidence):
@@ -12351,6 +12445,8 @@ def _native_network_status_snapshot(campaign_id: str, shadow_root: Path) -> tupl
             or path.stat().st_size > 1024 * 1024):
             raise ValueError(f"native network-smoke protected status path is unsafe: {path}")
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
+    if state != selected_state:
+        raise ValueError("native network-smoke protected state changed during status read")
     result_bytes = evidence.read_bytes()
     result = json.loads(result_bytes.decode("utf-8-sig"))
     if not isinstance(state, dict) or not isinstance(result, dict):
