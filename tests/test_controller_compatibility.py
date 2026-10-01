@@ -5,6 +5,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -308,6 +310,217 @@ class CompatibilityEnvelopeTests(unittest.TestCase):
         )
         self.assertFalse(self.raw.exists())
         self.assertFalse(self.audit.exists())
+
+
+class BaseControllerEnvelopeCompositionTests(unittest.TestCase):
+    """Exercise controller callbacks and archive verification as one real flow."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name)
+        self.target = self.work / "target"
+        self.base = self.work / "base"
+        self.target.mkdir()
+        self.environment = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("GIT_", "REPOCTL_TRUSTED_"))
+        }
+        self.environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        for relative in (
+            "scripts/repoctl.py",
+            "scripts/repository_delivery.py",
+            "scripts/qualification_compatibility.py",
+            "scripts/qualification_cache.py",
+            "scripts/qualification_steps.py",
+            "scripts/capability_bootstrap.py",
+            "scripts/runtime_orchestration.py",
+            "scripts/ci-affected.rb",
+            "config/contracts/toolchain-lock.json",
+            "config/contracts/qualification-execution-policy.yaml",
+            "config/contracts/ci-evidence.yaml",
+            "config/contracts/ci-topology.yaml",
+            "config/toolchain/versions.env",
+            "config/toolchain/capabilities.json",
+        ):
+            destination = self.target / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(ROOT / relative, destination)
+        (self.target / ".gitignore").write_text(
+            ".context/\n__pycache__/\n", encoding="utf-8"
+        )
+        self.git("init", "-q")
+        self.git("switch", "-qc", "feature/envelope-fixture")
+        self.commit("base controller")
+        self.base_sha = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/remotes/origin/main", self.base_sha)
+        self.git(
+            "worktree", "add", "--quiet", "--detach", str(self.base), self.base_sha
+        )
+        self.marker = self.work / "HEAD_CONTROLLER_EXECUTED"
+        (self.target / "scripts/repoctl.py").write_text(
+            "from pathlib import Path\n"
+            + f"Path({str(self.marker)!r}).touch()\n"
+            + "raise AssertionError('untrusted HEAD controller executed')\n",
+            encoding="utf-8",
+        )
+        self.commit("untrusted candidate controller")
+        self.head_sha = self.git("rev-parse", "HEAD")
+        self.environment.update(
+            REPOCTL_TRUSTED_WRAPPER=str(self.base / "scripts/repository_delivery.py"),
+            REPOCTL_TRUSTED_CONTROLLER=str(self.base / "scripts/repoctl.py"),
+            REPOCTL_TRUSTED_POLICY_ROOT=str(self.base),
+            REPOCTL_TRUSTED_BASE_SHA=self.base_sha,
+            REPOCTL_TRUSTED_TARGET_ROOT=str(self.target),
+            REPOCTL_TRUSTED_HEAD_SHA=self.head_sha,
+            REPOCTL_TRUSTED_PR_NUMBER="171",
+        )
+
+    def git(self, *arguments):
+        return subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", *arguments],
+            cwd=self.target,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def commit(self, message):
+        self.git("add", ".")
+        self.git(
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            message,
+        )
+
+    def compose(self, scenario="canonical"):
+        program = r"""import importlib.util
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from unittest import mock
+import yaml
+
+controller = Path(os.environ["REPOCTL_TRUSTED_CONTROLLER"])
+spec = importlib.util.spec_from_file_location("fixture_base_controller", controller)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+base = os.environ["REPOCTL_TRUSTED_BASE_SHA"]
+head = os.environ["REPOCTL_TRUSTED_HEAD_SHA"]
+module._require_trusted_pr_execution(base_sha=base, head_sha=head, pr_number=171)
+policy = yaml.safe_load((controller.parents[1] / "config/contracts/qualification-execution-policy.yaml").read_text())
+commands = [(name, module._controller_command(name)) for name in ("governance", "system")]
+# Installed tools and gate discovery are fixture inputs. Acceptance checks,
+# Git bindings, archive I/O, hashes, and envelope verification remain real.
+with mock.patch.object(module, "_qualification_toolchain", return_value=({}, set())), \
+     mock.patch.object(module, "_global_gate_commands", return_value=commands), \
+     mock.patch.object(module, "affected", return_value=["global"]), \
+     mock.patch.object(module, "qualification_execution_policy", return_value=policy):
+    proof = {
+        "schema_version": 5, "evidence_kind": "exact_commit", "status": "PASS",
+        "exact_commit_evidence": True, "base_sha": base, "head_sha": head,
+        "head_tree_sha": module.git("rev-parse", head + "^{tree}").strip(),
+        "qualification_identity": module.qualification_identity(),
+        "created_at_epoch": time.time(), "changed_paths": module.changed_paths(base, head),
+        "verification": {"execution_profile": "full", "runtime_scope": []},
+        "gates": [{"gate": name, "status": "PASS", "exit_code": 0, "execution": "fresh"}
+                  for name, _ in commands],
+    }
+    raw = module.CONTEXT / "evidence" / (head + ".json")
+    raw.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_text(json.dumps(proof))
+    audit = module._qualification_audit_path(head)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text(json.dumps({
+        "schema_version": 1, "head_sha": head, "base_sha": base,
+        "evidence_status": "PASS", "inventory": {"failed_gates": 0},
+        "safety": {"content_cache_authorizes_pass_reuse": False,
+                   "verdict_reuse_policy": "exact-direct-parent-only"},
+    }))
+    result = {
+        "canonical_raw_valid": module._valid_exact_evidence(base, head) == raw,
+        "canonical_audit_valid": module._valid_performance_audit(base, head) == audit,
+    }
+    module._PR_LOOP_REPOSITORY.set("dst-red-Wire/ecommerce-1")
+    envelope = module._create_pr_qualification_envelope(base, head)
+    result["envelope"] = envelope
+    scenario = sys.argv[1]
+    if scenario in {"raw_proof_path", "performance_audit_path"}:
+        archive = module.ROOT / envelope[scenario]
+        # Preserve valid JSON and all validation fields; digest must detect this.
+        archive.write_bytes(archive.read_bytes() + b" ")
+    elif scenario == "arbitrary":
+        arbitrary_raw = module.CONTEXT / "unrelated-proof.json"
+        arbitrary_raw.write_bytes(raw.read_bytes())
+        arbitrary_audit = module.CONTEXT / "unrelated-audit.json"
+        arbitrary_audit.write_bytes(audit.read_bytes())
+        result["arbitrary_raw_rejected"] = module._valid_exact_evidence(
+            base, head, evidence_path=arbitrary_raw) is None
+        result["arbitrary_audit_rejected"] = module._valid_performance_audit(
+            base, head, audit_path=arbitrary_audit) is None
+        result["explicit_canonical_raw_rejected"] = module._valid_exact_evidence(
+            base, head, evidence_path=raw) is None
+        result["explicit_canonical_audit_rejected"] = module._valid_performance_audit(
+            base, head, audit_path=audit) is None
+    elif scenario == "missing_witness":
+        module._PR_LOOP_FRESH_WITNESS.set(None)
+    result["reread"] = module._pr_loop_qualification(
+        base, head, repository="dst-red-Wire/ecommerce-1")
+    print(json.dumps(result))
+"""
+        completed = subprocess.run(
+            [sys.executable, "-I", "-c", program, scenario],
+            cwd=self.target,
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertFalse(self.marker.exists(), "HEAD controller executed")
+        return json.loads(completed.stdout)
+
+    def test_base_controller_archives_canonical_proof_and_reverifies(self):
+        result = self.compose()
+        self.assertTrue(result["canonical_raw_valid"])
+        self.assertTrue(result["canonical_audit_valid"])
+        self.assertEqual("PASS", result["envelope"]["status"])
+        self.assertEqual("PASS", result["reread"]["status"])
+        self.assertEqual(
+            result["envelope"]["envelope_sha256"],
+            result["reread"]["compatibility_digest"],
+        )
+        self.assertIn("/raw/", result["envelope"]["raw_proof_path"])
+        self.assertIn("/audit/", result["envelope"]["performance_audit_path"])
+
+    def test_base_controller_rejects_tampered_archives(self):
+        for field in ("raw_proof_path", "performance_audit_path"):
+            with self.subTest(archive=field):
+                result = self.compose(field)
+                self.assertEqual("FAIL", result["reread"]["status"], result)
+
+    def test_explicit_validation_paths_remain_archive_only(self):
+        result = self.compose("arbitrary")
+        self.assertTrue(result["arbitrary_raw_rejected"])
+        self.assertTrue(result["arbitrary_audit_rejected"])
+        self.assertTrue(result["explicit_canonical_raw_rejected"])
+        self.assertTrue(result["explicit_canonical_audit_rejected"])
+        self.assertEqual("PASS", result["reread"]["status"])
+
+    def test_archived_envelope_requires_fresh_process_witness(self):
+        result = self.compose("missing_witness")
+        self.assertEqual("PASS", result["envelope"]["status"])
+        self.assertEqual("MISSING", result["reread"]["status"])
 
 
 class TrustedQualificationBoundaryTests(unittest.TestCase):
