@@ -320,6 +320,8 @@ runtime_orchestration:
       evidence_fields: [satisfied, wsl]
     memory-capacity:
       handler: memory
+      required_parameters: [minimum_mib]
+      parameter_types: {minimum_mib: positive-integer}
       requires: []
       mutation_class: none
       timeout_seconds: 2
@@ -335,6 +337,8 @@ runtime_orchestration:
       evidence_fields: [total_mib, available_mib]
     cpu-capacity:
       handler: cpu
+      required_parameters: [minimum_count]
+      parameter_types: {minimum_count: positive-integer}
       requires: []
       mutation_class: none
       timeout_seconds: 2
@@ -372,6 +376,8 @@ runtime_orchestration:
       evidence_fields: [satisfied, command, exit_code, output_matches]
     disk-capacity:
       handler: disk
+      required_parameters: [path, minimum_mib]
+      parameter_types: {path: nonempty-string, minimum_mib: positive-integer}
       requires: []
       mutation_class: none
       timeout_seconds: 2
@@ -1286,8 +1292,39 @@ dynamic_state:
     - provisioning-state
 
 work_item_preflight:
+  authority: QualificationExecutionPolicy
+  side_effects: forbidden
+  source_checks: [worktree-clean, exact-head, exact-base, exact-branch]
+  statuses: [PASS, BLOCKED_RUNTIME, FAIL]
+  blocked_runtime_is_not_pass: true
+  required_before_costly_work: true
+  required_before_mutation: true
+  output: .context/evidence/preflight/<head-sha>.json
   additional_capabilities:
+    packer-runtime:
+      required_parameters: [version]
+      parameter_types: {version: pinned-version}
+    ssh-identity:
+      required_parameters: [path]
+      parameter_types: {path: nonempty-string}
+    network:
+      required_parameters: [host, port]
+      parameter_types: {host: nonempty-string, port: tcp-port}
     toolchain-pinned:
       required_parameters: [sha256]
+      parameter_types: {sha256: sha256-digest}
+    artifact-available:
+      required_parameters: [path, sha256]
+      parameter_types: {path: repository-relative-path, sha256: sha256-digest}
+    windows-admin:
+      required_parameters: []
+      parameter_types: {}
+    linux-admin:
+      required_parameters: []
+      parameter_types: {}
+    virtualbox-backend:
+      required_parameters: [evidence_path, sha256, backend]
       parameter_types:
+        evidence_path: repository-relative-path
         sha256: sha256-digest
+        backend: virtualbox-backend

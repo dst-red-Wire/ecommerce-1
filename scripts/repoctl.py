@@ -13011,6 +13011,74 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
 
     merge_method = str(policy["merge"]["method"])
     merge_flag = {"merge": "--merge", "squash": "--squash", "rebase": "--rebase"}[merge_method]
+    try:
+        import evidence_bundle
+        import post_merge_verify
+
+        # The compatibility envelope authorized these archived bytes in this
+        # process. Bind the retained witness to that same final BASE execution.
+        canonical_evidence = _valid_exact_evidence(base_ref, head)
+        canonical_audit = _valid_performance_audit(base_ref, head)
+        if canonical_evidence is None or canonical_audit is None:
+            raise RuntimeError("final canonical qualification or audit is missing")
+        captured_evidence = post_merge_verify._record_bytes(
+            canonical_evidence, label="final BASE qualification"
+        )
+        captured_audit = post_merge_verify._record_bytes(
+            canonical_audit, label="final BASE audit"
+        )
+        if (
+            captured_evidence != post_merge_verify._record_bytes(evidence, label="BASE qualification archive")
+            or captured_audit != post_merge_verify._record_bytes(audit, label="BASE audit archive")
+        ):
+            raise RuntimeError("canonical qualification/audit differs from validated BASE archive")
+        qualification_payload = json.loads(captured_evidence)
+        if not isinstance(qualification_payload, dict):
+            raise ValueError("qualification evidence is not an object")
+        identity = {
+            "base_sha": fresh_pr["base_sha"],
+            "head_sha": head,
+            "tree_sha": git("rev-parse", "HEAD^{tree}").strip(),
+            "qualification_identity": qualification_payload["qualification_identity"],
+            "toolchain_digest": evidence_bundle.digest_file(evidence_bundle._safe_file(
+                ROOT, "config/contracts/toolchain-lock.json"
+            )),
+            "runtime_identity": "",
+        }
+        created = evidence_bundle.create_bundle(
+            ROOT, **identity,
+            gate_evidence=[str(canonical_audit.relative_to(ROOT))],
+        )
+        verified = evidence_bundle.verify_bundle(ROOT, head, expected_identity=identity)
+        if created["manifest_digest"] != verified["manifest_digest"]:
+            raise RuntimeError("final BASE evidence bundle changed")
+        manifest_bytes = post_merge_verify._record_bytes(
+            ROOT / created["manifest"], label="final BASE bundle"
+        )
+        manifest = json.loads(manifest_bytes)
+        indexed_digests = manifest.get("evidence_digests") if isinstance(manifest, dict) else None
+        evidence_digest = evidence_bundle.digest_bytes(captured_evidence)
+        audit_digest = evidence_bundle.digest_bytes(captured_audit)
+        if (
+            not isinstance(indexed_digests, dict)
+            or evidence_bundle.digest_bytes(manifest_bytes) != created["manifest_digest"]
+            or indexed_digests.get(str(canonical_evidence.relative_to(ROOT))) != evidence_digest
+            or indexed_digests.get(str(canonical_audit.relative_to(ROOT))) != audit_digest
+        ):
+            raise RuntimeError("final BASE bundle does not retain the validated bytes")
+        witness = post_merge_verify.write_pre_merge_witness(
+            ROOT, pr_number=number, snapshot=fresh_pr,
+            qualification=qualification_payload,
+        )
+        retained = json.loads(post_merge_verify._record_bytes(witness, label="signed pre-merge witness"))
+        if (
+            not isinstance(retained, dict)
+            or retained.get("evidence_sha256") != evidence_digest
+            or retained.get("manifest_sha256") != created["manifest_digest"]
+        ):
+            raise RuntimeError("signed pre-merge witness differs from validated BASE bytes")
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return fail(f"finish-pr cannot retain signed pre-merge witness: {exc}")
     merged = run(
         [
             gh,
@@ -13071,16 +13139,37 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             )
 
     cleanup_rc, roadmap_rc = _finish_pr_post_merge_tasks()
-    if roadmap_rc:
+    if cleanup_rc or roadmap_rc:
+        phases = _FINISH_PR_PHASES.get()
+        if phases is not None:
+            phases["post_merge_result"] = "PENDING" if roadmap_rc in (2, 3) else "FAIL"
         return fail(
-            f"finish-pr merged PR #{number} successfully but automatic roadmap synchronization failed"
+            f"finish-pr merged PR #{number}, but post-merge cleanup or roadmap verification is incomplete"
         )
+    try:
+        import post_merge_verify
 
+        fresh_snapshot = _github_pr_snapshot(gh, name_with_owner, number)
+        proof_path = post_merge_verify.write_post_merge_proof(
+            ROOT,
+            pr_number=number,
+            snapshot=fresh_snapshot,
+            qualification=qualification_payload,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        phases = _FINISH_PR_PHASES.get()
+        if phases is not None:
+            phases["post_merge_result"] = "FAIL"
+        return fail(f"finish-pr merged PR #{number}, but post-merge verification failed: {exc}")
+    phases = _FINISH_PR_PHASES.get()
+    if phases is not None:
+        phases["post_merge_result"] = "PASS"
+        phases["post_merge_evidence"] = str(proof_path.relative_to(ROOT))
     print(
         f"PASS finish-pr: PR #{number} merged at exact head {head}; "
-        f"PR record retained by GitHub; remote/local branch {branch} removed; roadmap reconciliation handled"
+        f"post-merge verification {proof_path.relative_to(ROOT)}"
     )
-    return 1 if cleanup_rc else 0
+    return 0
 
 
 def _finish_pr_post_merge_tasks() -> tuple[int, int]:
@@ -13102,15 +13191,27 @@ def _finish_pr_post_merge_tasks() -> tuple[int, int]:
         if phases is not None:
             phases["roadmap_result"] = "FAIL"
         raise
+    if roadmap_rc == 0:
+        actual_check = roadmap_check(quiet=True)
+        if actual_check:
+            roadmap_rc = 2 if actual_check == 1 else 1
     if phases is not None:
-        phases["roadmap_result"] = "FAIL" if roadmap_rc else "PASS"
+        phases["roadmap_result"] = (
+            "PASS" if roadmap_rc == 0 else
+            "PENDING_ROADMAP_PR" if roadmap_rc in (2, 3) else "FAIL"
+        )
     return cleanup_rc, roadmap_rc
 
 
 def _finish_pr_json(base: str) -> int:
     result = _pr_loop_empty_result(0)
     result.update({"state": "BLOCKED", "next_action": "VERIFY_MERGE_STATE", "base": base})
-    phases = {"cleanup_result": "NOT_ATTEMPTED", "roadmap_result": "NOT_ATTEMPTED"}
+    phases = {
+        "cleanup_result": "NOT_ATTEMPTED",
+        "roadmap_result": "NOT_ATTEMPTED",
+        "post_merge_result": "NOT_ATTEMPTED",
+        "post_merge_evidence": "",
+    }
     destination = sys.stdout
     stdout_token = _PR_LOOP_JSON_STDOUT.set(destination)
     phases_token = _FINISH_PR_PHASES.set(phases)
@@ -13151,12 +13252,13 @@ def _finish_pr_json(base: str) -> int:
                         result.update(phases)
                         if result["cleanup_result"] == "FAIL":
                             result["next_action"] = "POST_MERGE_CLEANUP"
-                        elif result["roadmap_result"] == "FAIL":
+                        elif result["roadmap_result"] != "PASS":
                             result["next_action"] = "FIX_ROADMAP_SYNC"
-                        elif finish_rc:
+                        elif result["post_merge_result"] != "PASS" or finish_rc:
                             result["next_action"] = "VERIFY_POST_MERGE"
                         else:
-                            result["next_action"] = "NONE"
+                            result["state"] = "VERIFIED"
+                            result["next_action"] = "CLOSE_WORK_ITEM"
                     else:
                         result["merge_result"] = "FAIL" if finish_rc else "UNKNOWN"
                         result["blockers"].append("GitHub does not confirm a merge at the exact initial head")
@@ -13166,7 +13268,7 @@ def _finish_pr_json(base: str) -> int:
             elif finish_rc:
                 result["merge_result"] = "UNKNOWN"
             _emit_pr_loop_result(result, json_output=True)
-            return 0 if finish_rc == 0 and result["merge_result"] == "PASS" else 1
+            return 0 if result["state"] == "DONE" else 1
     finally:
         _FINISH_PR_PHASES.reset(phases_token)
         _PR_LOOP_JSON_STDOUT.reset(stdout_token)
@@ -13205,6 +13307,8 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
         "merge_result": "NOT_ATTEMPTED",
         "cleanup_result": "NOT_ATTEMPTED",
         "roadmap_result": "NOT_ATTEMPTED",
+        "post_merge_result": "NOT_ATTEMPTED",
+        "post_merge_evidence": "",
         "output_contract": "PASS",
         "merge_commit_sha": "",
         "blockers": [],
@@ -13940,6 +14044,8 @@ def _emit_pr_loop_result(result: dict, *, json_output: bool) -> None:
         print(f"CLEANUP_RESULT {result['cleanup_result']}")
     if result.get("roadmap_result") != "NOT_ATTEMPTED":
         print(f"ROADMAP_RESULT {result['roadmap_result']}")
+    if result.get("post_merge_result") != "NOT_ATTEMPTED":
+        print(f"POST_MERGE_RESULT {result['post_merge_result']}")
     if result.get("blockers"):
         for blocker in result["blockers"]:
             print(f"BLOCKER {blocker}")
@@ -13973,7 +14079,6 @@ def _pr_loop_post_merge(
     dry_run: bool,
     json_output: bool,
 ) -> int:
-    del gh, name_with_owner
     result["state"] = "MERGED"
     result["next_action"] = "POST_MERGE_CLEANUP"
     result["merge_commit_sha"] = snapshot.get("merge_commit_sha", "")
@@ -13986,8 +14091,9 @@ def _pr_loop_post_merge(
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     if dry_run:
+        result["next_action"] = "VERIFY_POST_MERGE"
         _emit_pr_loop_result(result, json_output=json_output)
-        return 0
+        return 1
     if git("status", "--porcelain", "--untracked-files=all").strip():
         result["cleanup_result"] = "FAIL"
         result["blockers"].append("post-merge cleanup requires a clean worktree")
@@ -14048,9 +14154,77 @@ def _pr_loop_post_merge(
             result["roadmap_result"] = "FAIL"
             result["blockers"].append(f"roadmap follow-up raised: {exc}")
         else:
-            result["roadmap_result"] = "PASS" if roadmap_rc == 0 else "FAIL"
+            if roadmap_rc in (2, 3):
+                result["roadmap_result"] = "PENDING_ROADMAP_PR"
+            elif roadmap_rc:
+                result["roadmap_result"] = "FAIL"
+            else:
+                actual_check = roadmap_check(quiet=True)
+                result["roadmap_result"] = (
+                    "PASS" if actual_check == 0 else
+                    "PENDING_ROADMAP_PR" if actual_check == 1 else "FAIL"
+                )
     if result["roadmap_result"] != "PASS":
+        result["post_merge_result"] = "PENDING"
         result["next_action"] = "FIX_ROADMAP_SYNC"
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    try:
+        import post_merge_verify
+
+        fresh_snapshot = _github_pr_snapshot(gh, name_with_owner, snapshot["number"])
+        proof = post_merge_verify.recover_post_merge_proof(
+            ROOT, pr_number=snapshot["number"], snapshot=fresh_snapshot,
+        )
+        if (
+            proof.get("status") != "PASS"
+            or proof.get("pr") != snapshot["number"]
+            or proof.get("head_sha") != snapshot["head_sha"]
+            or proof.get("merge_sha") != merge_commit
+            or any(proof.get(field) is not True for field in (
+                "signature_verified", "main_contains_change",
+                "qualified_tree_matches", "clean_worktree",
+            ))
+            or proof.get("roadmap_sync") != "PASS"
+        ):
+            raise RuntimeError("signed post-merge proof has no exact PASS verdict")
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        result["post_merge_result"] = "FAIL"
+        result["next_action"] = "VERIFY_POST_MERGE"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    result["post_merge_result"] = "PASS"
+    result["post_merge_evidence"] = (
+        f".context/evidence/post-merge/{proof['merge_sha']}.json"
+    )
+    try:
+        import issue_completion
+
+        reviews, _owner = pull_request_authority_evidence(
+            gh, snapshot["number"], snapshot["head_sha"]
+        )
+        completion = issue_completion.complete_work_item(
+            ROOT, gh, name_with_owner, fresh_snapshot, proof,
+            reviews["code"], reviews["security"],
+        )
+        result["work_item_completion"] = completion
+        if completion["status"] != "CLOSED":
+            raise RuntimeError(
+                "work-item issue closure is unverified: "
+                + "; ".join(completion.get("errors") or [completion["status"]])
+            )
+    except (OSError, RuntimeError, ValueError, KeyError) as exc:
+        result["state"] = "VERIFIED"
+        result["next_action"] = "CLOSE_WORK_ITEM"
+        result["blockers"].append(str(exc))
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    if roadmap_check(quiet=True):
+        result["state"] = "VERIFIED"
+        result["roadmap_result"] = "FAIL"
+        result["next_action"] = "FIX_ROADMAP_SYNC"
+        result["blockers"].append("milestone/roadmap re-evaluation did not PASS after issue closure")
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
     result["state"] = "DONE"
@@ -14768,6 +14942,42 @@ def qualification_tools_smoke_check() -> int:
     return 0
 
 
+def _delivery_command_failure(reason: str) -> int:
+    print(json.dumps(
+        {"status": "FAIL", "reason": reason, "mutation_performed": False},
+        sort_keys=True,
+    ))
+    return 1
+
+
+def post_merge_verify_command(pr_number: int) -> int:
+    """Verify or recover a signed proof from a fresh GitHub PR snapshot."""
+    import post_merge_verify
+
+    try:
+        if type(pr_number) is not int or pr_number < 1:
+            raise ValueError("positive PR number required")
+        gh = shutil.which("gh") or shutil.which("gh.exe")
+        if not gh:
+            raise RuntimeError("GitHub CLI missing")
+        _owner, repository = _github_repository_identity(gh)
+        snapshot = _github_pr_snapshot(gh, repository, pr_number)
+        if snapshot.get("state") != "MERGED":
+            raise RuntimeError("GitHub PR is not merged")
+        proof = post_merge_verify.recover_post_merge_proof(
+            ROOT, pr_number=pr_number, snapshot=snapshot,
+        )
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        return _delivery_command_failure(f"post-merge verification failed: {exc}")
+    print(json.dumps({
+        "status": "PASS",
+        "pr": pr_number,
+        "merge_sha": proof["merge_sha"],
+        "evidence": f".context/evidence/post-merge/{proof['merge_sha']}.json",
+    }, sort_keys=True))
+    return 0
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -14799,6 +15009,8 @@ def main() -> int:
     bc = sub.add_parser("branch-cleanup")
     bc.add_argument("--dry-run", action="store_true")
     sub.add_parser("roadmap-check")
+    post_merge_parser = sub.add_parser("post-merge-verify")
+    post_merge_parser.add_argument("--pr", type=int, required=True)
     m25 = sub.add_parser("m25-runtime-evidence")
     m25.add_argument("--vm-name", required=True)
     sub.add_parser("roadmap-sync")
@@ -15065,6 +15277,8 @@ def main() -> int:
         print("PASS canonical-workspace")
         return 0
     try:
+        if args.cmd == "post-merge-verify":
+            return post_merge_verify_command(args.pr)
         if args.cmd == "vm":
             from vm_lifecycle import reconcile_cli
 

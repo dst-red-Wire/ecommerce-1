@@ -1601,7 +1601,7 @@ class PRLoopOrchestrationTests(unittest.TestCase):
         self.assertEqual("FAIL", payload["cleanup_result"])
         self.assertEqual("FAIL", payload["output_contract"])
 
-    def test_cleanup_success_reaches_done(self):
+    def _run_merged_closure(self, completion_status="CLOSED", roadmap_status=0):
         result = REPOCTL._pr_loop_empty_result(161)
         result.update({"head_sha": self.SHA_A, "merge_result": "PASS"})
         merged = self.snapshot(
@@ -1623,19 +1623,40 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             REPOCTL, "branch_cleanup", return_value=0
         ), mock.patch.object(
             REPOCTL, "_roadmap_followup_after_merge", return_value=0
-        ) as roadmap:
+        ) as roadmap, mock.patch.object(
+            REPOCTL, "roadmap_check", side_effect=[0, roadmap_status]
+        ), mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=merged
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence",
+            return_value=({"code": {}, "security": {}}, {}),
+        ), mock.patch(
+            "issue_completion.complete_work_item",
+            return_value={"status": completion_status, "issue": 170, "errors": []},
+        ), mock.patch(
+            "post_merge_verify.recover_post_merge_proof",
+            return_value={
+                "status": "PASS", "pr": 161,
+                "head_sha": self.SHA_A, "merge_sha": "d" * 40,
+                "signature_verified": True, "main_contains_change": True,
+                "qualified_tree_matches": True, "clean_worktree": True,
+                "roadmap_sync": "PASS",
+            },
+        ):
             stream = io.StringIO()
             with contextlib.redirect_stdout(stream):
                 rc = REPOCTL._pr_loop_post_merge(
                     "gh", "owner/repo", merged, result, dry_run=False, json_output=True
                 )
         payload = json.loads(stream.getvalue().strip().splitlines()[-1])
+        return rc, payload
+
+    def test_cleanup_success_reaches_done(self):
+        rc, payload = self._run_merged_closure()
         self.assertEqual(0, rc)
         self.assertEqual("DONE", payload["state"])
-        self.assertEqual("PASS", payload["merge_result"])
-        self.assertEqual("PASS", payload["cleanup_result"])
-        self.assertEqual("PASS", payload["roadmap_result"])
-        roadmap.assert_called_once_with()
+        self.assertEqual("CLOSED", payload["work_item_completion"]["status"])
+        self.assertEqual("PASS", payload["post_merge_result"])
 
     def test_cleanup_recovery_cannot_finish_without_roadmap(self):
         result = REPOCTL._pr_loop_empty_result(161)

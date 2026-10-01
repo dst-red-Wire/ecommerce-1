@@ -247,6 +247,10 @@ milestones:
       runtime_evidence:
         - path: .context/evidence/roadmap/M2-5-persistent-mgmt-bootstrap.json
           environments: [lab]
+          proof_type: lab-readiness
+        - path: .context/evidence/roadmap/M2.5-persistent-mgmt.json
+          environments: [management]
+          proof_type: persistent-deployment
 
   - id: M3
     name: PREPROD Infrastructure

@@ -15,6 +15,48 @@ evidence:
   qualification_identity_required: true
   commit_tree_required: true
 
+bundle:
+  schema_version: 1
+  scope: exact-head
+  root: .context/evidence/<head_sha>
+  manifest: .context/evidence/<head_sha>/manifest.json
+  manifest_digest_sidecar: .context/evidence/<head_sha>/manifest.sha256
+  historical_manifest: .context/evidence/<head_sha>/history/<sha256hex>.json
+  canonicalization: utf8-json-sort-keys-compact-trailing-newline
+  manifest_digest: sha256-of-canonical-manifest-bytes
+  referenced_file_digest: sha256-of-exact-file-bytes
+  reference_categories: [artifacts, runtime_evidence, gate_evidence, review_evidence]
+  reference_fields: [path, sha256]
+  required_identity_fields:
+    - base_sha
+    - head_sha
+    - tree_sha
+    - toolchain_digest
+    - qualification_identity
+    - runtime_identity
+  required_manifest_fields:
+    - schema_version
+    - base_sha
+    - head_sha
+    - tree_sha
+    - toolchain_digest
+    - qualification_identity
+    - runtime_identity
+    - artifacts
+    - runtime_evidence
+    - gate_evidence
+    - review_evidence
+    - evidence_digests
+    - verdict_authority
+  qualification_source: .context/evidence/<head_sha>.json
+  qualification_must_be_exact_sha_pass: true
+  evidence_digests_required_for_every_reference: true
+  retain_superseded_manifests: true
+  tracked_git_authority: false
+  verdict_authority: false
+  missing_or_mismatched_digest: FAIL
+  wrong_head_or_tree: FAIL
+
 controller_compatibility:
   schema_version: 1
   kind: QualificationCompatibilityEnvelope
