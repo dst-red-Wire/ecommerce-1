@@ -129,7 +129,8 @@
         "tags": "node"
       },
       "classification": "managed",
-      "requirement": "required-static"
+      "requirement": "optional-tooling",
+      "justification": "Pinned only for the Backstage management plane and explicit agent tooling; standard qualification does not consume it."
     },
     {
       "name": "corepack",
@@ -145,7 +146,8 @@
         "tags": "node"
       },
       "classification": "conditional",
-      "requirement": "required-static"
+      "requirement": "optional-tooling",
+      "justification": "Available only through explicitly selected Node agent tooling; standard qualification does not consume it."
     },
     {
       "name": "pnpm",
@@ -159,7 +161,8 @@
         "--version"
       ],
       "classification": "conditional",
-      "requirement": "required-static"
+      "requirement": "optional-tooling",
+      "justification": "Available only through explicitly selected Node agent tooling; standard qualification does not consume it."
     },
     {
       "name": "go",
@@ -400,7 +403,8 @@
       "platforms": [
         "linux/amd64"
       ],
-      "requirement": "required-static"
+      "requirement": "optional-tooling",
+      "justification": "Available only for the explicitly requested Nx dependency graph; standard qualification does not consume it."
     },
     {
       "name": "oapi-codegen",
@@ -417,42 +421,6 @@
       "provision": {
         "type": "ansible",
         "tags": "oapi_codegen"
-      },
-      "classification": "managed",
-      "requirement": "required-static"
-    },
-    {
-      "name": "oxlint",
-      "requires": [],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "oxlint",
-      "version_args": [
-        "--version"
-      ],
-      "version_key": "OXLINT_VERSION",
-      "provision": {
-        "type": "ansible",
-        "tags": "oxlint"
-      },
-      "classification": "managed",
-      "requirement": "required-static"
-    },
-    {
-      "name": "oxfmt",
-      "requires": [],
-      "provision_requires": [
-        "ansible-playbook"
-      ],
-      "command": "oxfmt",
-      "version_args": [
-        "--version"
-      ],
-      "version_key": "OXFMT_VERSION",
-      "provision": {
-        "type": "ansible",
-        "tags": "oxfmt"
       },
       "classification": "managed",
       "requirement": "required-static"
@@ -843,8 +811,6 @@
     "bazel": "ansible",
     "nx": "ansible",
     "oapi-codegen": "ansible",
-    "oxlint": "ansible",
-    "oxfmt": "ansible",
     "ruff": "ansible",
     "kubectl": "ansible",
     "helm": "ansible",
@@ -943,10 +909,7 @@
       "tar",
       "oasdiff",
       "oapi-codegen",
-      "go",
-      "corepack",
-      "pnpm",
-      "oxfmt"
+      "go"
     ],
     "automation": [
       "python3",
@@ -961,23 +924,13 @@
       "git",
       "ruby",
       "ruff",
-      "go",
-      "corepack",
-      "pnpm",
-      "node",
-      "oxlint",
-      "oxfmt"
+      "go"
     ],
     "test": [
       "python3",
       "ruby",
       "git",
       "go",
-      "corepack",
-      "pnpm",
-      "node",
-      "oxlint",
-      "oxfmt",
       "helm"
     ],
     "frontend": ["python3", "go", "gofmt", "templ", "cc"],
@@ -1029,9 +982,11 @@
       "yq",
       "rg",
       "fd",
-      "nx",
       "ast-grep",
       "bazel"
+    ],
+    "optional-agent-tooling": [
+      "nx"
     ],
     "delivery": [
       "python3",

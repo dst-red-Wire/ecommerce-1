@@ -1,6 +1,4 @@
 import importlib.util
-import json
-import os
 import re
 import shutil
 import subprocess
@@ -8,7 +6,6 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -197,6 +194,49 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("SKIP", static["container-network-forwarding"].state)
         self.assertEqual("BLOCKED", runtime["container-network-forwarding"].state)
 
+    def test_optional_tooling_skips_checks_and_provisioning_in_both_profiles(self):
+        items = [
+            {
+                "name": "node",
+                "requires": [],
+                "command": "node",
+                "requirement": "optional-tooling",
+                "provision": {"type": "ansible", "tags": "node"},
+            }
+        ]
+        runner = mock.Mock()
+        which = mock.Mock()
+        auditor = MOD.Auditor(contract(items), runner=runner, which=which)
+
+        for profile in ("static", "runtime"):
+            with self.subTest(profile=profile):
+                result = auditor.run(
+                    bootstrap=True, os_name="linux", arch="amd64", profile=profile
+                )["node"]
+                self.assertEqual("SKIP", result.state)
+                self.assertIn("optional tooling", result.detail)
+        runner.assert_not_called()
+        which.assert_not_called()
+
+    def test_runtime_cli_does_not_require_optional_tooling(self):
+        items = [
+            {"name": "python3", "requires": [], "command": "python3", "requirement": "required-static"},
+            {"name": "node", "requires": [], "command": "node", "requirement": "optional-tooling"},
+        ]
+        fixture = contract(items)
+        auditor = mock.Mock()
+        auditor.graph.items = {item["name"]: item for item in items}
+        auditor.run.return_value = {
+            "python3": MOD.Result("PASS", "ready"),
+            "node": MOD.Result("SKIP", "optional tooling"),
+        }
+        with (
+            mock.patch.object(MOD, "load_contract", return_value=fixture),
+            mock.patch.object(MOD, "Auditor", return_value=auditor),
+            mock.patch.object(MOD, "normalized_platform", return_value=("linux", "amd64", "wsl2")),
+        ):
+            self.assertEqual(0, MOD.main(["env-check", "--profile", "runtime"]))
+
     def runner(self, outcomes):
         def run(argv):
             rc, output = outcomes.get(argv[0], (0, "1.0"))
@@ -374,73 +414,46 @@ class CapabilityAuditTest(unittest.TestCase):
         self.assertEqual("FAIL", results["unzip"].state)
         runner.assert_not_called()
 
-    def quality_provision(self, requested, tags=None, failures=()):
-        tags = tags or {name: name for name in ("ruff", "oxfmt", "oxlint")}
+    def ruff_provision(self, *, fail=False):
         items = [
             {"name": "ansible-playbook", "requires": [], "command": "ansible-playbook"},
-            *[
-                {"name": name, "requires": [], "command": name, "provision": {"type": "ansible", "tags": tags[name]}}
-                for name in ("ruff", "oxfmt", "oxlint")
-            ],
+            {
+                "name": "ruff",
+                "requires": [],
+                "command": "ruff",
+                "provision": {"type": "ansible", "tags": "ruff"},
+            },
         ]
-        installed = {"ruff", "oxfmt", "oxlint"} - {requested}
+        installed = set()
         calls = []
 
         def runner(argv):
             calls.append(argv)
             if "platform/ansible/developer.yml" in argv:
-                selected_tag = argv[argv.index("--tags") + 1]
-                for name in ("oxlint", "oxfmt", "ruff"):
-                    if tags[name] != selected_tag:
-                        continue
-                    installed.add(name)
-                    if name in failures:
-                        return subprocess.CompletedProcess(argv, 1, "", f"{name} download failed")
+                if fail:
+                    return subprocess.CompletedProcess(argv, 1, "", "ruff download failed")
+                installed.add("ruff")
                 return subprocess.CompletedProcess(argv, 0, "reconciled", "")
             return subprocess.CompletedProcess(argv, 0, "1.0", "")
 
-        with (
-            mock.patch.object(MOD, "validate_contract")
-            if len(set(tags.values())) != 3
-            else mock.patch.object(MOD, "validate_contract", wraps=MOD.validate_contract)
-        ):
-            auditor = MOD.Auditor(
-                contract(items),
-                runner=runner,
-                which=lambda command: (
-                    f"/bin/{command}" if command == "ansible-playbook" or command in installed else None
-                ),
-            )
-        result = auditor.provision(next(item for item in items if item["name"] == requested))
-        return result, calls
+        auditor = MOD.Auditor(
+            contract(items),
+            runner=runner,
+            which=lambda command: (
+                f"/bin/{command}" if command == "ansible-playbook" or command in installed else None
+            ),
+        )
+        return auditor.provision(items[1]), calls
 
     def test_ruff_provisioning_is_positive_and_targeted(self):
-        result, calls = self.quality_provision("ruff")
+        result, calls = self.ruff_provision()
         self.assertEqual("PASS", result.state)
         self.assertEqual("ruff", calls[0][calls[0].index("--tags") + 1])
 
-    def test_oxfmt_provisioning_is_positive_and_targeted(self):
-        result, calls = self.quality_provision("oxfmt")
-        self.assertEqual("PASS", result.state)
-        self.assertEqual("oxfmt", calls[0][calls[0].index("--tags") + 1])
-
-    def test_oxlint_provisioning_is_positive_and_targeted(self):
-        result, calls = self.quality_provision("oxlint")
-        self.assertEqual("PASS", result.state)
-        self.assertEqual("oxlint", calls[0][calls[0].index("--tags") + 1])
-
-    def test_quality_provisioning_failures_are_isolated(self):
-        oxlint, _ = self.quality_provision("oxlint", failures={"ruff", "oxfmt"})
-        ruff, _ = self.quality_provision("ruff", failures={"oxfmt"})
-        self.assertEqual("PASS", oxlint.state)
-        self.assertEqual("PASS", ruff.state)
-
-    def test_shared_quality_tag_mutation_contaminates_requested_tool(self):
-        shared = {name: "quality_tools" for name in ("ruff", "oxfmt", "oxlint")}
-        result, _ = self.quality_provision("oxlint", tags=shared, failures={"oxfmt"})
+    def test_ruff_provisioning_failure_blocks_the_capability(self):
+        result, calls = self.ruff_provision(fail=True)
         self.assertEqual("BLOCKED", result.state)
-        isolated, _ = self.quality_provision("oxlint", failures={"ruff", "oxfmt"})
-        self.assertEqual("PASS", isolated.state)
+        self.assertEqual("ruff", calls[0][calls[0].index("--tags") + 1])
 
     def test_failure_and_skip_propagate_only_to_real_dependants(self):
         items = [
@@ -1263,83 +1276,112 @@ class CapabilityClosureTest(unittest.TestCase):
         self.assertNotEqual(expected, old_select(["all"]))
         self.assertEqual(set(), old_select(["all"]))
 
-    def test_quality_capabilities_have_distinct_provisioning_tags(self):
+    def test_ruff_managed_capability_requires_targeted_provisioning_tag(self):
         canonical = MOD.load_contract()
         names = {item["name"]: item for item in canonical["capabilities"]}
-        tags = {name: names[name]["provision"]["tags"] for name in ("ruff", "oxfmt", "oxlint")}
-        self.assertEqual({"ruff": "ruff", "oxfmt": "oxfmt", "oxlint": "oxlint"}, tags)
+        self.assertEqual("ruff", names["ruff"]["provision"]["tags"])
 
-        for name in tags:
-            names[name]["provision"]["tags"] = "quality_tools"
-        with self.assertRaisesRegex(ValueError, "independent quality capabilities must use distinct"):
+        names["ruff"]["provision"]["tags"] = "quality_tools"
+        with self.assertRaisesRegex(ValueError, "targeted ruff tag"):
             MOD.validate_contract(canonical)
 
-    def test_quality_tasks_select_all_tools_for_full_reconciliation(self):
+    def test_quality_tasks_provision_only_ruff_for_static_toolchain(self):
         tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml").read_text()
         main_tasks = (ROOT / "platform/ansible/roles/developer_toolchain/tasks/main.yml").read_text()
-        expected = {"ruff", "oxfmt", "oxlint"}
-
-        def prepared_tools(source, run_tags):
-            preparation = source.split("- name: Download pinned Oxlint archive", 1)[0]
-            predicate = re.search(r'^  when: "(.+)"$', preparation, re.MULTILINE).group(1)
-            return {
-                tag
-                for tag in re.findall(r"tag: (ruff|oxfmt|oxlint)}", preparation)
-                if eval(
-                    predicate,
-                    {"__builtins__": {}},
-                    {"ansible_run_tags": run_tags, "item": SimpleNamespace(tag=tag)},
-                )
-            }
-
-        select = lambda run_tags: {
-            tag
-            for tag in expected
-            if "all" in run_tags or "toolchain" in run_tags or "quality_tools" in run_tags or tag in run_tags
-        }
-        self.assertEqual(expected, select(["all"]))
-        self.assertEqual(expected, select(["quality_tools"]))
-        self.assertEqual(expected, select(["toolchain"]))
-        for tag in expected:
-            self.assertEqual({tag}, select([tag]))
-            self.assertIn(f"tags: [toolchain, quality_tools, {tag}]", tasks)
-
-        for aggregate in ("all", "quality_tools", "toolchain"):
-            self.assertEqual(expected, prepared_tools(tasks, [aggregate]))
-        for individual in expected:
-            self.assertEqual({individual}, prepared_tools(tasks, [individual]))
+        self.assertEqual(5, tasks.count("tags: [toolchain, quality_tools, ruff]"))
+        self.assertEqual(3, tasks.count("tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]"))
+        self.assertIn("Remove legacy role-owned Oxc command links", tasks)
+        self.assertIn("Remove legacy role-owned Oxc tool directories", tasks)
+        self.assertIn("Download pinned Ruff archive", tasks)
+        self.assertIn("Validate pinned Ruff version", tasks)
+        ruff_tasks = tasks.split("- name: Create Ruff version directory", 1)[1]
+        self.assertNotIn("oxlint", ruff_tasks.lower())
+        self.assertNotIn("oxfmt", ruff_tasks.lower())
 
         shared_setup = main_tasks.split("- name: Install native build prerequisites", 1)[0]
-        for selector in ("all", "quality_tools", "toolchain", *expected):
-            with self.subTest(shared_directory_selector=selector):
-                self.assertTrue(selector == "all" or selector in shared_setup)
+        self.assertIn(", quality_tools, ruff]", shared_setup)
+        self.assertNotIn("oxlint", shared_setup)
+        self.assertNotIn("oxfmt", shared_setup)
 
-        # Exact finding mutation: without the individual tags, targeted Oxlint
-        # provisioning cannot select the shared cache and binary directories.
-        mutated_setup = shared_setup
-        for tag in expected:
-            mutated_setup = mutated_setup.replace(f", {tag}", "")
-        self.assertNotIn("oxlint", mutated_setup)
-        self.assertIn("oxlint", shared_setup)
+        node_tasks = main_tasks.split("- name: Download pinned Node archive", 1)[1].split(
+            "- name: Download pinned Go archive", 1
+        )[0]
+        nx_tasks = main_tasks.split("- name: Create isolated Nx tool workspace", 1)[1].split(
+            "- name: Read installed pipx package versions", 1
+        )[0]
+        self.assertEqual(5, node_tasks.count("tags: [node, agent_tools]"))
+        self.assertNotIn("tags: [toolchain", node_tasks)
+        self.assertEqual(8, nx_tasks.count("tags: [agent_tools]"))
+        self.assertNotIn("tags: [toolchain", nx_tasks)
 
-        self.assertEqual(
-            2,
-            tasks.count(
-                "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags "
-                "or 'quality_tools' in ansible_run_tags "
-                "or item.tag in ansible_run_tags"
-            ),
-        )
         makefile = (ROOT / "Makefile").read_text()
-        self.assertIn("quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries", makefile)
+        self.assertIn("quality-tools:", makefile)
         self.assertIn("@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools", makefile)
-        self.assertIn("--tags toolchain,node,agent_tools,context_tools", makefile)
 
-        # Exact regression mutation: tasks still carry `toolchain`, but the old
-        # predicate omits every per-tool directory needed before extraction.
-        mutated_tasks = tasks.replace("or 'toolchain' in ansible_run_tags ", "")
-        self.assertEqual(set(), prepared_tools(mutated_tasks, ["toolchain"]))
-        self.assertEqual(expected, prepared_tools(tasks, ["toolchain"]))
+    def test_quality_migration_removes_only_legacy_role_owned_oxc_state(self):
+        ansible = shutil.which("ansible-playbook")
+        self.assertIsNotNone(ansible)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            local_bin = root / "bin"
+            local_share = root / "share"
+            local_bin.mkdir()
+            tools = local_share / "tools"
+            tools.mkdir(parents=True)
+            keep = tools / "ruff" / "keep"
+            keep.parent.mkdir()
+            keep.write_text("preserve", encoding="utf-8")
+            for name in ("oxlint", "oxfmt"):
+                target = tools / name / "legacy-version" / f"{name}-x86_64-unknown-linux-gnu"
+                target.parent.mkdir(parents=True)
+                target.write_text("legacy", encoding="utf-8")
+                (local_bin / name).symlink_to(target)
+
+            quality_tasks = ROOT / "platform/ansible/roles/developer_toolchain/tasks/quality.yml"
+            playbook = root / "legacy-oxc-cleanup.yml"
+            playbook.write_text(
+                "- hosts: localhost\n"
+                "  gather_facts: false\n"
+                "  vars:\n"
+                f"    local_bin: {local_bin}\n"
+                f"    local_share: {local_share}\n"
+                "  tasks:\n"
+                f"    - ansible.builtin.import_tasks: {quality_tasks}\n",
+                encoding="utf-8",
+            )
+            command = [
+                ansible,
+                "-i",
+                "localhost,",
+                "-c",
+                "local",
+                "--tags",
+                "legacy_oxc_cleanup",
+                str(playbook),
+            ]
+            first = subprocess.run(
+                command, cwd=ROOT, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(0, first.returncode, first.stdout + first.stderr)
+            for name in ("oxlint", "oxfmt"):
+                self.assertFalse((local_bin / name).is_symlink())
+                self.assertFalse((local_bin / name).exists())
+                self.assertFalse((tools / name).exists())
+            self.assertEqual("preserve", keep.read_text(encoding="utf-8"))
+
+            # A later local command outside this role's Oxc tree must be preserved.
+            (local_bin / "oxlint").write_text("user tool", encoding="utf-8")
+            external = root / "external-oxfmt"
+            external.write_text("user tool", encoding="utf-8")
+            (local_bin / "oxfmt").symlink_to(external)
+            second = subprocess.run(
+                command, cwd=ROOT, text=True, capture_output=True, check=False
+            )
+            self.assertEqual(0, second.returncode, second.stdout + second.stderr)
+            self.assertIn("changed=0", second.stdout)
+            self.assertEqual("user tool", (local_bin / "oxlint").read_text(encoding="utf-8"))
+            self.assertEqual(external, (local_bin / "oxfmt").resolve())
+            self.assertEqual("preserve", keep.read_text(encoding="utf-8"))
 
     def test_canonical_gate_closure_is_complete(self):
         canonical = MOD.load_contract()

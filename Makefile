@@ -293,12 +293,12 @@ workstation-doctor: ## Audit local developer state without mutating it
 	@$(PYTHON) scripts/repoctl.py doctor
 
 workstation-bootstrap: ## Reconcile WSL workstation, pinned collections and developer toolchains with Ansible
-	@$(PYTHON) scripts/repoctl.py reconcile --tags workstation,bootstrap,ansible_collections,toolchain,node,agent_tools,context_tools
+	@$(PYTHON) scripts/repoctl.py reconcile --tags workstation,bootstrap,ansible_collections,toolchain,context_tools
 
-quality-tools: ## Reconcile pinned Oxlint, Oxfmt and Ruff binaries
+quality-tools: ## Reconcile the pinned Ruff binary
 	@$(PYTHON) scripts/repoctl.py reconcile --tags quality_tools
 
-agent-tools: ## Reconcile Bazel/Nx/Turbo/OpenAPI/context tooling with Ansible
+agent-tools: ## Reconcile optional Node/Nx/Turbo and OpenAPI/context tooling with Ansible
 	@$(PYTHON) scripts/repoctl.py reconcile --tags toolchain,node,agent_tools,context_tools
 
 context-tools: ## Reconcile token-efficient context tooling with Ansible

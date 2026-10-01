@@ -3082,8 +3082,31 @@ def developer_state_ready(tags: str) -> bool:
             return False
     if "cgo" in wanted and not shutil.which("cc"):
         return False
-    if "quality_tools" in wanted:
-        for command, key in (("oxlint", "OXLINT_VERSION"), ("oxfmt", "OXFMT_VERSION"), ("ruff", "RUFF_VERSION")):
+    if "quality_tools" in wanted or "toolchain" in wanted:
+        managed_bin = managed_bin_dirs()[0]
+        install_root = managed_bin.parent
+        share_subdirectory = _raw_toolchain_lock()["capability_policy"]["managed_install_root"][
+            "share_subdirectory"
+        ]
+        legacy_roots = {
+            name: install_root / share_subdirectory / "tools" / name
+            for name in ("oxlint", "oxfmt")
+        }
+        if any(path.exists() or path.is_symlink() for path in legacy_roots.values()):
+            return False
+        for name, legacy_root in legacy_roots.items():
+            command = managed_bin / name
+            if command.is_symlink():
+                try:
+                    target = command.resolve(strict=False)
+                except (OSError, RuntimeError):
+                    return False
+                if (
+                    target.parent.parent == legacy_root
+                    and target.name == f"{name}-x86_64-unknown-linux-gnu"
+                ):
+                    return False
+        for command, key in (("ruff", "RUFF_VERSION"),):
             executable = shutil.which(command)
             if not executable:
                 return False
@@ -4931,7 +4954,17 @@ def _qualification_toolchain() -> tuple[dict[str, list[str] | None], set[tuple[t
     contract = json.loads(read_repository_text(policy_root / "config/toolchain/capabilities.json", root=policy_root))
     capabilities = {item["name"]: item for item in contract["capabilities"]}
     aliases = contract.get("command_capabilities", {})
-    required = {name for names in contract["gate_requirements"].values() for name in names}
+    required = set()
+    for gate, names in contract["gate_requirements"].items():
+        for name in names:
+            capability = capabilities.get(aliases.get(name, name), {})
+            optional_tooling = capability.get("requirement") == "optional-tooling"
+            if optional_tooling != (gate == "optional-agent-tooling"):
+                raise RuntimeError(
+                    f"{gate}: optional agent tools must be isolated from qualification gates"
+                )
+            if not optional_tooling:
+                required.add(name)
     required.update({"templ", "gofmt", "sysctl", "tofu"})
     runtime = any(
         "testcontainers" in source.read_text(encoding="utf-8")

@@ -428,12 +428,13 @@ def validate_contract(
     for name, item in graph.items.items():
         if item.get("requirement") not in requirements:
             raise ValueError(f"{name}: invalid or missing requirement")
-    quality_names = ("ruff", "oxfmt", "oxlint")
-    quality_items = [graph.items[name] for name in quality_names if name in graph.items]
-    if len(quality_items) == len(quality_names):
-        quality_tags = [item.get("provision", {}).get("tags") for item in quality_items]
-        if len(set(quality_tags)) != len(quality_tags):
-            raise ValueError("independent quality capabilities must use distinct provisioning tags")
+    ruff = graph.items.get("ruff")
+    if (
+        ruff
+        and ruff.get("classification") == "managed"
+        and ruff.get("provision", {}).get("tags") != "ruff"
+    ):
+        raise ValueError("ruff: managed provisioning must use the targeted ruff tag")
     owners = contract.get("provision_owners", {})
     managed = {
         name for name, item in graph.items.items() if item.get("classification") == "managed" and item.get("provision")
@@ -932,6 +933,9 @@ class Auditor:
         results: dict[str, Result] = {}
         for name in self.graph.order():
             item = self.graph.items[name]
+            if item["requirement"] == "optional-tooling":
+                results[name] = Result("SKIP", "optional tooling is provisioned only by its explicit task")
+                continue
             if profile == "static" and item["requirement"] == "optional-runtime":
                 results[name] = Result("SKIP", "optional runtime capability not required by static profile")
                 continue
@@ -1020,7 +1024,8 @@ def main(argv: list[str] | None = None) -> int:
     required = {
         name
         for name, item in auditor.graph.items.items()
-        if args.profile == "runtime" or item["requirement"] == "required-static"
+        if item["requirement"] == "required-static"
+        or (args.profile == "runtime" and item["requirement"] == "optional-runtime")
     }
     required.update(primitive["command"] for primitive in contract.get("platform_primitives", []))
     return 0 if all(results[name].state == "PASS" for name in required) else 1

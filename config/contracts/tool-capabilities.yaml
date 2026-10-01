@@ -14,8 +14,6 @@ non_capability_tools:
 - node
 - nx
 - oasdiff
-- oxfmt
-- oxlint
 - pnpm
 - pre-commit
 - rg

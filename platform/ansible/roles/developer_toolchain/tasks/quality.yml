@@ -1,67 +1,39 @@
 ---
-# Quality tools are standalone native binaries. Keep their installation in the
-# existing developer_toolchain role so workstation reconciliation has one owner.
-- name: Create quality tool version directories
+# The static Go and HTMX closure uses Ruff for Python lint and format checks.
+# Older revisions installed Oxc in these role-owned locations. Reconcile them
+# whenever the quality toolchain is selected, including an explicit Ruff run.
+- name: Inspect legacy Oxc command links
+  ansible.builtin.stat:
+    path: "{{ local_bin }}/{{ item }}"
+    follow: false
+  loop: [oxlint, oxfmt]
+  register: legacy_oxc_command_links
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
+- name: Remove legacy role-owned Oxc command links
   ansible.builtin.file:
-    path: "{{ item.path }}"
+    path: "{{ local_bin }}/{{ item.item }}"
+    state: absent
+  loop: "{{ legacy_oxc_command_links.results }}"
+  when:
+    - item.stat.islnk | default(false)
+    - (item.stat.lnk_source | default('') | basename) == item.item ~ '-x86_64-unknown-linux-gnu'
+    - (item.stat.lnk_source | default('') | dirname | dirname) == local_share ~ '/tools/' ~ item.item
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
+- name: Remove legacy role-owned Oxc tool directories
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/{{ item }}"
+    state: absent
+  loop: [oxlint, oxfmt]
+  tags: [toolchain, quality_tools, ruff, legacy_oxc_cleanup]
+
+- name: Create Ruff version directory
+  ansible.builtin.file:
+    path: "{{ local_share }}/tools/ruff/{{ ruff_version }}"
     state: directory
     mode: '0755'
-  loop:
-    - {path: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}", tag: oxlint}
-    - {path: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}", tag: oxfmt}
-    - {path: "{{ local_share }}/tools/ruff/{{ ruff_version }}", tag: ruff}
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
-
-- name: Download pinned Oxlint archive
-  ansible.builtin.get_url:
-    url: "https://github.com/oxc-project/oxc/releases/download/{{ oxc_release_tag }}/oxlint-x86_64-unknown-linux-gnu.tar.gz"
-    dest: "{{ local_cache }}/oxlint-{{ oxlint_version }}.tar.gz"
-    checksum: "sha256:{{ oxlint_sha256 }}"
-    mode: '0644'
-  tags: [toolchain, quality_tools, oxlint]
-
-- name: Extract pinned Oxlint
-  ansible.builtin.unarchive:
-    src: "{{ local_cache }}/oxlint-{{ oxlint_version }}.tar.gz"
-    dest: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}"
-    remote_src: true
-    creates: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}/oxlint-x86_64-unknown-linux-gnu"
-  tags: [toolchain, quality_tools, oxlint]
-
-- name: Link Oxlint into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/oxlint/{{ oxlint_version }}/oxlint-x86_64-unknown-linux-gnu"
-    dest: "{{ local_bin }}/oxlint"
-    follow: false
-    state: link
-    force: true
-  tags: [toolchain, quality_tools, oxlint]
-
-- name: Download pinned Oxfmt archive
-  ansible.builtin.get_url:
-    url: "https://github.com/oxc-project/oxc/releases/download/{{ oxc_release_tag }}/oxfmt-x86_64-unknown-linux-gnu.tar.gz"
-    dest: "{{ local_cache }}/oxfmt-{{ oxfmt_version }}.tar.gz"
-    checksum: "sha256:{{ oxfmt_sha256 }}"
-    mode: '0644'
-  tags: [toolchain, quality_tools, oxfmt]
-
-- name: Extract pinned Oxfmt
-  ansible.builtin.unarchive:
-    src: "{{ local_cache }}/oxfmt-{{ oxfmt_version }}.tar.gz"
-    dest: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}"
-    remote_src: true
-    creates: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}/oxfmt-x86_64-unknown-linux-gnu"
-  tags: [toolchain, quality_tools, oxfmt]
-
-- name: Link Oxfmt into the user path
-  ansible.builtin.file:
-    src: "{{ local_share }}/tools/oxfmt/{{ oxfmt_version }}/oxfmt-x86_64-unknown-linux-gnu"
-    dest: "{{ local_bin }}/oxfmt"
-    follow: false
-    state: link
-    force: true
-  tags: [toolchain, quality_tools, oxfmt]
+  tags: [toolchain, quality_tools, ruff]
 
 - name: Download pinned Ruff archive
   ansible.builtin.get_url:
@@ -88,15 +60,10 @@
     force: true
   tags: [toolchain, quality_tools, ruff]
 
-- name: Validate pinned quality tool versions
+- name: Validate pinned Ruff version
   ansible.builtin.command:
-    argv: ["{{ local_bin }}/{{ item.command }}", --version]
-  loop:
-    - {command: oxlint, version: "{{ oxlint_version }}", tag: oxlint}
-    - {command: oxfmt, version: "{{ oxfmt_version }}", tag: oxfmt}
-    - {command: ruff, version: "{{ ruff_version }}", tag: ruff}
-  register: quality_tool_versions
+    argv: ["{{ local_bin }}/ruff", --version]
+  register: ruff_current
   changed_when: false
-  failed_when: item.version not in quality_tool_versions.stdout
-  when: "'all' in ansible_run_tags or 'toolchain' in ansible_run_tags or 'quality_tools' in ansible_run_tags or item.tag in ansible_run_tags"
-  tags: [toolchain, quality_tools, oxlint, oxfmt, ruff]
+  failed_when: ruff_version not in ruff_current.stdout
+  tags: [toolchain, quality_tools, ruff]
