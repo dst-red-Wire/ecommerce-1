@@ -1,0 +1,84 @@
+id: m7-independent-runner-authority
+milestone: M7
+tracker_issue: 20
+work_item_issue: 186
+objective: Establish a pinned local bootstrap and fail-closed independent runner authority for exact-SHA qualification.
+scope:
+  allowed_paths:
+    - Makefile
+    - config/contracts/qualification-execution-policy.yaml
+    - config/work-packages/M7/m7-independent-runner-authority.yaml
+    - docs/engineering/runner-authority.md
+    - docs/project/TEKTON_RUNTIME_PROOF.md
+    - platform/ansible/runner-authority-local.yml
+    - platform/ansible/tekton-proof.yml
+    - platform/runner/Containerfile
+    - platform/tekton/README.md
+    - platform/tekton/authority/base/kustomization.yaml
+    - platform/tekton/authority/base/runner-rbac.yaml
+    - platform/tekton/authority/kustomization.yaml
+    - platform/tekton/authority/local/kustomization.yaml
+    - platform/tekton/authority/local/namespace.yaml
+    - platform/tekton/authority/local/quota.yaml
+    - platform/tekton/pipelines/affected.yaml
+    - platform/tekton/pipelines/product-release.yaml
+    - platform/tekton/tasks/affected-components.yaml
+    - platform/tekton/tasks/finalize-evidence.yaml
+    - platform/tekton/tasks/product-supply-chain.yaml
+    - platform/tekton/tasks/source-checkout.yaml
+    - scripts/repoctl.py
+    - scripts/runner_authority.py
+    - scripts/runner_budget.py
+    - scripts/runner_image.py
+    - scripts/runner_rbac.py
+    - tests/delivery/test_tekton_runtime_wiring.py
+    - tests/test_pr_loop.py
+    - tests/test_runner_authority.py
+    - tests/test_runner_budget.py
+    - tests/test_runner_image.py
+    - tests/test_runner_rbac.py
+  forbidden_paths: []
+dependencies: []
+acceptance:
+  contracts:
+    - architecture.lock.yaml
+    - config/contracts/qualification-execution-policy.yaml
+    - config/contracts/review-policy.yaml
+    - config/contracts/work-package-policy.yaml
+  qualification_gates:
+    - governance
+    - contracts
+    - automation
+    - security
+    - system
+  runtime_evidence: []
+  tests:
+    - tests/delivery/test_tekton_runtime_wiring.py
+    - tests/test_pr_loop.py
+    - tests/test_runner_authority.py
+    - tests/test_runner_budget.py
+    - tests/test_runner_image.py
+    - tests/test_runner_rbac.py
+    - tests/test_work_package.py
+  qce_capabilities:
+    - exact-sha-qualification
+execution:
+  preflight_required: true
+  runtime_required: false
+  recovery_required: false
+  required_capabilities:
+    - toolchain-pinned
+  capability_parameters:
+    toolchain-pinned:
+      sha256: sha256:107f73c10a1ff7f2cadcf628852362e28e09c7c4e18c3f1b3ec2dd7123d8008e
+review:
+  code: required
+  security: required
+completion:
+  post_merge_verification: true
+exit_criteria:
+  - A version-pinned Ansible recipe bootstraps the isolated local Kind, Tekton and Harbor prerequisites with checked digests and live readiness checks.
+  - Runner image publication is constrained to approved merged main, an immutable Harbor digest and real digest pull and smoke checks.
+  - Runner budget, least-privilege RBAC and exact-SHA identity checks fail closed; PR workloads receive no control-plane credentials.
+  - The authority remains NOT_ACTIVE until independent runtime evidence verifies the image, bounded execution and RBAC proofs.
+  - Exact-head FULL qualification and independent CODE and SECURITY reviews, owner authorization and merge requirements govern this PR.

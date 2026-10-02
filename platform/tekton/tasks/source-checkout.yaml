@@ -22,6 +22,32 @@ spec:
       workingDir: $(workspaces.source.path)
       command: [git]
       args: [init, --quiet, .]
+    - name: require-credential-free-repo-url
+      image: $(params.runner-image)
+      command: [python3, -I, -c]
+      args:
+        - |
+          import sys
+          from urllib.parse import urlsplit
+
+          raw = sys.argv[1]
+          try:
+              url = urlsplit(raw)
+              safe = (
+                  len(raw) <= 2048
+                  and url.scheme == "https"
+                  and bool(url.hostname)
+                  and url.username is None
+                  and url.password is None
+                  and not url.query
+                  and not url.fragment
+                  and bool(url.path.strip("/"))
+              )
+          except ValueError:
+              safe = False
+          if not safe:
+              raise SystemExit("source repo URL must be credential-free HTTPS")
+        - $(params.repo-url)
     - name: configure-origin
       image: $(params.runner-image)
       workingDir: $(workspaces.source.path)

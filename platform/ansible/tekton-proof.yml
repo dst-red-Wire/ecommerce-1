@@ -74,6 +74,14 @@
           PARENT_SHA must resolve locally and have exactly BASE_SHA as its sole direct parent.
           The distributed two-commit proof is blocked before any management-plane mutation.
 
+    - name: Block legacy remote evidence proof until independent trusted publisher exists
+      ansible.builtin.fail:
+        msg: >-
+          BLOCKED_POLICY: ecommerce-affected now runs PR code without registry,
+          signing or status credentials. A trusted publisher and verifier
+          outside the PR workspace must replace the retired remote evidence
+          path before this distributed runtime proof can claim PASS.
+
     - name: Load non-secret management-plane runtime coordinates
       ansible.builtin.set_fact:
         runtime: "{{ lookup('ansible.builtin.file', tekton_runtime_config) | from_yaml }}"

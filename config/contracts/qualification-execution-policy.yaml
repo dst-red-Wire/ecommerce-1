@@ -4,6 +4,33 @@ status: enforced
 architecture_authority: architecture.lock.yaml
 scope: entire-repository
 
+runner_authority:
+  source:
+    branch: main
+    merged_only: true
+    self_validation: forbidden
+  runner_image:
+    registry_authority: harbor
+    immutable_digest_required: true
+    live_pull_proof_required: true
+  activation:
+    required_proofs:
+      - runner-image-digest-pullable
+      - bounded-execution-budget-proven
+      - least-privilege-rbac-proven
+    pass_rule: all
+    missing: NOT_ACTIVE
+  execution_budget:
+    global_timeout_required: true
+    subprocess_timeout_required: true
+    cpu_limit_required: true
+    memory_limit_required: true
+    concurrency_limit_required: true
+    descendants_cleanup_required: true
+    aggregate_cgroup_limits_required: true
+    pid_namespace_required: true
+  workload_secrets: forbidden
+
 step_qualification:
   properties_authority: config/contracts/execution-properties-policy.yaml
   evidence_schema: config/contracts/qualification-step-evidence.schema.json

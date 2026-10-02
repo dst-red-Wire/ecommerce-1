@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: runner-execution-budget
+spec:
+  hard:
+    requests.cpu: "2"
+    requests.memory: 4Gi
+    limits.cpu: "4"
+    limits.memory: 6Gi
+    pods: "4"
+    count/pipelineruns.tekton.dev: "2"
+    count/taskruns.tekton.dev: "16"
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: runner-container-budget
+spec:
+  limits:
+    - type: Container
+      min:
+        cpu: 25m
+        memory: 64Mi
+      max:
+        cpu: "2"
+        memory: 2Gi
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 250m
+        memory: 256Mi
