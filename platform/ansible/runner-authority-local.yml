@@ -1,0 +1,259 @@
+---
+- name: Reconcile pinned local Kubernetes fixture for runner authority
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    runner_cluster_name: ecommerce-runner-authority
+    runner_node_image: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+    runner_toolchain_lock: "{{ lookup('file', playbook_dir ~ '/../../config/contracts/toolchain-lock.json') | from_json }}"
+    runner_kind_version: "{{ runner_toolchain_lock.versions.KIND_VERSION }}"
+    runner_kind_sha256: "{{ runner_toolchain_lock.versions.KIND_SHA256_LINUX_AMD64 }}"
+    runner_kind_binary: "{{ lookup('env', 'HOME') }}/.local/bin/kind"
+    runner_kind_url: "https://github.com/kubernetes-sigs/kind/releases/download/v{{ runner_kind_version }}/kind-linux-amd64"
+    runner_kubectl_version: "{{ runner_toolchain_lock.versions.KUBECTL_VERSION }}"
+    runner_kubectl_sha256: "{{ runner_toolchain_lock.versions.KUBECTL_SHA256_LINUX_AMD64 }}"
+    runner_kubectl_binary: "{{ lookup('env', 'HOME') }}/.local/bin/kubectl"
+    runner_kubectl_url: "https://dl.k8s.io/release/v{{ runner_kubectl_version }}/bin/linux/amd64/kubectl"
+    runner_state_dir: "{{ playbook_dir }}/../../.context/runtime/runner-authority"
+    runner_tekton_release_url: https://github.com/tektoncd/pipeline/releases/download/v1.15.0/release.yaml
+    runner_tekton_release_sha256: 9b1bfe474da43d4e7e9993e5c2b67ef0966b0a513de51f25087bc1118a5f49d3
+    runner_tekton_manifest: "{{ runner_state_dir }}/tekton-pipeline-v1.15.0-release.yaml"
+    runner_tekton_effective_manifest: "{{ runner_state_dir }}/tekton-pipeline-v1.15.0-hardened.yaml"
+    runner_kubeconfig: "{{ runner_state_dir }}/kubeconfig"
+  tasks:
+    - name: Create local binary directory
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'HOME') }}/.local/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Install the checksum-pinned kind binary
+      ansible.builtin.get_url:
+        url: "{{ runner_kind_url }}"
+        dest: "{{ runner_kind_binary }}"
+        checksum: "sha256:{{ runner_kind_sha256 }}"
+        mode: "0755"
+
+    - name: Install the checksum-pinned kubectl binary
+      ansible.builtin.get_url:
+        url: "{{ runner_kubectl_url }}"
+        dest: "{{ runner_kubectl_binary }}"
+        checksum: "sha256:{{ runner_kubectl_sha256 }}"
+        mode: "0755"
+
+    - name: Verify the pinned kind binary
+      ansible.builtin.command:
+        argv: [sha256sum, "{{ runner_kind_binary }}"]
+      register: runner_kind_digest
+      changed_when: false
+
+    - name: Reject an unpinned local cluster tool
+      ansible.builtin.assert:
+        that:
+          - runner_kind_digest.stdout.split()[0] == runner_kind_sha256
+        fail_msg: The local kind binary differs from config/toolchain/versions.env.
+
+    - name: Observe existing local clusters
+      ansible.builtin.command:
+        argv: ["{{ runner_kind_binary }}", get, clusters]
+      register: runner_kind_clusters
+      changed_when: false
+
+    - name: Create private runtime state directory
+      ansible.builtin.file:
+        path: "{{ runner_state_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Create the pinned local cluster when absent
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kind_binary }}"
+          - create
+          - cluster
+          - --name
+          - "{{ runner_cluster_name }}"
+          - --image
+          - "{{ runner_node_image }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - --wait
+          - 120s
+      when: runner_cluster_name not in runner_kind_clusters.stdout_lines
+      changed_when: true
+      environment:
+        KIND_EXPERIMENTAL_PROVIDER: docker
+
+    - name: Observe exact node container image
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - "{{ runner_cluster_name }}-control-plane"
+          - --format
+          - "{{ '{{.Config.Image}}' }}"
+      register: runner_node_image_observed
+      changed_when: false
+
+    - name: Reject a stale or mutable node image
+      ansible.builtin.assert:
+        that:
+          - runner_node_image_observed.stdout == runner_node_image
+        fail_msg: Local Kubernetes node does not use the pinned Git image digest.
+
+    - name: Check whether the isolated kubeconfig exists
+      ansible.builtin.stat:
+        path: "{{ runner_kubeconfig }}"
+      register: runner_kubeconfig_stat
+
+    - name: Export isolated kubeconfig for an existing cluster
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kind_binary }}"
+          - export
+          - kubeconfig
+          - --name
+          - "{{ runner_cluster_name }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+      when: not runner_kubeconfig_stat.stat.exists
+      changed_when: true
+      environment:
+        KIND_EXPERIMENTAL_PROVIDER: docker
+
+    - name: Protect isolated kubeconfig
+      ansible.builtin.file:
+        path: "{{ runner_kubeconfig }}"
+        mode: "0600"
+
+    - name: Require a live Ready node
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - wait
+          - --for=condition=Ready
+          - node
+          - --all
+          - --timeout=120s
+      register: runner_ready_nodes
+      changed_when: false
+
+    - name: Download exact Tekton Pipelines release manifest
+      ansible.builtin.get_url:
+        url: "{{ runner_tekton_release_url }}"
+        dest: "{{ runner_tekton_manifest }}"
+        checksum: "sha256:{{ runner_tekton_release_sha256 }}"
+        mode: "0600"
+
+    - name: Require exactly one Tekton credential-init default in the pinned release
+      ansible.builtin.assert:
+        that:
+          - >-
+            lookup('ansible.builtin.file', runner_tekton_manifest).count('disable-creds-init: "false"') == 1
+
+    - name: Render the pinned Tekton release with credential injection disabled
+      ansible.builtin.copy:
+        content: >-
+          {{ lookup('ansible.builtin.file', runner_tekton_manifest, rstrip=False)
+             | replace('disable-creds-init: "false"', 'disable-creds-init: "true"') }}
+        dest: "{{ runner_tekton_effective_manifest }}"
+        mode: "0600"
+
+    - name: Install or reconcile the pinned Tekton Pipelines release
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - apply
+          - -f
+          - "{{ runner_tekton_effective_manifest }}"
+      register: runner_tekton_apply
+      changed_when: "'created' in runner_tekton_apply.stdout or 'configured' in runner_tekton_apply.stdout"
+
+    - name: Require the real PipelineRun CRD
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - wait
+          - --for=condition=Established
+          - crd/pipelineruns.tekton.dev
+          - --timeout=120s
+      changed_when: false
+
+    - name: Require live Tekton controllers
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - wait
+          - --for=condition=Available
+          - deployment
+          - --all
+          - -n
+          - tekton-pipelines
+          - --timeout=180s
+      changed_when: false
+
+    - name: Require Tekton credential injection disabled in the live cluster
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - get
+          - configmap
+          - feature-flags
+          - -n
+          - tekton-pipelines
+          - -o
+          - json
+      register: runner_tekton_feature_flags_verified
+      changed_when: false
+
+    - name: Reject a cluster that auto-injects ServiceAccount secrets
+      ansible.builtin.assert:
+        that:
+          - (runner_tekton_feature_flags_verified.stdout | from_json).data['disable-creds-init'] == 'true'
+
+    - name: Reconcile dedicated local runner namespace and RBAC
+      ansible.builtin.command:
+        argv:
+          - "{{ runner_kubectl_binary }}"
+          - --kubeconfig
+          - "{{ runner_kubeconfig }}"
+          - apply
+          - -k
+          - "{{ playbook_dir }}/../tekton/authority/local"
+      register: runner_authority_overlay_apply
+      changed_when: "'created' in runner_authority_overlay_apply.stdout or 'configured' in runner_authority_overlay_apply.stdout"
+
+    - name: Assess live local runner RBAC
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../../scripts/runner_rbac.py"
+          - --context
+          - kind-ecommerce-runner-authority
+          - --namespace
+          - ecommerce-runner
+      environment:
+        KUBECONFIG: "{{ runner_kubeconfig }}"
+        PATH: "{{ lookup('env', 'HOME') }}/.local/bin:{{ lookup('env', 'PATH') }}"
+      register: runner_rbac_assessment
+      changed_when: false
+      failed_when: false
+
+    - name: Require allowed and denied live RBAC matrix
+      ansible.builtin.assert:
+        that:
+          - runner_rbac_assessment.rc == 0
+          - (runner_rbac_assessment.stdout | from_json).assessment == 'PASS'
+          - not (runner_rbac_assessment.stdout | from_json).formal_proof
+        fail_msg: The local RBAC matrix did not satisfy least privilege.

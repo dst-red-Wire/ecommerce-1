@@ -151,6 +151,13 @@ local-gpg-register: workspace-check ## Register public automation key on Gitea o
 local-services-proof: workspace-check ## Verify TLS, DNS, identities, GPG and Harbor robot login
 	@$(PYTHON) platform/local-services/manage.py proof
 
+.PHONY: runner-authority-local
+runner-authority-local: workspace-check ## Reconcile pinned local Harbor and isolated Tekton runner fixture
+	@$(MAKE) seed
+	@$(MAKE) local-services-up
+	@$(MAKE) local-services-proof
+	@PATH="$(QUALIFICATION_BIN):$$PATH" "$(QUALIFICATION_BIN)/ansible-playbook" -i localhost, platform/ansible/runner-authority-local.yml
+
 
 mgmt-runtime-inventory: ## Build non-secret bootstrap transport overlay from OpenTofu MGMT outputs
 	@$(PYTHON) scripts/mgmt_runtime_inventory.py --output "$${OUTPUT:-.context/runtime/mgmt-ansible-transport.json}"

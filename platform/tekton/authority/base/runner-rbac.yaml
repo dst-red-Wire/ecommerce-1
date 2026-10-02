@@ -1,0 +1,42 @@
+# Render through a Kustomize overlay with the dedicated runtime namespace.
+# The namespace transformer must populate RoleBinding subjects[].namespace.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runner-authority
+  labels:
+    app.kubernetes.io/component: runner-authority
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runner-workload
+  labels:
+    app.kubernetes.io/component: runner-workload
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runner-authority-pipelineruns
+  labels:
+    app.kubernetes.io/component: runner-authority
+rules:
+  - apiGroups: [tekton.dev]
+    resources: [pipelineruns]
+    verbs: [create, get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runner-authority-pipelineruns
+  labels:
+    app.kubernetes.io/component: runner-authority
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: runner-authority-pipelineruns
+subjects:
+  - kind: ServiceAccount
+    name: runner-authority

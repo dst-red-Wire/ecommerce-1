@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("repoctl_pr_loop_test", ROOT / "scripts/repoctl.py")
@@ -21,6 +22,236 @@ RISK_SPEC = importlib.util.spec_from_file_location(
 assert RISK_SPEC and RISK_SPEC.loader
 MERGE_RISK = importlib.util.module_from_spec(RISK_SPEC)
 RISK_SPEC.loader.exec_module(MERGE_RISK)
+
+
+class RunnerAuthorityIntegrationTests(unittest.TestCase):
+    SHA = "a" * 40
+
+    @staticmethod
+    def policy():
+        return yaml.safe_load(
+            (ROOT / "config/contracts/qualification-execution-policy.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_only_target_pr_is_blocked_and_invalid_contract_stays_closed(self):
+        policy = self.policy()
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=policy
+            ),
+        ):
+            blocker = REPOCTL._runner_authority_blocker()
+        self.assertIn("runner_authority=NOT_ACTIVE", blocker)
+        self.assertIn("PR #185", blocker)
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 186},
+            ),
+            mock.patch.object(REPOCTL, "qualification_execution_policy") as load_policy,
+        ):
+            self.assertIsNone(REPOCTL._runner_authority_blocker())
+            load_policy.assert_not_called()
+        policy["runner_authority"]["execution_budget"][
+            "pid_namespace_required"
+        ] = False
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=policy
+            ),
+        ):
+            self.assertIn("contract invalid", REPOCTL._runner_authority_blocker())
+
+    def test_real_github_pr_number_must_match_trusted_context(self):
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 186, "base_sha": "b" * 40, "head_sha": self.SHA},
+            ),
+            self.assertRaisesRegex(RuntimeError, "trusted PR pr number mismatch"),
+        ):
+            REPOCTL._checked_runner_authority_blocker(
+                pr_number=185, base_sha="b" * 40, head_sha=self.SHA
+            )
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={
+                    "pr_number": 185,
+                    "base_sha": "b" * 40,
+                    "head_sha": self.SHA,
+                },
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=self.policy()
+            ),
+        ):
+            self.assertIn(
+                "runner_authority=NOT_ACTIVE",
+                REPOCTL._checked_runner_authority_blocker(
+                    pr_number=185, base_sha="b" * 40, head_sha=self.SHA
+                ),
+            )
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context", return_value=None
+            ),
+            mock.patch.object(REPOCTL, "qualification_execution_policy") as load_policy,
+        ):
+            self.assertIsNone(REPOCTL._runner_authority_blocker())
+            load_policy.assert_not_called()
+
+    def test_finish_pr_uses_github_pr_number_after_forged_context(self):
+        base_sha = "b" * 40
+        branch = "feature/forged-context"
+        pre_pr = {
+            "number": 185,
+            "state": "OPEN",
+            "draft": False,
+            "head_sha": self.SHA,
+            "head_branch": branch,
+            "base": "main",
+            "base_sha": base_sha,
+        }
+
+        def git(*args):
+            if args == ("branch", "--show-current"):
+                return branch
+            if args[0] == "status":
+                return ""
+            if args == ("rev-parse", "HEAD"):
+                return self.SHA
+            raise AssertionError(f"unexpected Git invocation: {args}")
+
+        with (
+            mock.patch.object(
+                REPOCTL,
+                "_trusted_pr_execution_context",
+                return_value={
+                    "pr_number": 186,
+                    "base_sha": base_sha,
+                    "head_sha": self.SHA,
+                    "trusted_root": Path("/trusted/base"),
+                },
+            ),
+            mock.patch.object(REPOCTL, "toolchain_closure", return_value=0),
+            mock.patch.object(
+                REPOCTL, "run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ) as runner,
+            mock.patch.object(
+                REPOCTL, "repository_delivery_policy",
+                return_value={"default_branch": "main"},
+            ),
+            mock.patch.object(REPOCTL, "git", side_effect=git),
+            mock.patch.object(REPOCTL, "_exact_commit_sha", return_value=base_sha),
+            mock.patch.object(REPOCTL, "_remote_ref_sha", return_value=self.SHA),
+            mock.patch.object(REPOCTL, "commit_provenance_check", return_value=0),
+            mock.patch.object(REPOCTL, "remote_commit_provenance_check", return_value=0),
+            mock.patch.object(
+                REPOCTL, "_github_repository_identity",
+                return_value=("owner", "dst-red-Wire/ecommerce-1"),
+            ),
+            mock.patch.object(REPOCTL, "_github_pr_snapshot", return_value=pre_pr),
+            mock.patch.object(
+                REPOCTL, "output", return_value=json.dumps([{"number": 185}])
+            ),
+            mock.patch.object(REPOCTL.shutil, "which", return_value="gh"),
+            mock.patch.object(REPOCTL, "_delivery_pr_work_item_preflight") as preflight,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+        ):
+            self.assertNotEqual(0, REPOCTL.finish_pr("main"))
+        self.assertIn("trusted PR pr number mismatch", stderr.getvalue())
+        preflight.assert_not_called()
+        self.assertFalse(
+            any("qualification-proof" in call.args[0] for call in runner.call_args_list)
+        )
+
+    def test_trusted_verify_change_cannot_write_exact_pass_for_pr_185(self):
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=self.policy()
+            ),
+            mock.patch.object(REPOCTL, "toolchain_closure") as toolchain,
+            mock.patch.object(REPOCTL, "write_evidence") as write,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertNotEqual(
+                0, REPOCTL.verify_change("main", self.SHA, profile="full")
+            )
+        toolchain.assert_not_called()
+        write.assert_not_called()
+
+    def test_qualification_proof_cannot_reuse_or_emit_pass_for_pr_185(self):
+        with (
+            mock.patch.object(
+                REPOCTL, "qualification_workflow",
+                return_value={"verify_change_runs": 1, "performance_audit_runs": 1},
+            ),
+            mock.patch.object(REPOCTL, "git", return_value=self.SHA),
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=self.policy()
+            ),
+            mock.patch.object(REPOCTL, "_valid_exact_evidence") as evidence,
+            mock.patch.object(REPOCTL, "verify_change") as verify,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertNotEqual(0, REPOCTL.qualification_proof("main"))
+        evidence.assert_not_called()
+        verify.assert_not_called()
+
+    def test_cached_base_envelope_cannot_be_reported_pass_for_pr_185(self):
+        with (
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=self.policy()
+            ),
+            mock.patch.object(REPOCTL, "git") as git,
+        ):
+            result = REPOCTL._pr_loop_qualification("main", self.SHA)
+        self.assertEqual("BLOCKED_RUNTIME", result["status"])
+        self.assertEqual("runner-authority", result["source"])
+        git.assert_not_called()
+
+    def test_finish_pr_stops_before_other_gates_for_pr_185(self):
+        with (
+            mock.patch.object(REPOCTL, "_require_trusted_pr_execution"),
+            mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"pr_number": 185},
+            ),
+            mock.patch.object(
+                REPOCTL, "qualification_execution_policy", return_value=self.policy()
+            ),
+            mock.patch.object(REPOCTL, "toolchain_closure") as toolchain,
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertNotEqual(0, REPOCTL.finish_pr("main"))
+        toolchain.assert_not_called()
 
 
 class PRLoopStateTests(unittest.TestCase):
@@ -906,6 +1137,59 @@ class PRLoopOrchestrationTests(unittest.TestCase):
                     }
                 ),
             ),
+        )
+
+    def test_target_pr_stops_before_legacy_qualification_or_merge(self):
+        with contextlib.ExitStack() as stack:
+            for patcher in self.common():
+                stack.enter_context(patcher)
+            stack.enter_context(
+                mock.patch.object(
+                    REPOCTL, "_pr_loop_current_base",
+                    return_value=self.snapshot(number=185),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    REPOCTL, "_trusted_pr_execution_context",
+                    return_value={"pr_number": 185},
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    REPOCTL, "qualification_execution_policy",
+                    return_value=RunnerAuthorityIntegrationTests.policy(),
+                )
+            )
+            sync = stack.enter_context(mock.patch.object(REPOCTL, "sync_pr_base"))
+            qualification = stack.enter_context(
+                mock.patch.object(REPOCTL, "_pr_loop_qualification")
+            )
+            reviews = stack.enter_context(
+                mock.patch.object(REPOCTL, "pull_request_authority_evidence")
+            )
+            runner = stack.enter_context(
+                mock.patch.object(REPOCTL, "run", return_value=self.completed())
+            )
+            stream = io.StringIO()
+            with contextlib.redirect_stdout(stream):
+                rc = REPOCTL.pr_loop(185, json_output=True)
+        payload = json.loads(stream.getvalue())
+        self.assertEqual(1, rc)
+        self.assertEqual("BLOCKED", payload["state"], payload)
+        self.assertEqual("ACTIVATE_RUNNER_AUTHORITY", payload["next_action"])
+        self.assertEqual("BLOCKED_RUNTIME", payload["qualification"]["status"])
+        self.assertFalse(payload["merge_ready"])
+        self.assertIn("runner_authority=NOT_ACTIVE", " ".join(payload["blockers"]))
+        sync.assert_not_called()
+        qualification.assert_not_called()
+        reviews.assert_not_called()
+        self.assertFalse(
+            any(
+                "qualification-proof" in call.args[0]
+                or "finish-pr" in call.args[0]
+                for call in runner.call_args_list
+            )
         )
 
     def test_invalid_preflight_blocks_qualification_authorities_and_merge_readiness(self):

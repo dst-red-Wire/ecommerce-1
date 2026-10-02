@@ -1,5 +1,8 @@
 # Tekton exact runtime proof
 
+> BLOCKED_POLICY (2026-10-02): this legacy remote-evidence proof is disabled before cluster mutation. The affected Pipeline no longer passes signing, registry, or forge status credentials to PR-controlled code. Re-enable only after an independent trusted publisher and verifier are implemented and qualified.
+
+
 This operation closes the distributed execution-evidence proof without turning GitHub,
 Gitea, Make, or Ansible into a second CI authority. Tekton remains the executor and the
 only component allowed to publish the `tekton/ecommerce-affected` PASS status.

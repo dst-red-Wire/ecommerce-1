@@ -76,9 +76,7 @@ spec:
         name: ecommerce-product-sign-attest
       params:
         - {name: cosign-image, value: $(params.cosign-image)}
+        - {name: syft-image, value: $(params.syft-image)}
         - {name: image-reference, value: $(params.image-repository)@$(tasks.build-push.results.image-digest)}
-        - {name: head, value: $(params.head)}
         - {name: signing-secret, value: $(params.signing-secret)}
         - {name: registry-auth-secret, value: $(params.registry-auth-secret)}
-      workspaces:
-        - {name: source, workspace: source}

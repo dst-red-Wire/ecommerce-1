@@ -162,16 +162,22 @@ metadata:
 spec:
   params:
     - {name: cosign-image, type: string}
+    - {name: syft-image, type: string}
     - {name: image-reference, type: string}
-    - {name: head, type: string}
     - {name: signing-secret, type: string}
     - {name: registry-auth-secret, type: string}
-  workspaces:
-    - name: source
   steps:
+    - name: generate-attestation-sbom
+      image: $(params.syft-image)
+      env:
+        - {name: DOCKER_CONFIG, value: /var/run/registry}
+      command: [syft]
+      args: [$(params.image-reference), --output, spdx-json=/var/run/attestation/sbom.spdx.json]
+      volumeMounts:
+        - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
+        - {name: attestation, mountPath: /var/run/attestation}
     - name: sign
       image: $(params.cosign-image)
-      workingDir: $(workspaces.source.path)
       env:
         - {name: DOCKER_CONFIG, value: /var/run/registry}
         - name: COSIGN_PASSWORD
@@ -186,7 +192,6 @@ spec:
         - {name: signing-key, mountPath: /var/run/cosign, readOnly: true}
     - name: attest-sbom
       image: $(params.cosign-image)
-      workingDir: $(workspaces.source.path)
       env:
         - {name: DOCKER_CONFIG, value: /var/run/registry}
         - name: COSIGN_PASSWORD
@@ -195,11 +200,14 @@ spec:
               name: $(params.signing-secret)
               key: password
       command: [cosign]
-      args: [attest, --yes, --key, /var/run/cosign/cosign.key, --type, spdxjson, --predicate, .context/product-sbom-$(params.head).spdx.json, $(params.image-reference)]
+      args: [attest, --yes, --key, /var/run/cosign/cosign.key, --type, spdxjson, --predicate, /var/run/attestation/sbom.spdx.json, $(params.image-reference)]
       volumeMounts:
         - {name: registry-auth, mountPath: /var/run/registry, readOnly: true}
         - {name: signing-key, mountPath: /var/run/cosign, readOnly: true}
+        - {name: attestation, mountPath: /var/run/attestation, readOnly: true}
   volumes:
+    - name: attestation
+      emptyDir: {}
     - name: registry-auth
       secret:
         secretName: $(params.registry-auth-secret)

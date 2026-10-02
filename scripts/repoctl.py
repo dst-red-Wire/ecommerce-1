@@ -6297,6 +6297,10 @@ def write_evidence(
 
 
 def verify_change(base: str, head: str, profile: str = "full") -> int:
+    if head != "WORKTREE":
+        blocker = _runner_authority_blocker()
+        if blocker:
+            return fail(f"verify-change {blocker}")
     if toolchain_closure():
         return 1
     source_head_sha: str | None = None
@@ -13369,12 +13373,50 @@ def _valid_performance_audit(
     return path
 
 
+_RUNNER_AUTHORITY_TARGET_PR = 185
+
+
+def _runner_authority_blocker() -> str | None:
+    """Keep PR #185 outside legacy formal qualification until runtime activation.
+
+    The exact-base wrapper supplies the PR identity. Its reviewed main controller
+    and policy supply this decision; target PR files and persisted PASS markers do
+    not. The current runner_authority API intentionally has no ACTIVE path.
+    """
+    trusted = _trusted_pr_execution_context()
+    if trusted is None or trusted.get("pr_number") != _RUNNER_AUTHORITY_TARGET_PR:
+        return None
+    try:
+        import runner_authority
+
+        runner_authority.validate_authority_contract(qualification_execution_policy())
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        return f"runner_authority=NOT_ACTIVE for PR #185: trusted contract invalid: {exc}"
+    return (
+        "runner_authority=NOT_ACTIVE for PR #185: independent runtime "
+        "proof verification is not implemented"
+    )
+
+
+def _checked_runner_authority_blocker(
+    *, pr_number: int, base_sha: str, head_sha: str,
+) -> str | None:
+    """Bind the gate to the GitHub PR snapshot, not only wrapper environment."""
+    _require_trusted_pr_execution(
+        pr_number=pr_number, base_sha=base_sha, head_sha=head_sha
+    )
+    return _runner_authority_blocker()
+
+
 def qualification_proof(base: str) -> int:
     workflow = qualification_workflow("qualification_proof")
     if workflow.get("verify_change_runs") != 1 or workflow.get("performance_audit_runs") != 1:
         return fail("qualification-proof workflow may execute each authoritative step at most once when evidence is missing")
 
     head = git("rev-parse", "HEAD").strip()
+    blocker = _runner_authority_blocker()
+    if blocker:
+        return fail(f"qualification-proof {blocker}")
     _workflow_status("RUN", f"qualification-proof {head[:12]}")
     if workflow.get("clean_worktree_required") is True and git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("qualification-proof requires a clean exact-SHA worktree")
@@ -14007,6 +14049,9 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         _require_trusted_pr_execution()
     except RuntimeError as exc:
         return fail(f"finish-pr trusted boundary: {exc}")
+    blocker = _runner_authority_blocker()
+    if blocker:
+        return fail(f"finish-pr {blocker}")
     if toolchain_closure():
         return 1
     trusted = _require_trusted_pr_execution()
@@ -14066,6 +14111,13 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
             or pre_pr.get("base_sha") != _exact_commit_sha(base_ref)
         ):
             raise RuntimeError("PR exact head/base/branch changed before preflight")
+        blocker = _checked_runner_authority_blocker(
+            pr_number=pre_pr["number"],
+            base_sha=pre_pr["base_sha"],
+            head_sha=pre_pr["head_sha"],
+        )
+        if blocker:
+            raise RuntimeError(blocker)
         work_item = _delivery_pr_work_item_preflight(
             gh, name_with_owner, pre_pr, persist=True
         )
@@ -14626,6 +14678,14 @@ def _pr_loop_empty_result(pr_number: int) -> dict:
 def _pr_loop_qualification(
     base_ref: str, head_sha: str, *, repository: str | None = None,
 ) -> dict:
+    blocker = _runner_authority_blocker()
+    if blocker:
+        return {
+            "status": "BLOCKED_RUNTIME",
+            "source": "runner-authority",
+            "head_sha": head_sha,
+            "reason": blocker,
+        }
     trusted = _trusted_pr_execution_context()
     if trusted is not None:
         import qualification_compatibility
@@ -15696,6 +15756,19 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
         result["state"] = "BLOCKED"
         result["next_action"] = "CHECKOUT_EXACT_PR_HEAD"
         result["blockers"].extend(checkout_errors)
+        _emit_pr_loop_result(result, json_output=json_output)
+        return 1
+    blocker = _runner_authority_blocker()
+    if blocker:
+        result["state"] = "BLOCKED"
+        result["next_action"] = "ACTIVATE_RUNNER_AUTHORITY"
+        result["qualification"] = {
+            "status": "BLOCKED_RUNTIME",
+            "source": "runner-authority",
+            "head_sha": initial_head_sha,
+            "reason": blocker,
+        }
+        result["blockers"].append(blocker)
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
 
