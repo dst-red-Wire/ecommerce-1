@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import importlib.util
 import io
 import json
@@ -180,9 +181,31 @@ class VerifiedDeliveryCliTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        audit = fixture.root / f".context/performance/{fixture.head}.json"
+        audit.parent.mkdir(parents=True, exist_ok=True)
+        audit.write_text(
+            json.dumps({
+                "head_sha": fixture.head,
+                "base_sha": fixture.base,
+                "evidence_status": "PASS",
+            }),
+            encoding="utf-8",
+        )
+        receipt = {
+            "evidence_sha256": hashlib.sha256(
+                qualification.read_bytes()
+            ).hexdigest(),
+            "audit_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        }
         with (
             mock.patch.object(
                 REPOCTL, "_valid_exact_evidence", return_value=qualification
+            ),
+            mock.patch.object(
+                REPOCTL, "_qualification_audit_path", return_value=audit,
+            ),
+            mock.patch.object(
+                REPOCTL, "_trusted_isolated_receipt", return_value=receipt,
             ),
             mock.patch.object(
                 REPOCTL,
@@ -500,6 +523,30 @@ class VerifiedDeliveryCliTests(unittest.TestCase):
             self.assertNotEqual(
                 json.loads(content)["evidence_digest"], rendered["preflight_digest"]
             )
+
+    def test_bundle_without_isolation_receipt_blocks_before_creation(self):
+        import evidence_bundle
+
+        with self.preflight_fixture() as (fixture, package, path):
+            item = self.fresh_work_item(fixture, package, path)
+            with (
+                self.bundle_context(fixture),
+                mock.patch.object(
+                    REPOCTL, "_trusted_isolated_receipt",
+                    side_effect=REPOCTL.QualificationAuthorityError(
+                        "fresh isolated receipt is unavailable"
+                    ),
+                ),
+                mock.patch.object(evidence_bundle, "create_bundle") as create,
+                self.assertRaisesRegex(
+                    REPOCTL.QualificationAuthorityError,
+                    "fresh isolated receipt is unavailable",
+                ),
+            ):
+                REPOCTL._delivery_exact_bundle_gate(
+                    fixture.base, fixture.head, item,
+                )
+            create.assert_not_called()
 
     def test_fresh_bundle_keeps_preflight_and_both_external_review_snapshots(self):
         import delivery_preflight

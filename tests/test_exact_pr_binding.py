@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import sys
 import unittest
 from dataclasses import FrozenInstanceError
@@ -245,6 +247,60 @@ class ExactPRBindingTests(unittest.TestCase):
             PR.revalidate_exact_open_pr(binding)
         self.assertEqual("HEAD_CHANGED", error.exception.reason)
         self.assertEqual("c" * 40, error.exception.current_head_sha)
+
+    def test_api_default_environment_blocks_nested_git_fsmonitor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            tracked = checkout / "tracked.txt"
+            tracked.write_text("one\n")
+            for command in (
+                ["config", "user.name", "Test"],
+                ["config", "user.email", "test@example.invalid"],
+                ["add", "tracked.txt"],
+                ["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), *command],
+                    check=True, capture_output=True,
+                )
+            canary = checkout / "credential-canary"
+            fsmonitor = checkout / "fsmonitor.sh"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" > '{canary}'\n"
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "core.fsmonitor", str(fsmonitor)],
+                check=True, capture_output=True,
+            )
+            fake_gh = checkout / "gh"
+            fake_gh.write_text(
+                f"#!/bin/sh\ncd '{checkout}'\n"
+                "/usr/bin/git status --porcelain >/dev/null\n"
+                "printf '{\"ok\":true}\n'\n"
+            )
+            fake_gh.chmod(0o700)
+            inherited = dict(os.environ)
+            inherited["GH_TOKEN"] = "synthetic-owner-token"
+            subprocess.run(
+                [str(fake_gh), "api", "test"], env=inherited,
+                check=True, capture_output=True,
+            )
+            self.assertEqual("synthetic-owner-token", canary.read_text())
+            canary.unlink()
+            with mock.patch.dict(os.environ, {
+                "GH_TOKEN": "synthetic-owner-token",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": str(fsmonitor),
+            }):
+                self.assertEqual({"ok": True}, PR._api(str(fake_gh), "test"))
+            self.assertFalse(canary.exists())
 
     def test_api_command_and_json_errors_fail_closed(self):
         endpoint = f"repos/{REPOSITORY}/branches/main"

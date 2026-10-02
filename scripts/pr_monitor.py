@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -828,6 +829,101 @@ def compact_status_lines(
     ]
 
 
+_SAFE_GIT = [
+    "/usr/bin/git", "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "credential.helper=",
+    "-c", "protocol.ext.allow=never",
+    "-c", "core.sshCommand=/bin/false",
+    "-c", "core.pager=cat",
+]
+
+
+def _safe_git_env(*, remote: bool = False) -> dict[str, str]:
+    """Keep owner credentials out of local Git probes and file transports."""
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+        "GIT_CONFIG_COUNT": "5",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+        "GIT_CONFIG_KEY_4": "core.sshCommand",
+        "GIT_CONFIG_VALUE_4": "/bin/false",
+    }
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "TZ"):
+        if os.environ.get(name):
+            environment[name] = os.environ[name]
+    if remote:
+        for name in (
+            "GH_TOKEN", "GITHUB_TOKEN", "ECOMMERCE_TOOL_HOME",
+            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+            "https_proxy", "http_proxy", "no_proxy",
+        ):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        owner_home = Path(__import__("pwd").getpwuid(os.getuid()).pw_dir)
+        environment["GH_CONFIG_DIR"] = str(owner_home / ".config/gh")
+    return environment
+
+
+def _git_checkout_config_safe(root: Path) -> None:
+    checked = subprocess.run(
+        [*_SAFE_GIT, "config", "--includes", "--local", "--name-only",
+         "--get-regexp",
+         r"^(filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver)$"],
+        cwd=root, env=_safe_git_env(), text=True, capture_output=True,
+        check=False, timeout=10,
+    )
+    if checked.returncode not in (0, 1) or checked.stdout.strip():
+        raise RuntimeError(
+            "BLOCKED_AUTHORITY: executable Git checkout configuration is forbidden"
+        )
+
+
+def _git_remote_helper(root: Path) -> str | None:
+    blocked = "BLOCKED_AUTHORITY: trusted Git remote authentication is unavailable"
+    url = subprocess.run(
+        [*_SAFE_GIT, "config", "--local", "--get-all", "remote.origin.url"],
+        cwd=root, env=_safe_git_env(), text=True, capture_output=True,
+        check=False, timeout=10,
+    )
+    unsafe = subprocess.run(
+        [*_SAFE_GIT, "config", "--includes", "--local", "--name-only",
+         "--get-regexp",
+         r"^(url\..*\.(insteadof|pushinsteadof)|remote\.origin\.(pushurl|uploadpack|receivepack|proxy)|http\..*|credential\..*)$"],
+        cwd=root, env=_safe_git_env(), text=True, capture_output=True,
+        check=False, timeout=10,
+    )
+    if unsafe.returncode not in (0, 1) or unsafe.stdout.strip():
+        raise RuntimeError(blocked)
+    urls = url.stdout.splitlines() if url.returncode == 0 else []
+    if urls == [f"https://github.com/{REPOSITORY}.git"]:
+        try:
+            binary = resolve_managed_gh(ROOT, env=_safe_git_env(remote=True))[0]
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError(blocked) from exc
+        if not Path(binary).is_absolute():
+            raise RuntimeError(blocked)
+        return binary
+    # Local test repositories can be fetched without inheriting any authority.
+    if len(urls) == 1 and (
+        urls[0].startswith("/") or urls[0].startswith("file://")
+    ):
+        return None
+    raise RuntimeError(blocked)
+
+
 def _safe_exec_env() -> dict[str, str]:
     environment = os.environ.copy()
     for name in tuple(environment):
@@ -840,6 +936,19 @@ def _safe_exec_env() -> dict[str, str]:
 def _run(
     command: list[str], *, cwd: Path, input_text: str | None = None
 ) -> subprocess.CompletedProcess[str]:
+    if command and command[0] in {"git", "/usr/bin/git"}:
+        _git_checkout_config_safe(cwd)
+        remote = any(
+            item in {"fetch", "push", "ls-remote"} for item in command[1:2]
+        )
+        prefix = list(_SAFE_GIT)
+        helper = _git_remote_helper(cwd) if remote else None
+        if helper:
+            prefix += ["-c", f"credential.helper=!{shlex.quote(helper)} auth git-credential"]
+        command = [*prefix, *command[1:]]
+        environment = _safe_git_env(remote=bool(helper))
+    else:
+        environment = _safe_exec_env()
     return subprocess.run(
         command,
         cwd=cwd,
@@ -847,7 +956,7 @@ def _run(
         text=True,
         capture_output=True,
         check=True,
-        env=_safe_exec_env(),
+        env=environment,
     )
 
 
@@ -899,12 +1008,12 @@ def _verified_base_source(root: Path, base_sha: str, relative: str) -> Path:
         raise RuntimeError("trusted exact-base source is unavailable")
     try:
         committed = subprocess.run(
-            ["git", "cat-file", "blob", f"{base_sha}:{relative}"],
+            [*_SAFE_GIT, "cat-file", "blob", f"{base_sha}:{relative}"],
             cwd=root,
             capture_output=True,
             check=True,
             timeout=30,
-            env=_safe_exec_env(),
+            env=_safe_git_env(),
         ).stdout
         actual = source.read_bytes()
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
@@ -912,6 +1021,30 @@ def _verified_base_source(root: Path, base_sha: str, relative: str) -> Path:
     if actual != committed:
         raise RuntimeError("trusted exact-base source differs from Git")
     return source
+
+
+def _require_isolated_qualification_capability(root: Path, base_sha: str) -> None:
+    """Reject older exact-base controllers before dispatching any PR transition."""
+    blocked = (
+        "BLOCKED_AUTHORITY: trusted exact-base qualification isolation "
+        "capability is unavailable"
+    )
+    try:
+        helper = _verified_base_source(
+            root, base_sha, "scripts/qualification_isolation.py"
+        ).read_text(encoding="utf-8")
+        controller = _verified_base_source(
+            root, base_sha, "scripts/repoctl.py"
+        ).read_text(encoding="utf-8")
+    except (OSError, RuntimeError, UnicodeError) as exc:
+        raise RuntimeError(blocked) from exc
+    if (
+        "def run_isolated_qualification(" not in helper
+        or "qualification-proof-validate-only" not in controller
+        or "def qualification_proof_validate_only(" not in controller
+        or "trusted-base-validate-only-v1" not in controller
+    ):
+        raise RuntimeError(blocked)
 
 
 def _trusted_adapter(args: argparse.Namespace, binding: ExactPRBinding) -> Path:
@@ -925,6 +1058,7 @@ def _trusted_adapter(args: argparse.Namespace, binding: ExactPRBinding) -> Path:
             raise RuntimeError("trusted monitor base checkout differs from GitHub")
         for relative in _TRUSTED_SOURCE_PATHS:
             _verified_base_source(trusted, binding.base_sha, relative)
+        _require_isolated_qualification_capability(trusted, binding.base_sha)
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("trusted monitor base checkout is unavailable") from exc
     return trusted / "scripts/pr_review_dispatch_transition.py"
@@ -942,7 +1076,7 @@ def sync_exact_pr_head(args: argparse.Namespace, head_sha: str) -> None:
         raise SupersededHeadError("SUPERSEDED: invalid exact PR HEAD binding")
     trusted_root, target_root = _trusted_roots(args)
     try:
-        gh, _, _ = resolve_managed_gh(trusted_root)
+        gh, _, _ = resolve_managed_gh(trusted_root, env=_safe_git_env(remote=True))
         branch = _git_value(target_root, "branch", "--show-current")
         local_head = _git_value(target_root, "rev-parse", "HEAD")
         dirty = _git_value(
@@ -1054,12 +1188,12 @@ def exact_head_worktree(head_sha: str, *, repo_root: Path | None = None):
             yield worktree
         finally:
             subprocess.run(
-                ["git", "worktree", "remove", "--force", str(worktree)],
+                [*_SAFE_GIT, "worktree", "remove", "--force", str(worktree)],
                 cwd=repo_root,
                 text=True,
                 capture_output=True,
                 check=False,
-                env=_safe_exec_env(),
+                env=_safe_git_env(),
             )
 
 
@@ -1125,7 +1259,7 @@ def _verified_resume_context(
         head = _git_value(target, "rev-parse", "HEAD")
         branch = _git_value(target, "branch", "--show-current")
         dirty = _git_value(target, "status", "--porcelain", "--untracked-files=all")
-        gh, _, _ = resolve_managed_gh(trusted)
+        gh, _, _ = resolve_managed_gh(trusted, env=_safe_git_env(remote=True))
         binding = resolve_exact_open_pr(REPOSITORY, head, branch, "main", gh=gh)
     except ExactPRBindingError as exc:
         if str(exc).startswith("GitHub API request failed"):
@@ -1447,14 +1581,14 @@ def main() -> int:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     if not token:
         try:
-            gh = resolve_managed_gh(ROOT)[0] if args.trusted_root is not None else "gh"
+            gh = resolve_managed_gh(ROOT, env=_safe_git_env(remote=True))[0] if args.trusted_root is not None else "gh"
             result = subprocess.run(
                 [gh, "auth", "token"],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=15,
-                env=_safe_exec_env(),
+                env=_safe_git_env(remote=True),
             )
             if result.returncode == 0:
                 token = result.stdout.strip()

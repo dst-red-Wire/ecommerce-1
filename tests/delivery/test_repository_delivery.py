@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import io
 import json
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest import mock
@@ -14,6 +17,8 @@ SPEC = importlib.util.spec_from_file_location("repository_delivery_test", MODULE
 assert SPEC and SPEC.loader
 RD = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RD)
+
+import managed_gh as MG
 
 
 class EvidenceMetricsTests(unittest.TestCase):
@@ -192,10 +197,53 @@ class TrustedPRBindingTests(unittest.TestCase):
         with mock.patch.object(RD, "_output", return_value=json.dumps(payload)) as output:
             binding = RD._github_pr_binding(ROOT, "gh", "owner/repo", 166)
         output.assert_called_once_with(
-            ["gh", "api", "repos/owner/repo/pulls/166"], cwd=ROOT
+            ["gh", "api", "repos/owner/repo/pulls/166"],
+            cwd=ROOT, env=mock.ANY,
         )
+        self.assertEqual("/usr/bin:/bin", output.call_args.kwargs["env"]["PATH"])
         self.assertEqual(base_sha, binding["base_sha"])
         self.assertEqual(head_sha, binding["head_sha"])
+
+    def test_authenticated_gh_cannot_spawn_inherited_path_git(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            repo = root / "repo"
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(repo)], check=True
+            )
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            marker = root / "fake-git-ran"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                f"#!/bin/sh\nprintf ran > {marker}\nexit 2\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o700)
+            fake_gh = root / "gh"
+            fake_gh.write_text(
+                "#!/bin/sh\n"
+                "[ \"$GH_TOKEN\" = fixture-only ] || exit 3\n"
+                "git rev-parse --show-toplevel >/dev/null || exit 4\n"
+                "printf '%s\\n' '{\"nameWithOwner\":\"owner/repo\"}'\n",
+                encoding="utf-8",
+            )
+            fake_gh.chmod(0o700)
+            inherited = f"{fake_bin}:/usr/bin:/bin"
+            subprocess.run(
+                ["git", "--version"], cwd=repo,
+                env={"PATH": inherited}, capture_output=True, check=False,
+            )
+            self.assertTrue(marker.exists(), "the fake PATH git must be executable")
+            marker.unlink()
+            with mock.patch.dict(
+                RD.os.environ,
+                {"PATH": inherited, "GH_TOKEN": "fixture-only"},
+            ):
+                self.assertEqual(
+                    "owner/repo", RD._github_repository(repo, str(fake_gh))
+                )
+            self.assertFalse(marker.exists(), "pinned gh must use the fixed Git PATH")
 
     def test_cli_only_sha_fields_cannot_authorize_transition(self):
         payload = {
@@ -359,6 +407,24 @@ class BundleDeliveryTests(unittest.TestCase):
                 text=True,
             )
             head_sha = self.git(target, "rev-parse", "HEAD")
+            fsmonitor_marker = target / ".git/fsmonitor-ran"
+            fsmonitor = target / ".git/fsmonitor-canary"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf ran > {fsmonitor_marker}\necho token\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(target), "config", "core.fsmonitor", str(fsmonitor)],
+                check=True,
+            )
+            # Prove that the fixture is executable under the old unguarded read.
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(target), "status", "--porcelain"],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertTrue(fsmonitor_marker.exists())
+            fsmonitor_marker.unlink()
             binding = {
                 "number": 162,
                 "state": "OPEN",
@@ -379,7 +445,14 @@ class BundleDeliveryTests(unittest.TestCase):
 
             with (
                 mock.patch.object(RD, "__file__", str(trusted_wrapper)),
-                mock.patch.object(RD, "require_command", return_value="gh"),
+                mock.patch(
+                    "managed_gh.resolve_managed_gh",
+                    return_value=("gh", "2.0.0", "a" * 64),
+                ) as resolve_gh,
+                mock.patch.object(
+                    RD, "require_command",
+                    side_effect=AssertionError("inherited PATH must not select gh"),
+                ),
                 mock.patch.object(RD, "_github_pr_binding", return_value=binding),
                 mock.patch.object(RD, "_github_repository", return_value="owner/repo"),
                 mock.patch.object(RD, "_run", side_effect=recording_run),
@@ -392,11 +465,96 @@ class BundleDeliveryTests(unittest.TestCase):
                 )
 
             self.assertEqual(1, rc)
+            resolve_gh.assert_called_once()
+            self.assertEqual(trusted, resolve_gh.call_args.args[0])
+            self.assertEqual(
+                "/usr/bin:/bin", resolve_gh.call_args.kwargs["env"]["PATH"]
+            )
             self.assertFalse(marker.exists(), "the PR-head delivery code must never execute")
+            self.assertFalse(
+                fsmonitor_marker.exists(),
+                "target-local fsmonitor must not run under owner credentials",
+            )
             self.assertEqual(target, seen["cwd"])
             self.assertEqual(str(trusted_controller), seen["cmd"][2])
             self.assertEqual(base_sha, seen["env"]["REPOCTL_TRUSTED_BASE_SHA"])
             self.assertEqual(head_sha, seen["env"]["REPOCTL_TRUSTED_HEAD_SHA"])
+
+
+class ManagedGhProbeTests(unittest.TestCase):
+    def test_default_probes_ignore_inherited_git_and_credentials(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            marker = root / "fake-git-ran"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(f"#!/bin/sh\nprintf ran > {marker}\nexit 91\n", encoding="utf-8")
+            fake_git.chmod(0o700)
+
+            version = "2.101.0"
+            tool_home = root / "tool-home"
+            binary = tool_home / f"share/ecommerce-1/tools/gh-{version}/bin/gh"
+            binary.parent.mkdir(parents=True)
+            binary.write_text(
+                "#!/bin/sh\n"
+                "[ -z \"$GH_TOKEN\" ] || exit 70\n"
+                "[ \"$PATH\" = /usr/bin:/bin ] || exit 71\n"
+                "[ \"$HOME\" = /nonexistent ] || exit 72\n"
+                "git --version >/dev/null || exit 73\n"
+                "if [ \"$1\" = --version ]; then\n"
+                f"  printf 'gh version {version} (fixture)\\n'\n"
+                "elif [ \"$1\" = api ] && [ \"$2\" = --help ]; then\n"
+                "  printf 'Flags: --paginate --slurp\\n'\n"
+                "else\n"
+                "  exit 74\n"
+                "fi\n",
+                encoding="utf-8",
+            )
+            binary.chmod(0o700)
+            link = tool_home / "bin/gh"
+            link.parent.mkdir(parents=True)
+            link.symlink_to(binary)
+            archive = tool_home / f"cache/gh-{version}-linux-amd64.tar.gz"
+            archive.parent.mkdir(parents=True)
+            with tarfile.open(archive, "w:gz") as package:
+                member = tarfile.TarInfo(f"gh_{version}_linux_amd64/bin/gh")
+                content = binary.read_bytes()
+                member.size = len(content)
+                member.mode = 0o755
+                package.addfile(member, io.BytesIO(content))
+            trusted = root / "trusted"
+            lock = trusted / "config/contracts/toolchain-lock.json"
+            lock.parent.mkdir(parents=True)
+            lock.write_text(json.dumps({
+                "versions": {
+                    "GH_VERSION": version,
+                    "GH_SHA256_LINUX_AMD64_TARGZ": hashlib.sha256(archive.read_bytes()).hexdigest(),
+                },
+                "tool_lifecycle": {"active": {"gh": {
+                    "version_ref": "GH_VERSION",
+                    "checksum_ref": "GH_SHA256_LINUX_AMD64_TARGZ",
+                    "provision": {"type": "ansible", "tags": "gh"},
+                }}},
+                "capability_policy": {"managed_install_root": {
+                    "environment": "ECOMMERCE_TOOL_HOME",
+                    "fallback": "~/.local",
+                    "bin_subdirectory": "bin",
+                    "share_subdirectory": "share/ecommerce-1",
+                    "cache_subdirectory": "cache",
+                    "fallback_cache_root": "~/.cache/ecommerce-1",
+                }},
+            }), encoding="utf-8")
+            with mock.patch.dict(MG.os.environ, {
+                "ECOMMERCE_TOOL_HOME": str(tool_home),
+                "PATH": f"{fake_bin}:/usr/bin:/bin",
+                "GH_TOKEN": "fixture-secret",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": str(fake_git),
+            }, clear=True):
+                self.assertEqual(str(binary), MG.resolve_managed_gh(trusted)[0])
+            self.assertFalse(marker.exists(), "managed gh probes must not execute inherited git")
 
 
 class RemoteStatusTests(unittest.TestCase):

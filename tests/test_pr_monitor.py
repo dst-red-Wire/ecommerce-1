@@ -1193,6 +1193,139 @@ class PRMonitorTest(unittest.TestCase):
             self.assertEqual(["-I", "-c"], command[1:3])
             self.assertEqual(str(target), command[command.index("--target-root") + 1])
 
+    def test_monitor_git_status_never_runs_checkout_fsmonitor(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            tracked = checkout / "tracked.txt"
+            tracked.write_text("one\n")
+            for command in (
+                ["config", "user.name", "Test"],
+                ["config", "user.email", "test@example.invalid"],
+                ["add", "tracked.txt"],
+                ["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), *command],
+                    check=True, capture_output=True,
+                )
+            canary = checkout / "credential-canary"
+            fsmonitor = checkout / "fsmonitor.sh"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" > '{canary}'\n"
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "core.fsmonitor", str(fsmonitor)],
+                check=True, capture_output=True,
+            )
+            exposed = dict(os.environ)
+            exposed["GH_TOKEN"] = "synthetic-owner-token"
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "status", "--porcelain"],
+                env=exposed, check=True, capture_output=True,
+            )
+            self.assertEqual("synthetic-owner-token", canary.read_text())
+            canary.unlink()
+            with mock.patch.dict(os.environ, {
+                "GH_TOKEN": "synthetic-owner-token",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": str(fsmonitor),
+            }):
+                pr_monitor._git_value(checkout, "status", "--porcelain")
+            self.assertFalse(canary.exists())
+
+    def test_monitor_remote_helper_rejects_url_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "remote.origin.url",
+                 "https://github.com/dst-red-Wire/ecommerce-1.git"],
+                check=True, capture_output=True,
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", checkout),
+                mock.patch.object(
+                    pr_monitor, "resolve_managed_gh",
+                    return_value=("/trusted/pinned/gh", "1.0.0", "a" * 64),
+                ) as resolver,
+            ):
+                self.assertEqual(
+                    "/trusted/pinned/gh",
+                    pr_monitor._git_remote_helper(checkout),
+                )
+                self.assertEqual(
+                    "/usr/bin:/bin",
+                    resolver.call_args.kwargs["env"]["PATH"],
+                )
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), "config",
+                     "url.https://evil.invalid.insteadOf",
+                     "https://github.com/"],
+                    check=True, capture_output=True,
+                )
+                with self.assertRaisesRegex(RuntimeError, "BLOCKED_AUTHORITY"):
+                    pr_monitor._git_remote_helper(checkout)
+
+    def test_old_exact_base_without_isolation_capability_blocks_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trusted = Path(directory) / "trusted"
+            target = Path(directory) / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            target.mkdir()
+            for relative in pr_monitor._TRUSTED_SOURCE_PATHS:
+                source = trusted / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("# committed exact-base source\n")
+            (trusted / "scripts/qualification_isolation.py").write_text(
+                "def run_isolated_qualification(*args, **kwargs): pass\n"
+            )
+            (trusted / "scripts/repoctl.py").write_text(
+                "# old controller lacks validate-only CLI\n"
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(trusted)],
+                capture_output=True, text=True, check=True,
+            )
+            for command in (
+                ["git", "config", "user.email", "monitor-test@example.invalid"],
+                ["git", "config", "user.name", "Monitor Test"],
+                ["git", "add", "scripts"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "old base"],
+            ):
+                subprocess.run(
+                    command, cwd=trusted, capture_output=True,
+                    text=True, check=True,
+                )
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=trusted,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            binding = ExactPRBinding(
+                "dst-red-Wire/ecommerce-1", 169, "main", base_sha,
+                "feature", "a" * 40,
+            )
+            monitor_args = args(
+                owner="dst-red-Wire", repo="ecommerce-1", pr=169,
+                trusted_root=trusted, target_root=target,
+            )
+            with mock.patch.object(pr_monitor, "ROOT", trusted), (
+                self.assertRaisesRegex(RuntimeError, "BLOCKED_AUTHORITY")
+            ):
+                pr_monitor._trusted_adapter(monitor_args, binding)
+
     def test_missing_base_adapter_blocks_without_target_fallback(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

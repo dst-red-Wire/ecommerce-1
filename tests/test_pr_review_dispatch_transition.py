@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import shlex
 import subprocess
 import tempfile
 from pathlib import Path
@@ -135,6 +136,70 @@ class PRReviewDispatchTransitionTest(TestCase):
         fetch_patch = mock.patch.object(transition, "_ensure_trusted_head_object")
         self.fetch_head = fetch_patch.start()
         self.addCleanup(fetch_patch.stop)
+
+    def test_local_git_status_does_not_run_checkout_fsmonitor_or_inherited_git(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            checkout = root / "checkout"
+            subprocess.run(["/usr/bin/git", "init", "-q", str(checkout)], check=True)
+            (checkout / "tracked.txt").write_text("tracked\n", encoding="utf-8")
+            subprocess.run(["/usr/bin/git", "-C", str(checkout), "add", "tracked.txt"], check=True)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "-c", "user.name=Test",
+                 "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false",
+                 "commit", "-qm", "base"],
+                check=True,
+            )
+            fsmonitor_marker = checkout / ".git/fsmonitor-ran"
+            fsmonitor = checkout / ".git/fsmonitor-canary"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf ran > {fsmonitor_marker}\necho token\n",
+                encoding="utf-8",
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config", "core.fsmonitor", str(fsmonitor)],
+                check=True,
+            )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "status", "--porcelain"],
+                check=True, capture_output=True, text=True,
+            )
+            self.assertTrue(fsmonitor_marker.exists(), "fixture must execute under bare Git")
+            fsmonitor_marker.unlink()
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir()
+            fake_git_marker = root / "fake-git-ran"
+            fake_git = fake_bin / "git"
+            fake_git.write_text(
+                f"#!/bin/sh\nprintf ran > {fake_git_marker}\nexit 91\n",
+                encoding="utf-8",
+            )
+            fake_git.chmod(0o700)
+            real_run = subprocess.run
+            seen_status = []
+
+            def capture_run(command, **kwargs):
+                if command[0] == "/usr/bin/git" and "status" in command:
+                    seen_status.append(kwargs["env"])
+                return real_run(command, **kwargs)
+
+            with (
+                mock.patch.dict(transition.os.environ, {
+                    "PATH": f"{fake_bin}:/usr/bin:/bin",
+                    "GH_TOKEN": "fixture-secret",
+                    "GITHUB_TOKEN": "fixture-secret-2",
+                }),
+                mock.patch.object(transition.subprocess, "run", side_effect=capture_run),
+            ):
+                self.assertEqual("", transition._git(checkout, "status", "--porcelain"))
+            self.assertEqual(1, len(seen_status))
+            self.assertEqual("/usr/bin:/bin", seen_status[0]["PATH"])
+            self.assertEqual("/nonexistent", seen_status[0]["HOME"])
+            self.assertNotIn("GH_TOKEN", seen_status[0])
+            self.assertNotIn("GITHUB_TOKEN", seen_status[0])
+            self.assertFalse(fsmonitor_marker.exists())
+            self.assertFalse(fake_git_marker.exists())
 
     def local_git(self):
         return mock.patch.object(
@@ -1376,6 +1441,49 @@ class TrustedHeadObjectTest(TestCase):
             ),
         )
         self.assertEqual(4, checked_binding.call_count)
+
+    def test_canonical_fetch_uses_pinned_helper_and_fixed_auth_environment(self):
+        gh_path = "/managed/gh;untrusted-command"
+        actual_run = subprocess.run
+        captured = {}
+
+        def capture_fetch(command, **kwargs):
+            if "fetch" in command and transition._CANONICAL_ORIGIN in command:
+                captured["command"] = list(command)
+                captured["env"] = dict(kwargs["env"])
+                command = [
+                    str(self.origin) if item == transition._CANONICAL_ORIGIN else item
+                    for item in command
+                ]
+            return actual_run(command, **kwargs)
+
+        with (
+            mock.patch.object(
+                transition, "_trusted_origin_url",
+                return_value=transition._CANONICAL_ORIGIN,
+            ),
+            mock.patch.object(transition, "_managed_gh", return_value=gh_path),
+            mock.patch.object(
+                transition, "revalidate_exact_open_pr", return_value=self.binding
+            ),
+            mock.patch.dict(transition.os.environ, {
+                "GH_TOKEN": "fixture-only",
+                "PATH": "/untrusted:/usr/bin:/bin",
+            }),
+            mock.patch.object(transition.subprocess, "run", side_effect=capture_fetch),
+        ):
+            transition._ensure_trusted_head_object(
+                self.trusted, self.binding, allow_fetch=True
+            )
+        self.assertEqual("/usr/bin/git", captured["command"][0])
+        self.assertIn(
+            f"credential.helper=!{shlex.quote(gh_path)} auth git-credential",
+            captured["command"],
+        )
+        self.assertEqual("/usr/bin:/bin", captured["env"]["PATH"])
+        self.assertEqual("/nonexistent", captured["env"]["HOME"])
+        self.assertEqual("fixture-only", captured["env"]["GH_TOKEN"])
+        self.assertNotIn("GIT_SSH_COMMAND", captured["env"])
 
     def test_dry_run_with_missing_object_never_fetches(self):
         origin, gh, revalidate = self.local_authority()

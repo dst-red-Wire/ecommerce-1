@@ -57,6 +57,9 @@ _PR_LOOP_JSON_STDOUT = contextvars.ContextVar("pr_loop_json_stdout", default=Non
 _PR_LOOP_ACTIVE_RESULT = contextvars.ContextVar("pr_loop_active_result", default=None)
 _PR_LOOP_REPOSITORY = contextvars.ContextVar("pr_loop_repository", default="")
 _PR_LOOP_FRESH_WITNESS = contextvars.ContextVar("pr_loop_fresh_witness", default=None)
+_QUALIFICATION_ISOLATED_RECEIPT = contextvars.ContextVar(
+    "qualification_isolated_receipt", default=None
+)
 _PR_SYNC_LOCK_HELD = contextvars.ContextVar("pr_sync_lock_held", default=None)
 _FINISH_PR_PHASES = contextvars.ContextVar("finish_pr_phases", default=None)
 _NATIVE_UAC_CONTROLLER_PATH = contextvars.ContextVar("native_uac_controller_path", default=None)
@@ -111,11 +114,91 @@ except ModuleNotFoundError as exc:
     REMOTE_STATUS_CONTEXT = "tekton/ecommerce-affected"
 
 _NATIVE_UAC_MODE = os.environ.get("REPOCTL_TRUSTED_NATIVE_UAC") == "1"
-_NATIVE_UAC_GIT = ["/usr/bin/git", "-c", "core.fsmonitor=false",
-                   "-c", "core.hooksPath=/dev/null"]
+_SAFE_GIT = [
+    "/usr/bin/git", "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
+    "-c", "credential.helper=",
+    "-c", "protocol.ext.allow=never",
+    "-c", "core.sshCommand=/bin/false",
+    "-c", "gpg.program=/usr/bin/gpg",
+    "-c", "gpg.format=openpgp",
+    "-c", "core.pager=cat",
+]
+_NATIVE_UAC_GIT = _SAFE_GIT
+
+
+def _trusted_git_mode() -> bool:
+    return _NATIVE_UAC_MODE or any(
+        os.environ.get(name)
+        for name in (
+            "REPOCTL_TRUSTED_WRAPPER", "REPOCTL_TRUSTED_CONTROLLER",
+            "REPOCTL_TRUSTED_POLICY_ROOT", "REPOCTL_TRUSTED_TARGET_ROOT",
+        )
+    )
+
+
+def _safe_git_environment(
+    source: dict[str, str] | None = None, *, remote: bool = False,
+) -> dict[str, str]:
+    """Give Git only host-owned configuration and the credentials it needs."""
+    source = os.environ if source is None else source
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    result = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": home,
+        "XDG_CONFIG_HOME": str(Path(home) / ".config"),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+        "GIT_CONFIG_COUNT": "5",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+        "GIT_CONFIG_KEY_4": "core.sshCommand",
+        "GIT_CONFIG_VALUE_4": "/bin/false",
+    }
+    for name in ("LANG", "LC_ALL", "LC_CTYPE", "TZ", "GPG_TTY", "SKIP"):
+        value = source.get(name)
+        if value:
+            result[name] = value
+    if remote:
+        for name in (
+            "GH_TOKEN", "GITHUB_TOKEN", "ECOMMERCE_TOOL_HOME",
+            "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+            "https_proxy", "http_proxy", "no_proxy",
+        ):
+            value = source.get(name)
+            if value:
+                result[name] = value
+        result["GH_CONFIG_DIR"] = str(Path(home) / ".config/gh")
+    return result
+
+
+def _git_checkout_config_safe(root: Path) -> None:
+    """Reject repository configuration that can execute checkout-supplied code."""
+    checked = subprocess.run(
+        [*_SAFE_GIT, "config", "--includes", "--local", "--name-only",
+         "--get-regexp",
+         r"^(filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver)$"],
+        cwd=root, env=_safe_git_environment(), capture_output=True,
+        text=True, check=False, timeout=10,
+    )
+    if checked.returncode not in (0, 1) or checked.stdout.strip():
+        raise RuntimeError("BLOCKED_AUTHORITY: executable Git checkout configuration is forbidden")
+
+
+_ROOT_TRUSTED_GIT = _trusted_git_mode()
 ROOT = Path(subprocess.check_output(
-    [*(_NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]),
-     "rev-parse", "--show-toplevel"], text=True).strip())
+    [*(_SAFE_GIT if _ROOT_TRUSTED_GIT else ["git"]),
+     "rev-parse", "--show-toplevel"], text=True,
+    env=_safe_git_environment() if _ROOT_TRUSTED_GIT else None,
+).strip())
 
 
 def _toolchain_policy_root() -> Path:
@@ -148,9 +231,12 @@ def _toolchain_policy_root() -> Path:
                 (["rev-parse", "HEAD"], base_sha),
                 (["status", "--porcelain", "--untracked-files=all"], ""),
             ):
+                if arguments[0] == "status":
+                    _git_checkout_config_safe(trusted_root)
                 completed = subprocess.run(
                     [*git_command, *arguments],
                     text=True, capture_output=True, check=False, timeout=10,
+                    env=_safe_git_environment(),
                 )
                 if completed.returncode or completed.stdout.strip() != expected:
                     raise RuntimeError("trusted qualification toolchain root is inconsistent")
@@ -1155,6 +1241,91 @@ def require(name: str) -> str:
     return path
 
 
+def _git_target_root(cmd: list[str], cwd: Path | None) -> Path:
+    root = ROOT if cwd is None else Path(cwd)
+    index = 1
+    while index < len(cmd):
+        if cmd[index] == "-C" and index + 1 < len(cmd):
+            requested = Path(cmd[index + 1])
+            root = requested if requested.is_absolute() else root / requested
+            index += 2
+            continue
+        if cmd[index] == "-c" and index + 1 < len(cmd):
+            index += 2
+            continue
+        break
+    return root
+
+
+def _git_subcommand(cmd: list[str]) -> str:
+    index = 1
+    while index < len(cmd):
+        if cmd[index] in {"-C", "-c", "--git-dir", "--work-tree"}:
+            index += 2
+            continue
+        return cmd[index]
+    return ""
+
+
+def _managed_gh_for_trusted_mode() -> str:
+    trusted = globals().get("_TRUSTED_PR_EXECUTION_CONTEXT")
+    if not isinstance(trusted, dict):
+        raise RuntimeError("BLOCKED_AUTHORITY: managed gh requires verified exact-base context")
+    try:
+        from managed_gh import resolve_managed_gh
+
+        binary = resolve_managed_gh(
+            Path(trusted["trusted_root"]),
+            env=_safe_git_environment(remote=True),
+        )[0]
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "BLOCKED_AUTHORITY: managed gh is unavailable"
+        ) from exc
+    if not Path(binary).is_absolute():
+        raise RuntimeError("BLOCKED_AUTHORITY: managed gh path is invalid")
+    return binary
+
+
+def _gh_binary() -> str | None:
+    return (
+        _managed_gh_for_trusted_mode()
+        if _trusted_git_mode()
+        else shutil.which("gh") or shutil.which("gh.exe")
+    )
+
+
+def _git_remote_authority(root: Path) -> str:
+    """Use only the canonical HTTPS origin and a pinned owner gh helper."""
+    blocked = "BLOCKED_AUTHORITY: trusted Git remote authentication is unavailable"
+    trusted = globals().get("_TRUSTED_PR_EXECUTION_CONTEXT")
+    if not isinstance(trusted, dict):
+        raise RuntimeError(blocked)
+    try:
+        url = subprocess.run(
+            [*_SAFE_GIT, "config", "--local", "--get-all", "remote.origin.url"],
+            cwd=root, env=_safe_git_environment(), capture_output=True,
+            text=True, check=False, timeout=10,
+        )
+        unsafe = subprocess.run(
+            [*_SAFE_GIT, "config", "--includes", "--local", "--name-only",
+             "--get-regexp",
+             r"^(url\..*\.(insteadof|pushinsteadof)|remote\.origin\.(pushurl|uploadpack|receivepack|proxy)|http\..*|credential\..*)$"],
+            cwd=root, env=_safe_git_environment(), capture_output=True,
+            text=True, check=False, timeout=10,
+        )
+        if (
+            url.returncode != 0
+            or url.stdout.splitlines() != ["https://github.com/dst-red-Wire/ecommerce-1.git"]
+            or unsafe.returncode not in (0, 1)
+            or unsafe.stdout.strip()
+        ):
+            raise RuntimeError(blocked)
+        return _managed_gh_for_trusted_mode()
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(blocked) from exc
+
+
 def run(
     cmd: list[str],
     *,
@@ -1166,9 +1337,19 @@ def run(
     # A JSON pr-loop owns stdout exclusively; child diagnostics must not escape there.
     diagnostic_capture = not capture and _PR_LOOP_JSON_STDOUT.get() is not None
     capture = capture or diagnostic_capture
-    if (_NATIVE_UAC_MODE and cmd and cmd[0] in {"git", "/usr/bin/git"}
-        and cmd[:len(_NATIVE_UAC_GIT)] != _NATIVE_UAC_GIT):
-        cmd = [*_NATIVE_UAC_GIT, *cmd[1:]]
+    if cmd and cmd[0] in {"git", "/usr/bin/git"} and _trusted_git_mode():
+        target_root = _git_target_root(cmd, cwd)
+        _git_checkout_config_safe(target_root)
+        remote = _git_subcommand(cmd) in {"fetch", "push", "ls-remote"}
+        prefix = list(_SAFE_GIT)
+        if remote:
+            binary = _git_remote_authority(target_root)
+            prefix += ["-c", f"credential.helper=!{shlex.quote(binary)} auth git-credential"]
+        cmd = [*prefix, *cmd[1:]]
+        env = _safe_git_environment(env, remote=remote)
+    elif cmd and Path(cmd[0]).name in {"gh", "gh.exe"} and _trusted_git_mode():
+        cmd = [_managed_gh_for_trusted_mode(), *cmd[1:]]
+        env = _safe_git_environment(env, remote=True)
     p = subprocess.run(
         cmd,
         cwd=cwd or ROOT,
@@ -1193,8 +1374,7 @@ def output(cmd: list[str], *, cwd: Path | None = None, env: dict[str, str] | Non
 
 
 def git(*args: str, check: bool = True) -> str:
-    command = _NATIVE_UAC_GIT if _NATIVE_UAC_MODE else ["git"]
-    p = run([*command, *args], check=check, capture=True)
+    p = run(["git", *args], check=check, capture=True)
     return p.stdout
 
 
@@ -2643,8 +2823,10 @@ def execution_evidence_violations(
     else:
         source_sha = evidence["source_sha"]
         checkout = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=root,
+            [*(_SAFE_GIT if _trusted_git_mode() else ["git"]),
+             "rev-parse", "--show-toplevel", "HEAD"], cwd=root,
             text=True, capture_output=True, check=False,
+            env=_safe_git_environment() if _trusted_git_mode() else None,
         )
         lines = checkout.stdout.splitlines()
         if (
@@ -2654,9 +2836,13 @@ def execution_evidence_violations(
             or lines[1] != source_sha
         ):
             violations.append("runtime evidence source_sha does not match the exact checkout")
+        if _trusted_git_mode():
+            _git_checkout_config_safe(root)
         dirty = subprocess.run(
-            ["git", "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
+            [*(_SAFE_GIT if _trusted_git_mode() else ["git"]),
+             "status", "--porcelain=v1", "--untracked-files=all"], cwd=root,
             text=True, capture_output=True, check=False,
+            env=_safe_git_environment() if _trusted_git_mode() else None,
         )
         if dirty.returncode or dirty.stdout.strip():
             violations.append("runtime evidence checkout contains uncommitted inputs")
@@ -4384,14 +4570,12 @@ def security() -> int:
         )
     else:
         print("SKIP gosec/govulncheck: no affected Go module")
-    base_sha = subprocess.check_output(["git", "rev-parse", base], cwd=ROOT, text=True).strip()
-    head_sha = subprocess.check_output(
-        ["git", "rev-parse", "HEAD" if head == "WORKTREE" else head], cwd=ROOT, text=True
-    ).strip()
+    base_sha = git("rev-parse", base).strip()
+    head_sha = git("rev-parse", "HEAD" if head == "WORKTREE" else head).strip()
     tree_sha = (
         worktree_tree_sha()
         if head == "WORKTREE"
-        else subprocess.check_output(["git", "rev-parse", f"{head_sha}^{{tree}}"], cwd=ROOT, text=True).strip()
+        else git("rev-parse", f"{head_sha}^{{tree}}").strip()
     )
     evidence = _cve_policy_api().evaluate(
         {
@@ -5374,6 +5558,107 @@ def _controller_command(*args: str) -> list[str]:
     if controller is None:
         controller = os.environ.get("REPOCTL_TRUSTED_CONTROLLER", "scripts/repoctl.py").strip() or "scripts/repoctl.py"
     return [sys.executable, controller, *args]
+
+
+class QualificationAuthorityError(RuntimeError):
+    """The credential-isolated qualification boundary was unavailable."""
+
+
+def _run_pr_qualification(
+    base_sha: str, head_sha: str, *, force_full: bool, capture: bool,
+) -> subprocess.CompletedProcess:
+    """Run PR-head qualification gates behind the trusted isolation boundary."""
+    _QUALIFICATION_ISOLATED_RECEIPT.set(None)
+    try:
+        import qualification_isolation
+
+        controller_command = _controller_command(
+            "qualification-proof", "--base", base_sha,
+        )
+        controller_command[0] = "/usr/bin/python3"
+        result = qualification_isolation.run_isolated_qualification(
+            controller_command,
+            target_root=ROOT,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            force_full=force_full,
+            capture=capture,
+        )
+        if result.returncode == 0:
+            receipt = getattr(result, "qualification_isolation_receipt", None)
+            if isinstance(receipt, dict):
+                _QUALIFICATION_ISOLATED_RECEIPT.set(copy.deepcopy(receipt))
+        return result
+    except Exception as exc:
+        # Sandbox errors may include environment values or host paths.
+        raise QualificationAuthorityError(
+            "credential-isolated qualification is unavailable"
+        ) from exc
+
+
+def _trusted_isolated_receipt(base_sha: str, head_sha: str) -> dict:
+    """Bind a fresh sandbox witness to the verified exact-base controller."""
+    receipt = _QUALIFICATION_ISOLATED_RECEIPT.get()
+    trusted = _trusted_pr_execution_context()
+    native_controller = _NATIVE_UAC_CONTROLLER_PATH.get()
+    controller = native_controller
+    if controller is None and trusted is not None:
+        controller = str(Path(trusted["trusted_root"]) / "scripts/repoctl.py")
+    if not controller or not isinstance(receipt, dict):
+        raise QualificationAuthorityError(
+            "fresh exact-base qualification isolation receipt is unavailable"
+        )
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("base_sha") != base_sha
+        or receipt.get("head_sha") != head_sha
+        or receipt.get("head_tree_sha") != git("rev-parse", f"{head_sha}^{{tree}}").strip()
+        or receipt.get("trusted_controller") != str(controller)
+        or receipt.get("validation") != "trusted-base-validate-only-v1"
+        or receipt.get("namespace_witness") is not True
+        or receipt.get("validator_namespace_witness") is not True
+        or type(receipt.get("child_pid")) is not int
+        or receipt["child_pid"] < 1
+        or type(receipt.get("validator_child_pid")) is not int
+        or receipt["validator_child_pid"] < 1
+        or any(
+            re.fullmatch(r"[0-9a-f]{64}", str(receipt.get(name, ""))) is None
+            for name in ("evidence_sha256", "audit_sha256", "bwrap_sha256")
+        )
+    ):
+        raise QualificationAuthorityError(
+            "fresh exact-base qualification isolation receipt is invalid"
+        )
+    return receipt
+
+
+def _isolated_receipt_matches_file(path: Path, kind: str, receipt: dict) -> bool:
+    """Compare archived or active proof bytes without running PR-head tools."""
+    import qualification_compatibility
+
+    if kind not in {"evidence", "audit"}:
+        return False
+    try:
+        data = qualification_compatibility._read_file(ROOT, path, 16 * 1024 * 1024)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return hashlib.sha256(data).hexdigest() == receipt[f"{kind}_sha256"]
+
+
+def _trusted_isolated_artifacts(
+    base_sha: str, head_sha: str,
+) -> tuple[Path, Path, dict]:
+    receipt = _trusted_isolated_receipt(base_sha, head_sha)
+    evidence = CONTEXT / "evidence" / f"{head_sha}.json"
+    audit = _qualification_audit_path(head_sha)
+    if (
+        not _isolated_receipt_matches_file(evidence, "evidence", receipt)
+        or not _isolated_receipt_matches_file(audit, "audit", receipt)
+    ):
+        raise QualificationAuthorityError(
+            "fresh exact-base qualification artifacts differ from isolation receipt"
+        )
+    return evidence, audit, receipt
 
 
 def _require_clean_exact_checkout(command: str, head: str) -> tuple[str, str] | None:
@@ -7001,7 +7286,7 @@ def _evaluate_github_cleanup_evidence(
 def _github_cleanup_evidence(
     default_branch: str, base_ref: str, merge_method: str, proof_contract: dict
 ) -> dict:
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _gh_binary()
     if not gh:
         print("INFO branch-cleanup: GitHub CLI unavailable; GitHub criteria unavailable")
         return _unavailable_github_cleanup_evidence()
@@ -7780,7 +8065,7 @@ def _roadmap_followup_after_merge() -> int:
         relation = issue_lifecycle.parse_pr_work_item_marker(marker)
         package_path = relation["work_package_path"]
         followup_branch = f"automation/roadmap-sync/{main_sha[:12]}"
-        gh = shutil.which("gh") or shutil.which("gh.exe")
+        gh = _gh_binary()
         if not gh:
             raise RuntimeError("roadmap follow-up requires GitHub CLI")
         open_prs = json.loads(output([
@@ -8689,10 +8974,14 @@ _PUBLICATION_GO_EXEC = re.compile(r"\bexec\.Command(?:Context)?\s*\(")
 
 def _publication_source_files(source_root: Path) -> list[Path]:
     """Inventory deliverable files, including untracked additions before a commit."""
+    if _trusted_git_mode():
+        _git_checkout_config_safe(source_root)
     result = subprocess.run(
-        ["git", "-C", str(source_root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        [*(_SAFE_GIT if _trusted_git_mode() else ["git"]),
+         "-C", str(source_root), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
         capture_output=True,
         check=False,
+        env=_safe_git_environment() if _trusted_git_mode() else None,
     )
     if result.returncode == 0:
         return sorted({source_root / os.fsdecode(name) for name in result.stdout.split(b"\0") if name})
@@ -10263,12 +10552,37 @@ def _verify_local_delivery_signatures(base_ref: str, head: str) -> int:
     return 0
 
 
+def _trusted_publish_qualification_verdict(
+    base_sha: str, head_sha: str, audit_path: Path,
+    qualified: subprocess.CompletedProcess,
+) -> Path:
+    """Accept only a freshly witnessed exact-base controller run in isolation."""
+    if qualified.returncode:
+        raise QualificationAuthorityError(
+            "trusted isolated qualification did not pass"
+        )
+    if _trusted_pr_execution_context() is None:
+        raise QualificationAuthorityError(
+            "trusted independent qualification validator is unavailable"
+        )
+    evidence, audit, _receipt = _trusted_isolated_artifacts(base_sha, head_sha)
+    if audit != audit_path:
+        raise QualificationAuthorityError(
+            "trusted isolated audit path changed"
+        )
+    return evidence
+
+
 def publish(base: str, message: str) -> int:
+    trusted = _trusted_pr_execution_context()
+    if trusted is None:
+        return fail("BLOCKED_AUTHORITY: exact-base publication controller is unavailable")
     if toolchain_closure():
         return 1
-    if run([sys.executable, "scripts/signing_rotation.py", "rotation-check"], check=False).returncode:
+    trusted_scripts = Path(trusted["trusted_root"]) / "scripts"
+    if run([sys.executable, str(trusted_scripts / "signing_rotation.py"), "rotation-check"], check=False).returncode:
         return fail("publish requires the signing rotation delivery gate")
-    if run([sys.executable, "scripts/check_automation_signing.py"], check=False).returncode:
+    if run([sys.executable, str(trusted_scripts / "check_automation_signing.py")], check=False).returncode:
         return fail("publish requires the repository automation signing gate")
     policy = repository_delivery_policy()
     default_branch = str(policy["default_branch"])
@@ -10286,14 +10600,9 @@ def publish(base: str, message: str) -> int:
         return 1
 
     dirty = bool(git("status", "--porcelain", "--untracked-files=all").strip())
-    promotable = _load_promotable_worktree_evidence(base_ref) if dirty else None
     if dirty:
         if not message:
             return fail("dirty tree requires MSG/TITLE")
-        if promotable:
-            print("INFO exact worktree PASS matches current parent/base/tree; commit will attempt evidence promotion")
-        else:
-            print("INFO no promotable worktree evidence; exact-SHA verification will run after commit")
         run(["git", "add", "-A"])
         commit_env = os.environ.copy()
         commit_env["SKIP"] = ",".join(filter(None, [commit_env.get("SKIP", ""), "affected-precommit"]))
@@ -10302,17 +10611,35 @@ def publish(base: str, message: str) -> int:
     head = git("rev-parse", "HEAD").strip()
     if _delivery_publish_preflight(base_ref, head):
         return fail("publish requires a PASS work-item preflight before qualification")
-    exact_evidence: Path | None = None
-    if promotable is not None:
-        exact_evidence = _promote_worktree_evidence(base_ref, head, promotable)
-        if exact_evidence is None:
-            print("INFO worktree evidence promotion invariants changed; falling back to exact-SHA verification")
-    if exact_evidence is None:
-        exact_evidence = _valid_exact_evidence(base_ref, head)
-        if exact_evidence is not None:
-            print(f"PASS publish: reusing existing exact evidence {exact_evidence.relative_to(ROOT)}")
-    if exact_evidence is None and verify_change(base_ref, head):
-        return 1
+    # Earlier worktree or exact-head evidence has no isolation attestation.
+    # Preserve its bytes only as non-authoritative data, then require a fresh
+    # credential-free exact-head execution before any publication mutation.
+    try:
+        import qualification_compatibility
+
+        audit_path = _qualification_audit_path(head)
+        qualification_compatibility.archive_head_artifacts(
+            ROOT, head_sha=head,
+            raw_proof_path=CONTEXT / "evidence" / f"{head}.json",
+            audit_path=audit_path,
+            clear_originals=True,
+        )
+        base_sha = git("rev-parse", base_ref).strip()
+        qualified = _run_pr_qualification(
+            base_sha, head, force_full=True, capture=True,
+        )
+    except QualificationAuthorityError:
+        return fail("publish blocked: credential-isolated qualification is unavailable")
+    except (OSError, RuntimeError, ValueError):
+        return fail("publish exact-SHA qualification preparation failed")
+    if qualified.returncode:
+        return fail("publish isolated exact-SHA qualification failed")
+    try:
+        exact_evidence = _trusted_publish_qualification_verdict(
+            base_sha, head, audit_path, qualified,
+        )
+    except QualificationAuthorityError:
+        return fail("BLOCKED_AUTHORITY: trusted independent qualification validator is unavailable")
     if _verify_local_delivery_signatures(base_ref, head):
         return 1
 
@@ -10343,7 +10670,7 @@ def deliver(base: str, title: str, message: str) -> int:
     try:
         branch = git("branch", "--show-current").strip()
         head = git("rev-parse", "HEAD").strip()
-        gh = shutil.which("gh") or shutil.which("gh.exe")
+        gh = _gh_binary()
         if not gh:
             raise RuntimeError("GitHub CLI missing")
         if remote_commit_provenance_check(gh, f"origin/{base_name}", head):
@@ -11220,7 +11547,8 @@ def _native_uac_trusted_context(action: str) -> dict[str, object]:
     def base_git(*args: str, binary: bool = False):
         result = subprocess.run(
             [*_NATIVE_UAC_GIT, "-C", str(trusted_root), *args], capture_output=True,
-            text=not binary, check=False, timeout=30)
+            text=not binary, check=False, timeout=30,
+            env=_safe_git_environment())
         if result.returncode:
             raise RuntimeError("native recovery exact-base Git verification failed")
         return result.stdout if binary else result.stdout.strip()
@@ -11245,7 +11573,8 @@ def _native_uac_runner_manifest(binding) -> dict[str, str]:
     attributes = ROOT / ".gitattributes"
     attribute_blob = subprocess.run(
         [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:.gitattributes"],
-        cwd=ROOT, capture_output=True, check=False, timeout=30)
+        cwd=ROOT, capture_output=True, check=False, timeout=30,
+        env=_safe_git_environment())
     if (attributes.is_symlink() or not attributes.is_file()
         or attribute_blob.returncode or attributes.read_bytes() != attribute_blob.stdout
         or b"*.ps1 text eol=crlf" not in attribute_blob.stdout.splitlines()):
@@ -11263,7 +11592,8 @@ def _native_uac_runner_manifest(binding) -> dict[str, str]:
             raise RuntimeError(f"native UAC runner is not a regular tracked Git file: {relative}")
         result = subprocess.run(
             [*_NATIVE_UAC_GIT, "show", f"{binding.head_sha}:{relative}"], cwd=ROOT,
-            capture_output=True, check=False, timeout=30)
+            capture_output=True, check=False, timeout=30,
+            env=_safe_git_environment())
         raw = file.read_bytes()
         projected = raw.replace(b"\r\n", b"\n") if name.endswith(".ps1") else raw
         if (result.returncode or b"\r" in projected or projected != result.stdout):
@@ -11284,7 +11614,9 @@ def _native_uac_pinned_gh(trusted_root: str) -> tuple[str, str, str]:
     root = Path(trusted_root)
     if not root.is_absolute() or root.resolve(strict=True) != root:
         raise ValueError("native UAC managed gh requires the exact-base checkout")
-    return resolve_managed_gh(root)
+    return resolve_managed_gh(
+        root, env=_safe_git_environment(remote=True),
+    )
 
 
 def _native_uac_paginated_comments(gh: str, endpoint: str) -> list[dict]:
@@ -11915,7 +12247,8 @@ def _native_uac_trusted_controller(binding, trusted_root: str) -> Path:
     def git_read(*args: str, binary: bool = False):
         result = subprocess.run(
             [*_NATIVE_UAC_GIT, "-C", str(root), *args], capture_output=True,
-            text=not binary, check=False, timeout=30)
+            text=not binary, check=False, timeout=30,
+            env=_safe_git_environment())
         if result.returncode:
             raise RuntimeError("native UAC exact-base Git verification failed")
         return result.stdout if binary else result.stdout.strip()
@@ -11974,8 +12307,9 @@ def _native_uac_qualification_matches(binding, trusted_root: str,
         controller = _native_uac_trusted_controller(binding, trusted_root)
         token = _NATIVE_UAC_CONTROLLER_PATH.set(str(controller))
         try:
-            evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
-            audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
+            evidence, audit, _receipt = _trusted_isolated_artifacts(
+                binding.base_sha, binding.head_sha,
+            )
         finally:
             _NATIVE_UAC_CONTROLLER_PATH.reset(token)
         if evidence is None or audit is None:
@@ -12027,29 +12361,14 @@ def _native_uac_fresh_qualification(context: dict[str, object], campaign_id: str
                 or not artifact.resolve().is_relative_to(ROOT.resolve())):
                 raise RuntimeError("native UAC qualification artifact path is unsafe")
             artifact.unlink(missing_ok=True)
-        previous_force = os.environ.get("ECOMMERCE_FORCE_FULL_QUALIFICATION")
-        os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
-        try:
-            verified = verify_change(binding.base_sha, binding.head_sha, profile="full")
-        finally:
-            if previous_force is None:
-                os.environ.pop("ECOMMERCE_FORCE_FULL_QUALIFICATION", None)
-            else:
-                os.environ["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = previous_force
-        if verified:
+        qualified = _run_pr_qualification(
+            binding.base_sha, binding.head_sha, force_full=True, capture=True,
+        )
+        if qualified.returncode:
             raise RuntimeError("native UAC fresh full qualification failed")
-        evidence = _valid_exact_evidence(binding.base_sha, binding.head_sha)
-        if evidence is None:
-            raise RuntimeError("native UAC fresh exact-SHA evidence is invalid")
-        audit_script = Path(base_root) / "scripts/performance_audit.py"
-        result = run(
-            [sys.executable, "-I", str(audit_script), "--evidence", str(evidence),
-             "--output", str(audit_path)], check=False)
-        if result.returncode:
-            raise RuntimeError("native UAC fresh base-owned performance audit failed")
-        audit = _valid_performance_audit(binding.base_sha, binding.head_sha)
-        if audit is None:
-            raise RuntimeError("native UAC fresh performance audit is invalid")
+        evidence, audit, _receipt = _trusted_isolated_artifacts(
+            binding.base_sha, binding.head_sha,
+        )
         witness = _native_uac_qualification_witness(binding, evidence, audit)
     finally:
         _NATIVE_UAC_CONTROLLER_PATH.reset(token)
@@ -13435,6 +13754,43 @@ def qualification_proof(base: str) -> int:
     return 0
 
 
+def qualification_proof_validate_only(base: str) -> int:
+    """Recheck staged exact-SHA proof after all PR-head gate processes exit.
+
+    This command runs only inside the second credential-free sandbox. It reads
+    the proof and audit through the exact-base controller policy and never
+    executes qualification gates or promotes existing evidence.
+    """
+    workflow = qualification_workflow("qualification_proof")
+    if (
+        workflow.get("merge_authoritative") is not True
+        or workflow.get("exact_sha_required") is not True
+        or workflow.get("clean_worktree_required") is not True
+        or workflow.get("verify_change_runs") != 1
+        or workflow.get("performance_audit_runs") != 1
+    ):
+        return fail("qualification-proof validation policy is not authoritative")
+    head = git("rev-parse", "HEAD").strip()
+    if re.fullmatch(r"[0-9a-f]{40}", head) is None:
+        return fail("qualification-proof validation HEAD is invalid")
+    evidence = _valid_exact_evidence(base, head)
+    if evidence is None:
+        return fail("qualification-proof staged exact evidence is invalid")
+    audit = _valid_performance_audit(base, head)
+    if audit is None:
+        return fail("qualification-proof staged performance audit is invalid")
+    if (
+        git("rev-parse", "HEAD").strip() != head
+        or git("status", "--porcelain", "--untracked-files=all").strip()
+    ):
+        return fail("qualification-proof validation source changed")
+    print(
+        f"PASS qualification-proof-validate-only "
+        f"evidence={evidence.relative_to(ROOT)} audit={audit.relative_to(ROOT)}"
+    )
+    return 0
+
+
 def performance_campaign(base: str, output_path: str = "") -> int:
     workflow = qualification_workflow("performance_campaign")
     repetitions = int(workflow["repetitions"])
@@ -13723,9 +14079,9 @@ def _delivery_exact_bundle_gate(
     preflight_digest = evidence_bundle.digest_bytes(preflight_bytes)
     if preflight_digest != preflight["evidence_digest"]:
         raise RuntimeError("preflight bytes changed after fresh verification")
-    qualified_path = _valid_exact_evidence(base_sha, head_sha)
-    if qualified_path is None:
-        raise RuntimeError("exact-SHA qualification is missing or invalid")
+    qualified_path, _qualified_audit, _receipt = _trusted_isolated_artifacts(
+        base_sha, head_sha,
+    )
     qualification = json.loads(
         post_merge_verify._record_bytes(qualified_path, label="qualification proof")
     )
@@ -13742,10 +14098,7 @@ def _delivery_exact_bundle_gate(
         )
     gate_paths = [preflight_relative]
     if qualification_workflow("qualification_proof").get("performance_audit_runs") == 1:
-        audit = _valid_performance_audit(base_sha, head_sha)
-        if audit is None:
-            raise RuntimeError("exact-SHA performance audit is missing")
-        gate_paths.append(str(audit.relative_to(ROOT)))
+        gate_paths.append(str(_qualified_audit.relative_to(ROOT)))
     runtime_paths = package["acceptance"]["runtime_evidence"]
     runtime_digests = []
     for relative in runtime_paths:
@@ -14027,7 +14380,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
     if git("status", "--porcelain", "--untracked-files=all").strip():
         return fail("finish-pr requires a clean worktree")
 
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _gh_binary()
     if not gh:
         return fail("GitHub CLI missing")
     try:
@@ -14087,7 +14440,13 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail(f"finish-pr base-qualified compatibility envelope missing for {head}")
     evidence = ROOT / qualification["evidence"]
     audit = ROOT / qualification["performance_audit"]
-    if _valid_exact_evidence(base_ref, head, evidence_path=evidence) is None:
+    try:
+        receipt = _trusted_isolated_receipt(
+            git("rev-parse", base_ref).strip(), head,
+        )
+    except QualificationAuthorityError:
+        return fail("BLOCKED_AUTHORITY: fresh isolated qualification receipt is unavailable")
+    if not _isolated_receipt_matches_file(evidence, "evidence", receipt):
         return fail(f"finish-pr archived exact PASS evidence changed for {head}")
 
     proof_workflow = qualification_workflow("qualification_proof")
@@ -14095,7 +14454,7 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         return fail("finish-pr requires qualification_proof to remain merge-authoritative")
     if (
         proof_workflow.get("performance_audit_runs") == 1
-        and _valid_performance_audit(base_ref, head, audit_path=audit) is None
+        and not _isolated_receipt_matches_file(audit, "audit", receipt)
     ):
         return fail(f"finish-pr archived exact performance audit changed for {head}")
     if proof_workflow.get("performance_campaign_required") is True:
@@ -14274,10 +14633,9 @@ def finish_pr(base: str, *, json_output: bool = False) -> int:
         if preflight_digest != fresh_work_item["preflight_digest"]:
             raise RuntimeError("final preflight differs from fresh BASE execution")
 
-        canonical_evidence = _valid_exact_evidence(base_ref, head)
-        canonical_audit = _valid_performance_audit(base_ref, head)
-        if canonical_evidence is None or canonical_audit is None:
-            raise RuntimeError("final canonical qualification or audit is missing")
+        canonical_evidence, canonical_audit, _receipt = (
+            _trusted_isolated_artifacts(base_sha, head)
+        )
         captured_evidence = post_merge_verify._record_bytes(
             canonical_evidence, label="final BASE qualification"
         )
@@ -14523,7 +14881,7 @@ def _finish_pr_json(base: str) -> int:
     phases_token = _FINISH_PR_PHASES.set(phases)
     try:
         with contextlib.redirect_stdout(sys.stderr):
-            gh = shutil.which("gh") or shutil.which("gh.exe")
+            gh = _gh_binary()
             number = 0
             expected_head = ""
             try:
@@ -14645,19 +15003,23 @@ def _pr_loop_qualification(
                 "head_sha": head_sha,
             }
         try:
+            receipt = _trusted_isolated_receipt(base_sha, head_sha)
             found = qualification_compatibility.find_envelope(
                 ROOT, repository=repository, pr_number=int(trusted["pr_number"]),
                 base_sha=base_sha, head_sha=head_sha, tree_sha=tree_sha,
                 controller_path=Path(trusted["trusted_root"]) / "scripts/repoctl.py",
                 expected_digest=witness[5],
-                validate_raw=lambda path: _valid_exact_evidence(
-                    base_ref, head_sha, evidence_path=path,
-                ) is not None,
-                validate_audit=lambda path: _valid_performance_audit(
-                    base_ref, head_sha, audit_path=path,
-                ) is not None,
+                validate_raw=lambda path: _isolated_receipt_matches_file(
+                    path, "evidence", receipt,
+                ),
+                validate_audit=lambda path: _isolated_receipt_matches_file(
+                    path, "audit", receipt,
+                ),
             )
-        except qualification_compatibility.CompatibilityError as exc:
+        except (
+            QualificationAuthorityError,
+            qualification_compatibility.CompatibilityError,
+        ) as exc:
             return {
                 "status": "FAIL", "source": "base-controller-envelope",
                 "head_sha": head_sha, "reason": str(exc),
@@ -14727,23 +15089,20 @@ def _create_pr_qualification_envelope(base_ref: str, head_sha: str) -> dict:
     repository = _PR_LOOP_REPOSITORY.get()
     if not repository:
         raise RuntimeError("trusted PR repository identity is unavailable")
-    evidence = _valid_exact_evidence(base_ref, head_sha)
-    audit = _valid_performance_audit(base_ref, head_sha) if evidence else None
-    if evidence is None or audit is None:
-        raise RuntimeError("base controller exact qualification proof or audit is invalid")
     base_sha = git("rev-parse", base_ref).strip()
+    evidence, audit, receipt = _trusted_isolated_artifacts(base_sha, head_sha)
     tree_sha = git("rev-parse", f"{head_sha}^{{tree}}").strip()
     created = qualification_compatibility.create_envelope(
         ROOT, repository=repository, pr_number=int(trusted["pr_number"]),
         base_sha=base_sha, head_sha=head_sha, tree_sha=tree_sha,
         controller_path=Path(trusted["trusted_root"]) / "scripts/repoctl.py",
         raw_proof_path=evidence, audit_path=audit,
-        validate_raw=lambda path: _valid_exact_evidence(
-            base_ref, head_sha, evidence_path=None if path == evidence else path,
-        ) == path,
-        validate_audit=lambda path: _valid_performance_audit(
-            base_ref, head_sha, audit_path=None if path == audit else path,
-        ) == path,
+        validate_raw=lambda path: _isolated_receipt_matches_file(
+            path, "evidence", receipt,
+        ),
+        validate_audit=lambda path: _isolated_receipt_matches_file(
+            path, "audit", receipt,
+        ),
     )
     _PR_LOOP_FRESH_WITNESS.set((
         repository, int(trusted["pr_number"]), base_sha, head_sha, tree_sha,
@@ -14767,12 +15126,9 @@ def _fresh_qualification_for_finish(
         audit_path=_qualification_audit_path(head_sha),
         clear_originals=True,
     )
-    environment = os.environ.copy()
-    environment["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
     base_sha = git("rev-parse", base_ref).strip()
-    result = run(
-        _controller_command("qualification-proof", "--base", base_sha),
-        check=False, capture=True, env=environment,
+    result = _run_pr_qualification(
+        base_sha, head_sha, force_full=True, capture=True,
     )
     if result.returncode:
         raise RuntimeError("fresh exact-base qualification failed before finish-pr")
@@ -15029,14 +15385,24 @@ def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -
             return fail_before_publication("SIGNED_MERGE_VERIFICATION_FAILED")
         _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
         # Qualification binds the new commit to the merged main before push.
-        qualified = run(
-            _controller_command("qualification-proof", "--base", main_sha),
-            check=False, capture=True,
-            env={**os.environ, "REPOCTL_TRUSTED_HEAD_SHA": new_sha},
+        qualified = _run_pr_qualification(
+            main_sha, new_sha, force_full=True, capture=True,
         )
-        proof = _pr_loop_qualification(main_sha, new_sha)
+        if qualified.returncode:
+            return fail_before_publication("QUALIFICATION_FAILED")
+        if _trusted_pr_execution_context() is not None:
+            evidence, audit, _receipt = _trusted_isolated_artifacts(
+                main_sha, new_sha,
+            )
+            proof = {
+                "status": "PASS", "base_sha": main_sha, "head_sha": new_sha,
+                "evidence": str(evidence.relative_to(ROOT)),
+                "performance_audit": str(audit.relative_to(ROOT)),
+            }
+        else:
+            proof = _pr_loop_qualification(main_sha, new_sha)
         sync["qualification"] = proof
-        if qualified.returncode or proof.get("status") != "PASS" or proof.get("base_sha") != main_sha:
+        if proof.get("status") != "PASS" or proof.get("base_sha") != main_sha:
             return fail_before_publication("QUALIFICATION_FAILED")
         sync["qualification"]["source"] = "executed"
         _pr_loop_current_base(gh, repository, pr["number"], main_sha, fetch=True)
@@ -15047,6 +15413,8 @@ def sync_pr_base(gh: str, repository: str, pr: dict, *, dry_run: bool = False) -
         sync["current_base_sha"] = exc.github_base
         sync["origin_main_sha"] = exc.origin_main
         return fail_before_publication("BASE_CHANGED", str(exc))
+    except QualificationAuthorityError:
+        return fail_before_publication("BLOCKED_AUTHORITY")
     except Exception as exc:
         return fail_before_publication("SYNC_PREPUBLICATION_FAILED", str(exc))
 
@@ -15616,6 +15984,7 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
     result = _pr_loop_empty_result(pr_number)
     _PR_LOOP_ACTIVE_RESULT.set(result)
     _PR_LOOP_FRESH_WITNESS.set(None)
+    _QUALIFICATION_ISOLATED_RECEIPT.set(None)
     if pr_number < 1:
         result["state"] = "BLOCKED"
         result["next_action"] = "USE_VALID_PR_NUMBER"
@@ -15630,7 +15999,7 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
         result["blockers"].append(str(exc))
         _emit_pr_loop_result(result, json_output=json_output)
         return 1
-    gh = shutil.which("gh") or shutil.which("gh.exe")
+    gh = _gh_binary()
     if not gh:
         result["blockers"].append("GitHub CLI missing")
         _emit_pr_loop_result(result, json_output=json_output)
@@ -15725,7 +16094,11 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                     json_output=json_output,
                 )
             result["state"] = "SYNC_CONFLICT" if error == "SYNC_CONFLICT" else error
-            result["next_action"] = "FIX_SYNC_CONFLICTS" if error == "SYNC_CONFLICT" else error
+            result["next_action"] = (
+                "FIX_SYNC_CONFLICTS" if error == "SYNC_CONFLICT"
+                else "FIX_QUALIFICATION_ISOLATION" if error == "BLOCKED_AUTHORITY"
+                else error
+            )
             result["blockers"].append(error)
             _emit_pr_loop_result(result, json_output=json_output)
             return 1
@@ -15873,16 +16246,22 @@ def _pr_loop_impl_locked(pr_number: int, *, dry_run: bool, json_output: bool) ->
                 result["blockers"].append(str(exc))
                 _emit_pr_loop_result(result, json_output=json_output)
                 return 1
-        qualification_env = os.environ.copy()
-        qualification_env["ECOMMERCE_FORCE_FULL_QUALIFICATION"] = "1"
-        qualification = run(
-            _controller_command(
-                "qualification-proof", "--base", before_qualification["base_sha"]
-            ),
-            check=False,
-            capture=json_output,
-            env=qualification_env,
-        )
+        try:
+            qualification = _run_pr_qualification(
+                before_qualification["base_sha"], initial_head_sha,
+                force_full=True, capture=json_output,
+            )
+        except QualificationAuthorityError as exc:
+            result["qualification"] = {
+                "status": "MISSING",
+                "source": "none",
+                "head_sha": initial_head_sha,
+            }
+            result["state"] = "BLOCKED_AUTHORITY"
+            result["next_action"] = "FIX_QUALIFICATION_ISOLATION"
+            result["blockers"].append(str(exc))
+            _emit_pr_loop_result(result, json_output=json_output)
+            return 1
         if qualification.returncode:
             result["qualification"] = {
                 "status": "FAIL",
@@ -16460,7 +16839,7 @@ def preflight_command(package_arg: str, base_sha: str) -> int:
         if package.get("dependencies"):
             import issue_completion
 
-            gh = shutil.which("gh") or shutil.which("gh.exe")
+            gh = _gh_binary()
             if not gh:
                 raise RuntimeError("GitHub CLI required to verify dependencies")
             _owner, repository = _github_repository_identity(gh)
@@ -16640,7 +17019,7 @@ def post_merge_verify_command(pr_number: int) -> int:
     try:
         if type(pr_number) is not int or pr_number < 1:
             raise ValueError("positive PR number required")
-        gh = shutil.which("gh") or shutil.which("gh.exe")
+        gh = _gh_binary()
         if not gh:
             raise RuntimeError("GitHub CLI missing")
         _owner, repository = _github_repository_identity(gh)
@@ -16787,6 +17166,8 @@ def main() -> int:
     gl.add_argument("--head", default=os.environ.get("HEAD", "WORKTREE"))
     qp = sub.add_parser("qualification-proof")
     qp.add_argument("--base", default=os.environ.get("BASE", "origin/main"))
+    qv = sub.add_parser("qualification-proof-validate-only")
+    qv.add_argument("--base", required=True)
     rke2q = sub.add_parser("rke2-local-virtualbox-qualification")
     vm = sub.add_parser("vm")
     vm.add_argument("action", choices=["reconcile"])
@@ -17102,6 +17483,8 @@ def main() -> int:
             return global_check(args.base, args.head)
         if args.cmd == "qualification-proof":
             return qualification_proof(args.base)
+        if args.cmd == "qualification-proof-validate-only":
+            return qualification_proof_validate_only(args.base)
         if args.cmd in {
             "image-rocky-preflight", "image-rocky-build", "image-rocky-qualify", "image-rocky-release",
             "image-rocky-windows-preflight", "image-rocky-windows-build",

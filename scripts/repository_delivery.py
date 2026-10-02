@@ -271,7 +271,59 @@ def publish_gitea_status(
 
 
 def _git(root: Path, *args: str, check: bool = True) -> str:
-    return _run(["git", *args], cwd=root, check=check, capture=True).stdout
+    """Read checkout metadata without inheriting owner identity or executable Git config."""
+    checkout = root.resolve(strict=True)
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+    }
+    prefix = [
+        "/usr/bin/git", "--no-pager",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=",
+        "-c", "protocol.ext.allow=never",
+        "-c", f"core.worktree={checkout}",
+        "-C", str(checkout),
+    ]
+
+    def read(*arguments: str) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                [*prefix, *arguments], cwd=checkout, env=environment,
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                check=False, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("trusted Git metadata is unavailable") from exc
+
+    if args and args[0] == "status":
+        # A tracked .gitattributes can name a filter whose executable lives in
+        # repository-local config. Git status may launch that filter on a dirty
+        # checkout, even though the read will ultimately reject the checkout.
+        external = read(
+            "config", "--includes", "--name-only", "--get-regexp",
+            r"^(filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv))$",
+        )
+        if external.returncode == 0:
+            raise RuntimeError("external Git filters are forbidden during checkout validation")
+        if external.returncode != 1:
+            raise RuntimeError("trusted Git filter configuration is unavailable")
+
+    result = read(*args)
+    if check and result.returncode:
+        raise RuntimeError(result.stderr.strip() or "trusted Git metadata check failed")
+    return result.stdout
 
 
 def _object_sha_pattern(root: Path) -> re.Pattern[str]:
@@ -316,8 +368,50 @@ def _worktree_snapshot(root: Path) -> tuple[str, str, str]:
     return branch, head, status
 
 
+def _authenticated_gh_environment() -> dict[str, str]:
+    """Keep owner GitHub auth while constraining Git spawned by the pinned CLI."""
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": os.environ.get("HOME") or pwd.getpwuid(os.getuid()).pw_dir,
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GH_HOST": "github.com",
+        "GH_PROMPT_DISABLED": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_ATTR_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "4",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+    }
+    for name in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "ECOMMERCE_TOOL_HOME",
+        "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        "https_proxy", "http_proxy", "no_proxy",
+        "SSL_CERT_FILE", "SSL_CERT_DIR",
+    ):
+        value = os.environ.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
 def _github_repository(root: Path, gh: str) -> str:
-    raw = _output([gh, "repo", "view", "--json", "nameWithOwner"], cwd=root)
+    raw = _output(
+        [gh, "repo", "view", "--json", "nameWithOwner"],
+        cwd=root, env=_authenticated_gh_environment(),
+    )
     try:
         repository = str(json.loads(raw or "{}").get("nameWithOwner") or "")
     except json.JSONDecodeError as exc:
@@ -330,7 +424,7 @@ def _github_repository(root: Path, gh: str) -> str:
 def _github_pr_binding(root: Path, gh: str, repository: str, pr_number: int) -> dict[str, Any]:
     raw = _output(
         [gh, "api", f"repos/{repository}/pulls/{pr_number}"],
-        cwd=root,
+        cwd=root, env=_authenticated_gh_environment(),
     )
     try:
         value = json.loads(raw or "{}")
@@ -405,7 +499,11 @@ def trusted_pr_transition(
     if not trusted_controller.is_file():
         raise RuntimeError("trusted exact-base repoctl.py is unavailable")
 
-    gh = require_command("gh")
+    from managed_gh import resolve_managed_gh
+
+    gh, _version, _binary_sha256 = resolve_managed_gh(
+        trusted_root, env=_authenticated_gh_environment()
+    )
     trusted_repository = _github_repository(trusted_root, gh)
     binding = _github_pr_binding(trusted_root, gh, trusted_repository, pr_number)
     base_sha = str(binding["base_sha"])

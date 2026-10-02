@@ -25,19 +25,24 @@ scope:
   - scripts/chatgpt_review_transport.py
   - scripts/delivery_preflight.py
   - scripts/evidence_bundle.py
+  - scripts/exact_pr_binding.py
   - scripts/issue_lifecycle.py
+  - scripts/managed_gh.py
   - scripts/merge_risk.py
   - scripts/milestone_plan.py
   - scripts/post_merge_verify.py
   - scripts/pr_monitor.py
   - scripts/pr_review_convergence.py
   - scripts/repoctl.py
+  - scripts/repository_delivery.py
+  - scripts/qualification_isolation.py
   - scripts/pr_review_dispatch_transition.py
   - scripts/roadmap_sync.py
   - scripts/runtime_orchestration.py
   - scripts/runtime_authority.py
   - scripts/issue_completion.py
   - scripts/work_package.py
+  - tests/delivery/test_repository_delivery.py
   - tests/test_delivery_preflight.py
   - tests/test_delivery_witness_bootstrap.py
   - tests/test_architecture_authority.py
@@ -48,15 +53,19 @@ scope:
   - tests/test_canonical_publication.py
   - tests/test_delivery_supersession.py
   - tests/test_evidence_bundle.py
+  - tests/test_exact_pr_binding.py
   - tests/test_execution_properties.py
   - tests/test_issue_lifecycle.py
   - tests/test_merge_risk.py
   - tests/test_risk_content_assessment.py
   - tests/test_milestone_plan.py
+  - tests/test_native_uac_review_gate.py
   - tests/test_post_merge_verify.py
   - tests/test_pr_monitor.py
   - tests/test_pr_review_convergence.py
   - tests/test_pr_loop.py
+  - tests/test_pr_sync.py
+  - tests/test_qualification_isolation.py
   - tests/test_pr_review_dispatch_transition.py
   - tests/test_roadmap_sync.py
   - tests/test_runtime_orchestration.py
@@ -93,9 +102,11 @@ acceptance:
   - tests/test_chatgpt_review_transport.py
   - tests/test_controller_compatibility.py
   - tests/test_canonical_publication.py
+  - tests/delivery/test_repository_delivery.py
   - tests/test_delivery_preflight.py
   - tests/test_delivery_witness_bootstrap.py
   - tests/test_evidence_bundle.py
+  - tests/test_exact_pr_binding.py
   - tests/test_merge_risk.py
   - tests/test_risk_content_assessment.py
   - tests/test_post_merge_verify.py
@@ -104,7 +115,10 @@ acceptance:
   - tests/test_roadmap_sync.py
   - tests/test_issue_lifecycle.py
   - tests/test_milestone_plan.py
+  - tests/test_native_uac_review_gate.py
   - tests/test_pr_loop.py
+  - tests/test_pr_sync.py
+  - tests/test_qualification_isolation.py
   - tests/test_pr_review_dispatch_transition.py
   - tests/test_runtime_orchestration.py
   - tests/test_execution_properties.py

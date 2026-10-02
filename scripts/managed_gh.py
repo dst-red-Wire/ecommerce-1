@@ -9,10 +9,38 @@ import re
 import subprocess
 import tarfile
 from pathlib import Path
+from typing import Mapping
 
 
-def resolve_managed_gh(root: Path) -> tuple[str, str, str]:
+def _default_probe_environment() -> dict[str, str]:
+    """Run unauthenticated capability probes without inherited tools or secrets."""
+    return {
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "GH_PROMPT_DISABLED": "1",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_COUNT": "4",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+    }
+
+
+def resolve_managed_gh(
+    root: Path, *, env: Mapping[str, str] | None = None
+) -> tuple[str, str, str]:
     """Prove the managed gh binary came from the hash-pinned registry archive."""
+    environment = os.environ if env is None else env
+    probe_environment = _default_probe_environment() if env is None else env
     try:
         lock = json.loads((root / "config/contracts/toolchain-lock.json").read_text(encoding="utf-8"))
         versions = lock["versions"]
@@ -33,7 +61,7 @@ def resolve_managed_gh(root: Path) -> tuple[str, str, str]:
         if any(not isinstance(install.get(key), str) or not install[key]
                for key in keys):
             raise ValueError("managed gh install root policy is invalid")
-        configured = os.environ.get(install["environment"], "").strip()
+        configured = environment.get(install["environment"], "").strip()
         root = Path(configured or install["fallback"]).expanduser()
         cache = (root / install["cache_subdirectory"] if configured
                  else Path(install["fallback_cache_root"]).expanduser())
@@ -75,11 +103,11 @@ def resolve_managed_gh(root: Path) -> tuple[str, str, str]:
         if file_digest(binary) != binary_sha256:
             raise ValueError("managed gh binary differs from pinned archive")
         version_check = subprocess.run(
-            [str(binary), "--version"], capture_output=True, text=True,
-            check=False, timeout=20)
+            [str(binary), "--version"], env=probe_environment, capture_output=True,
+            text=True, check=False, timeout=20)
         help_check = subprocess.run(
-            [str(binary), "api", "--help"], capture_output=True, text=True,
-            check=False, timeout=20)
+            [str(binary), "api", "--help"], env=probe_environment, capture_output=True,
+            text=True, check=False, timeout=20)
         first_line = version_check.stdout.splitlines()
         if (version_check.returncode != 0 or not first_line
             or re.match(r"^gh version " + re.escape(version) + r"(?:[ (]|$)",

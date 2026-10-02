@@ -49,6 +49,8 @@ class SyncPRBaseTests(unittest.TestCase):
             mock.patch.object(REPOCTL, "git", side_effect=self.git),
             mock.patch.object(REPOCTL, "run", side_effect=self.fake_run),
             mock.patch.object(REPOCTL, "_controller_command", side_effect=lambda *args: ["repoctl", *args]),
+            mock.patch.object(REPOCTL, "_run_pr_qualification",
+                              side_effect=self.fake_isolated_qualification),
             mock.patch.object(REPOCTL, "_pr_loop_qualification", side_effect=self.proof),
             mock.patch.object(REPOCTL, "publish", side_effect=self.fake_publish),
         ]
@@ -89,7 +91,16 @@ class SyncPRBaseTests(unittest.TestCase):
         self.remote = self.NEW
         return 0
 
+    def fake_isolated_qualification(self, base, head, *, force_full, capture):
+        self.assertEqual((base, head), (self.MAIN, self.NEW))
+        self.assertTrue(force_full)
+        self.assertTrue(capture)
+        command = ["repoctl", "qualification-proof", "--base", base]
+        self.commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
     def fake_run(self, command, **_kwargs):
+        self.assertNotIn("qualification-proof", command)
         self.commands.append(command)
         if command[:4] == ["git", "rev-parse", "--verify", "MERGE_HEAD"]:
             in_progress = getattr(self, "merge_in_progress", False)
@@ -194,6 +205,23 @@ class SyncPRBaseTests(unittest.TestCase):
         self.assertEqual("PASS", result["restore_verification"])
         self.assertEqual(self.OLD, self.head)
         self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
+
+    def test_isolation_unavailable_restores_head_without_credential_leak(self):
+        self.main_is_ancestor = False
+        with mock.patch.object(
+            REPOCTL, "_run_pr_qualification",
+            side_effect=REPOCTL.QualificationAuthorityError("GH_TOKEN=secret-value"),
+        ) as isolated:
+            result = REPOCTL.sync_pr_base("gh", "owner/repo", self.pr)
+        self.assertEqual("BLOCKED_AUTHORITY", result["error"])
+        self.assertEqual("PASS", result["restore_verification"])
+        self.assertEqual(self.OLD, self.head)
+        self.assertEqual(self.OLD, self.remote)
+        self.assertNotIn("secret-value", str(result))
+        self.assertFalse(any(c[:2] == ["repoctl", "publish"] for c in self.commands))
+        isolated.assert_called_once_with(
+            self.MAIN, self.NEW, force_full=True, capture=True,
+        )
 
     def test_signed_merge_verification_failure_restores_head(self):
         self.main_is_ancestor = False

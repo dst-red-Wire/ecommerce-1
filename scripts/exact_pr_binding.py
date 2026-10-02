@@ -7,10 +7,13 @@ before an operation whose authorization depends on the binding.
 from __future__ import annotations
 
 import json
+import os
+import pwd
 import re
 import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 CANONICAL_REPOSITORY = "dst-red-Wire/ecommerce-1"
 CANONICAL_BASE = "main"
@@ -105,7 +108,46 @@ def _validate_inputs(
         )
 
 
-def _api(gh: str, endpoint: str) -> object:
+def _safe_gh_environment(source: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Keep owner auth available to pinned gh without inheriting Git execution knobs."""
+    source = os.environ if source is None else source
+    home = pwd.getpwuid(os.getuid()).pw_dir
+    environment = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": home,
+        "XDG_CONFIG_HOME": str(Path(home) / ".config"),
+        "GH_CONFIG_DIR": str(Path(home) / ".config/gh"),
+        "GH_PROMPT_DISABLED": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_COUNT": "5",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+        "GIT_CONFIG_KEY_4": "core.sshCommand",
+        "GIT_CONFIG_VALUE_4": "/bin/false",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+    }
+    for name in (
+        "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST", "LANG", "LC_ALL",
+        "LC_CTYPE", "TZ", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+        "https_proxy", "http_proxy", "no_proxy",
+    ):
+        value = source.get(name)
+        if value:
+            environment[name] = value
+    return environment
+
+
+def _api(
+    gh: str, endpoint: str, *, env: Mapping[str, str] | None = None
+) -> object:
     try:
         result = subprocess.run(
             [gh, "api", endpoint],
@@ -113,6 +155,7 @@ def _api(gh: str, endpoint: str) -> object:
             text=True,
             check=False,
             timeout=30,
+            env=_safe_gh_environment(env),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ExactPRBindingError(f"GitHub API request failed: {endpoint}") from exc

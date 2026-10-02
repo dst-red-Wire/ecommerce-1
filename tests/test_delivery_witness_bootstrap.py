@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -437,6 +438,7 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         during_bundle=None,
         witness_digests=None,
         preflight_outcomes=None,
+        isolation_receipt=True,
     ):
         self.preflight_calls.clear()
         self.bundle_creations.clear()
@@ -444,8 +446,16 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
         def fresh(*_args):
             self.events.append("qualification")
             self.write_artifacts(self.final_payload)
+            self.receipt = {
+                "evidence_sha256": hashlib.sha256(self.raw.read_bytes()).hexdigest(),
+                "audit_sha256": hashlib.sha256(self.audit.read_bytes()).hexdigest(),
+            }
             if mutate:
                 mutate()
+
+        def receipt(base_sha, head_sha):
+            self.assertEqual((self.base, self.head), (base_sha, head_sha))
+            return self.receipt
 
         outcomes = iter(preflight_outcomes) if preflight_outcomes is not None else None
 
@@ -700,6 +710,8 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
                 side_effect=lambda: (self.events.append("cleanup") or 0, 0)
             ),
         }
+        if isolation_receipt:
+            patches["_trusted_isolated_receipt"] = mock.Mock(side_effect=receipt)
         self.authority_reader = patches["pull_request_authority_evidence"]
         self.qualifier = patches["_fresh_qualification_for_finish"]
         create_bundle = evidence_bundle.create_bundle
@@ -752,6 +764,11 @@ class BootstrapFinishWitnessTests(unittest.TestCase):
             result = REPOCTL.finish_pr("main")
             self.finish_output = output.getvalue()
             return result
+
+    def test_missing_isolation_receipt_blocks_before_witness_or_merge(self):
+        self.assertNotEqual(0, self.run_finish(isolation_receipt=False))
+        self.assertIn("BLOCKED_AUTHORITY", self.finish_output)
+        self.assertEqual(["qualification"], self.events)
 
     def test_final_base_qualification_is_bundled_before_signed_witness_and_merge(self):
         stale = evidence_bundle.create_bundle(

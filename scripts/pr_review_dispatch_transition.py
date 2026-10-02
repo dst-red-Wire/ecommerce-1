@@ -11,7 +11,9 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
+import shlex
 import subprocess
 import sys
 from collections.abc import Callable
@@ -73,16 +75,7 @@ else:
 ROOT = Path(__file__).resolve().parents[1]
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_CANONICAL_ORIGINS = frozenset(
-    {
-        "https://github.com/dst-red-Wire/ecommerce-1.git",
-        "https://github.com/dst-red-Wire/ecommerce-1",
-        "git@github.com:dst-red-Wire/ecommerce-1.git",
-        "git@github.com:dst-red-Wire/ecommerce-1",
-        "ssh://git@github.com/dst-red-Wire/ecommerce-1.git",
-        "ssh://git@github.com/dst-red-Wire/ecommerce-1",
-    }
-)
+_CANONICAL_ORIGIN = "https://github.com/dst-red-Wire/ecommerce-1.git"
 _SOURCE_REQUEST_KEYS = frozenset(
     {
         "event",
@@ -128,28 +121,110 @@ def _managed_gh() -> str:
     return binary
 
 
-def _safe_git_env() -> dict[str, str]:
+def _safe_git_env(*, remote: bool = False) -> dict[str, str]:
+    """Use a fixed tool path and keep local Git reads credential-free."""
     environment = {
-        name: value
-        for name, value in os.environ.items()
-        if not name.startswith(("GIT_", "PYTHON"))
+        "PATH": "/usr/bin:/bin",
+        "HOME": "/nonexistent",
+        "XDG_CONFIG_HOME": "/nonexistent",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_ASKPASS": "/bin/false",
+        "GIT_PAGER": "cat",
+        "GIT_CONFIG_COUNT": "5",
+        "GIT_CONFIG_KEY_0": "core.fsmonitor",
+        "GIT_CONFIG_VALUE_0": "false",
+        "GIT_CONFIG_KEY_1": "core.hooksPath",
+        "GIT_CONFIG_VALUE_1": "/dev/null",
+        "GIT_CONFIG_KEY_2": "credential.helper",
+        "GIT_CONFIG_VALUE_2": "",
+        "GIT_CONFIG_KEY_3": "protocol.ext.allow",
+        "GIT_CONFIG_VALUE_3": "never",
+        "GIT_CONFIG_KEY_4": "core.sshCommand",
+        "GIT_CONFIG_VALUE_4": "/bin/false",
     }
-    environment["PATH"] = os.defpath
-    environment["GIT_TERMINAL_PROMPT"] = "0"
+    if remote:
+        for name in (
+            "GH_TOKEN", "GITHUB_TOKEN", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
+            "https_proxy", "http_proxy", "no_proxy",
+        ):
+            if os.environ.get(name):
+                environment[name] = os.environ[name]
+        owner_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
+        environment["GH_CONFIG_DIR"] = str(owner_home / ".config/gh")
     return environment
 
 
+def _safe_git_command(root: Path, *args: str) -> list[str]:
+    return [
+        "/usr/bin/git", "--no-pager",
+        "-c", "core.fsmonitor=false",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "credential.helper=",
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.sshCommand=/bin/false",
+        "-c", f"core.worktree={root}",
+        "-C", str(root), *args,
+    ]
+
+
+def _git_config_names(root: Path, expression: str) -> list[str]:
+    try:
+        result = subprocess.run(
+            _safe_git_command(root, "config", "--includes", "--local",
+                              "--name-only", "--get-regexp", expression),
+            cwd=root,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+            env=_safe_git_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReviewTransitionError("unsafe local Git configuration") from exc
+    if result.returncode not in (0, 1):
+        raise ReviewTransitionError("unsafe local Git configuration")
+    return result.stdout.splitlines()
+
+
+def _git_checkout_config_safe(root: Path) -> None:
+    if _git_config_names(
+        root,
+        r"^(filter\..*\.(clean|smudge|process)|diff\..*\.(command|textconv)|merge\..*\.driver)$",
+    ):
+        raise ReviewTransitionError("executable local Git configuration is forbidden")
+
+
+def _git_remote_config_safe(root: Path) -> None:
+    if _git_config_names(
+        root,
+        r"^(url\..*\.(insteadof|pushinsteadof)|remote\.origin\.(pushurl|uploadpack|receivepack|proxy)|http\..*|credential\..*)$",
+    ):
+        raise ReviewTransitionError("unsafe trusted Git remote configuration")
+
+
 def _git(root: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=30,
-        stdin=subprocess.DEVNULL,
-        env=_safe_git_env(),
-    )
+    _git_checkout_config_safe(root)
+    try:
+        result = subprocess.run(
+            _safe_git_command(root, *args),
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+            env=_safe_git_env(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReviewTransitionError("cannot verify exact local Git checkout") from exc
     if result.returncode:
         raise ReviewTransitionError("cannot verify exact local Git checkout")
     return result.stdout.strip()
@@ -168,7 +243,7 @@ def _trusted_origin_url(trusted_root: Path) -> str:
     if (
         len(configured) != 1
         or configured != effective
-        or configured[0] not in _CANONICAL_ORIGINS
+        or configured[0] != _CANONICAL_ORIGIN
     ):
         raise ReviewTransitionError(
             "trusted exact-base origin differs from canonical GitHub repository"
@@ -200,6 +275,7 @@ def _ensure_trusted_head_object(
     if before[0] != binding.base_sha or before[2]:
         raise ReviewTransitionError("trusted exact-base checkout changed")
     origin_url = _trusted_origin_url(trusted_root)
+    _git_remote_config_safe(trusted_root)
     gh = _managed_gh()
 
     def revalidate() -> None:
@@ -232,28 +308,27 @@ def _ensure_trusted_head_object(
                 "dry-run requires the exact HEAD object already in trusted Git"
             )
         try:
+            remote = origin_url == _CANONICAL_ORIGIN
+            if not remote and not (origin_url.startswith("/") or origin_url.startswith("file://")):
+                raise ReviewTransitionError("trusted exact HEAD origin is not canonical")
+            fetch_command = _safe_git_command(trusted_root)
+            if remote:
+                fetch_command.extend(
+                    ["-c", f"credential.helper=!{shlex.quote(gh)} auth git-credential"]
+                )
+            fetch_command.extend([
+                "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                "--no-recurse-submodules", origin_url, binding.head_sha,
+            ])
             fetched = subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "core.hooksPath=/dev/null",
-                    "-c",
-                    "protocol.ext.allow=never",
-                    "fetch",
-                    "--quiet",
-                    "--no-tags",
-                    "--no-write-fetch-head",
-                    "--no-recurse-submodules",
-                    origin_url,
-                    binding.head_sha,
-                ],
+                fetch_command,
                 cwd=trusted_root,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=120,
-                env=_safe_git_env(),
+                env=_safe_git_env(remote=remote),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise ReviewTransitionTransientFetch(
