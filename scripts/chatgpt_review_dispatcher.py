@@ -134,6 +134,7 @@ class ReviewTransport(Protocol):
 
 
 OwnerMarkerLookup = Callable[[ExactPRBinding, str], Mapping[str, Any] | None]
+OwnerMarkerPublisher = Callable[[ExactPRBinding, str, str, int], bool]
 BindingRevalidator = Callable[[ExactPRBinding], ExactPRBinding]
 
 
@@ -590,6 +591,32 @@ def _read(path: Path, identity: str) -> dict[str, Any]:
         or set(value["request"]) != _REQUEST_KEYS
     ):
         raise ReviewDispatchError("review dispatch record identity is invalid")
+    submission_id = value.get("submission_id")
+    result_digest = value.get("result_sha256")
+    result_status = value.get("result_status")
+    result_count = value.get("result_blocking_findings")
+    if (
+        not isinstance(submission_id, str)
+        or len(submission_id) > 200
+        or "\x00" in submission_id
+        or not isinstance(result_digest, str)
+        or (result_digest and not _digest(result_digest))
+        or (result_status is None and "result_blocking_findings" in value)
+        or (
+            result_status is not None
+            and (
+                result_status not in {"PASS", "FAIL"}
+                or not submission_id
+                or not result_digest
+                or type(result_count) is not int
+                or not (
+                    (result_status == "PASS" and result_count == 0)
+                    or (result_status == "FAIL" and result_count > 0)
+                )
+            )
+        )
+    ):
+        raise ReviewDispatchError("review dispatch result trace is malformed")
     request = value["request"]
     try:
         binding = ExactPRBinding.from_dict(
@@ -862,6 +889,82 @@ def github_owner_marker_lookup(
     return proof
 
 
+def github_owner_marker_publish(
+    binding: ExactPRBinding,
+    kind: str,
+    status: str,
+    blocking_findings: int,
+    *,
+    gh: str = "gh",
+) -> bool:
+    """Publish only through the repository owner's authenticated GitHub identity.
+
+    The returned value is submission evidence only. A separate GitHub read must
+    establish the latest, unedited owner marker before a review verdict is set.
+    """
+    if (
+        not isinstance(binding, ExactPRBinding)
+        or kind not in {"code", "security"}
+        or type(blocking_findings) is not int
+        or not (
+            (status == "PASS" and blocking_findings == 0)
+            or (status == "FAIL" and blocking_findings > 0)
+        )
+    ):
+        raise ReviewDispatchError("owner marker publication requires a bound verdict")
+    try:
+        identity = subprocess.run(
+            [gh, "api", "user"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if identity.returncode != 0 or len(identity.stdout) > 4096:
+        return False
+    try:
+        user = json.loads(identity.stdout)
+    except json.JSONDecodeError:
+        return False
+    owner = binding.repository.split("/", 1)[0]
+    if not isinstance(user, dict) or user.get("login") != owner:
+        return False
+    try:
+        if revalidate_exact_open_pr(binding, gh=gh) != binding:
+            return False
+    except (RuntimeError, ValueError):
+        return False
+    marker = {
+        "provider": "ChatGPT",
+        "kind": kind,
+        "head_sha": binding.head_sha,
+        "status": status,
+        "blocking_findings": blocking_findings,
+    }
+    body = "<!-- chatgpt-exact-sha-review:v1 " + _canonical_json(marker) + " -->"
+    try:
+        response = subprocess.run(
+            [
+                gh,
+                "api",
+                "--method",
+                "POST",
+                f"repos/{binding.repository}/issues/{binding.pr_number}/comments",
+                "-f",
+                f"body={body}",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return response.returncode == 0 and len(response.stdout) <= 65536
+
+
 def _owner_proof(
     lookup: OwnerMarkerLookup | None,
     binding: ExactPRBinding,
@@ -915,6 +1018,7 @@ def _transport_result(result: Any, record: Mapping[str, Any]) -> str:
             "submission_id",
             "identity",
             "provider",
+            "repository",
             "kind",
             "pr",
             "head_sha",
@@ -925,6 +1029,7 @@ def _transport_result(result: Any, record: Mapping[str, Any]) -> str:
         or result["submission_id"] != record["submission_id"]
         or result["identity"] != record["identity"]
         or result["provider"] != "ChatGPT"
+        or result["repository"] != record["repository"]
         or result["kind"] != record["review_kind"].lower()
         or type(result["pr"]) is not int
         or result["pr"] != record["pr"]
@@ -942,7 +1047,7 @@ def _transport_result(result: Any, record: Mapping[str, Any]) -> str:
         encoded = result["output"].encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
         raise ReviewResultError("external review result is not valid UTF-8") from exc
-    if len(encoded) > 65536:
+    if len(encoded) > 8192:
         raise ReviewResultError("external review result exceeds the byte limit")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -951,7 +1056,8 @@ def _advance_transport(
     request: Mapping[str, Any],
     record: dict[str, Any],
     transport: ReviewTransport,
-) -> None:
+) -> bool:
+    """Advance once; return true only for a freshly fetched, bound result."""
     submission_id = record.get("submission_id")
     if not submission_id:
         submitted = transport.submit(request, idempotency_key=record["identity"])
@@ -963,11 +1069,10 @@ def _advance_transport(
             or "\x00" in submitted["submission_id"]
         ):
             raise ReviewDispatchError("external transport submission is malformed")
-        submission_id = submitted["submission_id"]
-        record["submission_id"] = submission_id
+        record["submission_id"] = submitted["submission_id"]
         record["state"] = "REQUESTED"
         record["reason"] = "TRANSPORT_SUBMITTED"
-        return
+        return False
     status = transport.status(submission_id)
     if (
         not isinstance(status, dict)
@@ -977,6 +1082,10 @@ def _advance_transport(
     ):
         raise ReviewDispatchError("external transport status is malformed")
     state = status["state"]
+    if state != "COMPLETED":
+        record["result_sha256"] = ""
+        record.pop("result_status", None)
+        record.pop("result_blocking_findings", None)
     if state == "FAILED":
         record["state"] = "BLOCKED"
         record["reason"] = "EXTERNAL_REVIEW_FAILED"
@@ -984,16 +1093,23 @@ def _advance_transport(
         record["state"] = "REQUESTED" if state == "QUEUED" else "RUNNING"
         record["reason"] = "TRANSPORT_" + state
     else:
+        record["result_sha256"] = ""
+        record.pop("result_status", None)
+        record.pop("result_blocking_findings", None)
         try:
-            record["result_sha256"] = _transport_result(
-                transport.fetch_result(submission_id), record
-            )
+            result = transport.fetch_result(submission_id)
+            digest = _transport_result(result, record)
         except ReviewResultError:
             record["state"] = "BLOCKED"
             record["reason"] = "BLOCKED_EXTERNAL_REVIEW_RESULT"
-            return
+            return False
+        record["result_sha256"] = digest
+        record["result_status"] = result["status"]
+        record["result_blocking_findings"] = result["blocking_findings"]
         record["state"] = "BLOCKED"
         record["reason"] = "AWAITING_OWNER_MARKER"
+        return True
+    return False
 
 
 def dispatch_review_request(
@@ -1002,9 +1118,11 @@ def dispatch_review_request(
     binding: ExactPRBinding,
     legacy_bootstrap_binding: str | None = None,
     transport: ReviewTransport | None = None,
+    allow_submit: bool = True,
     outbox_root: Path = OUTBOX_ROOT,
     policy_path: Path = POLICY_PATH,
     owner_marker_lookup: OwnerMarkerLookup | None = None,
+    owner_marker_publisher: OwnerMarkerPublisher | None = None,
     binding_revalidator: BindingRevalidator | None = None,
     gh: str = "gh",
 ) -> dict[str, Any]:
@@ -1014,10 +1132,13 @@ def dispatch_review_request(
     revalidator rereads GitHub immediately before any outbox or transport work.
     `owner_marker_lookup` must return latest owner-authored, unedited PR proof;
     a transport result and an outbox record can never authorize a review.
+    With `allow_submit=False`, only an existing submission may be polled.
     """
     policy = _load_policy(Path(policy_path))
     if not isinstance(binding, ExactPRBinding):
         raise ReviewDispatchError("exact PR binding is required")
+    if type(allow_submit) is not bool:
+        raise ReviewDispatchError("allow_submit must be a boolean")
     _validate_request(request, binding, policy)
     protocol = _handoff_protocol(request, binding, legacy_bootstrap_binding)
     trace_binding = legacy_bootstrap_binding if protocol == "legacy-bootstrap" else None
@@ -1119,12 +1240,16 @@ def dispatch_review_request(
             _write(path, record)
             return {**record, "outbox_path": str(path)}
         record.pop("owner_comment_id", None)
-        if record.get("result_sha256"):
+        if not allow_submit and not record.get("submission_id"):
             record["state"] = "BLOCKED"
-            record["reason"] = "AWAITING_OWNER_MARKER"
+            record["reason"] = "SUBMIT_NOT_ALLOWED"
         elif transport is None:
-            record["state"] = "BLOCKED"
-            record["reason"] = policy["transport_missing_state"]
+            if record.get("result_status") in {"PASS", "FAIL"}:
+                record["state"] = "BLOCKED"
+                record["reason"] = "AWAITING_OWNER_MARKER"
+            else:
+                record["state"] = "BLOCKED"
+                record["reason"] = policy["transport_missing_state"]
         else:
             if not record.get("submission_id"):
                 _, changed_head = _revalidated_binding(binding, revalidate)
@@ -1133,10 +1258,64 @@ def dispatch_review_request(
                         path, identity, request["head_sha"], changed_head, record
                     )
             try:
-                _advance_transport(request, record, transport)
+                completed_review = _advance_transport(request, record, transport)
             except (OSError, RuntimeError, TypeError, ValueError, KeyError):
+                completed_review = False
                 record["state"] = "BLOCKED"
                 record["reason"] = "BLOCKED_EXTERNAL_REVIEW_TRANSPORT"
+            if completed_review and owner_marker_lookup is not None:
+                _, changed_head = _revalidated_binding(binding, revalidate)
+                if changed_head is not None:
+                    return _superseded_request(
+                        path, identity, request["head_sha"], changed_head, record
+                    )
+                if kind == "SECURITY":
+                    code = _owner_proof(owner_marker_lookup, current, "CODE")
+                    if code is None or code["status"] != "PASS":
+                        record["state"] = "BLOCKED"
+                        record["reason"] = "WAITING_CODE_REVIEW"
+                        _write(path, record)
+                        return {**record, "outbox_path": str(path)}
+                publisher = owner_marker_publisher or (
+                    lambda bound, review_kind, verdict, findings: (
+                        github_owner_marker_publish(
+                            bound, review_kind, verdict, findings, gh=gh
+                        )
+                    )
+                )
+                try:
+                    publisher(
+                        current,
+                        kind.lower(),
+                        record["result_status"],
+                        record["result_blocking_findings"],
+                    )
+                except (OSError, RuntimeError, TypeError, ValueError):
+                    # A failed POST can still have reached GitHub. Read the
+                    # conversation before another invocation tries again.
+                    pass
+                _, changed_head = _revalidated_binding(binding, revalidate)
+                if changed_head is not None:
+                    return _superseded_request(
+                        path, identity, request["head_sha"], changed_head, record
+                    )
+                proof = _owner_proof(owner_marker_lookup, current, kind)
+                if proof is not None:
+                    if (
+                        proof["status"] != record["result_status"]
+                        or proof["blocking_findings"]
+                        != record["result_blocking_findings"]
+                    ):
+                        record["reason"] = "OWNER_MARKER_RESULT_MISMATCH"
+                    elif kind == "SECURITY" and (
+                        proof["created_at"],
+                        proof["comment_id"],
+                    ) <= (code["created_at"], code["comment_id"]):
+                        record["reason"] = "SECURITY_REVIEW_PREDATES_CODE"
+                    else:
+                        record["state"] = proof["status"]
+                        record["reason"] = "OWNER_MARKER_VERIFIED"
+                        record["owner_comment_id"] = proof["comment_id"]
         _write(path, record)
         return {**record, "outbox_path": str(path)}
 

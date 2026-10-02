@@ -1,12 +1,14 @@
 import argparse
 import json
-from pathlib import Path
+import subprocess
 import tempfile
 import unittest
-from unittest import mock
 import urllib.error
+from pathlib import Path
+from unittest import mock
 
 from scripts import pr_monitor
+from scripts.exact_pr_binding import ExactPRBinding, ExactPRBindingError
 
 
 def args(**overrides):
@@ -74,7 +76,11 @@ class PRMonitorTest(unittest.TestCase):
                             ]
                         },
                     },
-                    {"id": "done", "isResolved": True, "comments": {"nodes": [{"id": "c2"}]}},
+                    {
+                        "id": "done",
+                        "isResolved": True,
+                        "comments": {"nodes": [{"id": "c2"}]},
+                    },
                 ]
             },
             "mergeStateStatus": "BEHIND",
@@ -109,9 +115,15 @@ class PRMonitorTest(unittest.TestCase):
                 }
             }
         }
-        with mock.patch.object(pr_monitor, "github_request", return_value=(200, payload, "")) as request:
-            result = pr_monitor.paginate_review_threads(pr, owner="o", repo="r", number=7, token="t")
-        self.assertEqual([item["id"] for item in result["reviewThreads"]["nodes"]], ["a", "b"])
+        with mock.patch.object(
+            pr_monitor, "github_request", return_value=(200, payload, "")
+        ) as request:
+            result = pr_monitor.paginate_review_threads(
+                pr, owner="o", repo="r", number=7, token="t"
+            )
+        self.assertEqual(
+            [item["id"] for item in result["reviewThreads"]["nodes"]], ["a", "b"]
+        )
         request.assert_called_once()
 
     def test_default_state_path_is_namespaced_by_repository(self):
@@ -123,8 +135,19 @@ class PRMonitorTest(unittest.TestCase):
     def test_304_honors_terminal_state(self):
         with tempfile.TemporaryDirectory() as directory:
             state = Path(directory) / "state.json"
-            state.write_text(json.dumps({"etag": "same", "state": "CLOSED", "merged": False, "unchanged_polls": 3}))
-            with mock.patch.object(pr_monitor, "github_request", return_value=(304, None, "same")):
+            state.write_text(
+                json.dumps(
+                    {
+                        "etag": "same",
+                        "state": "CLOSED",
+                        "merged": False,
+                        "unchanged_polls": 3,
+                    }
+                )
+            )
+            with mock.patch.object(
+                pr_monitor, "github_request", return_value=(304, None, "same")
+            ):
                 terminal, unchanged = pr_monitor.poll_once(args(), state, "token")
             self.assertTrue(terminal)
             self.assertEqual(unchanged, 4)
@@ -153,7 +176,9 @@ class PRMonitorTest(unittest.TestCase):
             state = Path(directory) / "state.json"
             state.write_text(json.dumps(previous))
             with (
-                mock.patch.object(pr_monitor, "github_request", return_value=(200, payload, "newtag")),
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(200, payload, "newtag")
+                ),
                 mock.patch.object(pr_monitor, "changed_files", return_value=["x.py"]),
                 mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
                 mock.patch("builtins.print") as output,
@@ -168,7 +193,7 @@ class PRMonitorTest(unittest.TestCase):
             self.assertIn("chatgpt_review_handoff", stored)
             self.assertIn("current_head", stored["chatgpt_review_handoff"])
             self.assertTrue(stored["exact_head_verified"])
-            checkout.assert_called_once_with("new")
+            checkout.assert_called_once_with("new", repo_root=pr_monitor.ROOT)
             output.assert_any_call("CHATGPT_REVIEW_REQUIRED", flush=True)
 
     def test_chatgpt_review_handoff_is_bounded_and_exact_sha_oriented(self):
@@ -255,13 +280,16 @@ class PRMonitorTest(unittest.TestCase):
                 {"head_sha": {"before": "old", "after": "new"}},
             )
         self.assertEqual(5, len(colored))
-        self.assertTrue(all("\033[" in line and line.endswith("\033[0m") for line in colored))
+        self.assertTrue(
+            all("\033[" in line and line.endswith("\033[0m") for line in colored)
+        )
 
     def test_snapshot_reuses_latest_chatgpt_exact_sha_verdict(self):
         head = "a" * 40
+
         def marker(kind, status, blockers):
             return (
-                '<!-- chatgpt-exact-sha-review:v1 '
+                "<!-- chatgpt-exact-sha-review:v1 "
                 + json.dumps(
                     {
                         "provider": "ChatGPT",
@@ -283,18 +311,24 @@ class PRMonitorTest(unittest.TestCase):
                     {
                         "id": "1",
                         "createdAt": "2026-09-21T08:00:00Z",
+                        "updatedAt": "2026-09-21T08:00:00Z",
+                        "authorAssociation": "OWNER",
                         "body": marker("code", "BLOCKED", 1),
                         "author": {"login": "owner"},
                     },
                     {
                         "id": "2",
                         "createdAt": "2026-09-21T08:01:00Z",
+                        "updatedAt": "2026-09-21T08:01:00Z",
+                        "authorAssociation": "OWNER",
                         "body": marker("code", "PASS", 0),
                         "author": {"login": "owner"},
                     },
                     {
                         "id": "3",
                         "createdAt": "2026-09-21T08:02:00Z",
+                        "updatedAt": "2026-09-21T08:02:00Z",
+                        "authorAssociation": "OWNER",
                         "body": marker("security", "PASS", 0),
                         "author": {"login": "owner"},
                     },
@@ -359,14 +393,1009 @@ class PRMonitorTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
+    def test_edited_and_nonowner_markers_never_look_ready(self):
+        head = "a" * 40
+        marker = (
+            "<!-- chatgpt-exact-sha-review:v1 "
+            + json.dumps(
+                {
+                    "provider": "ChatGPT",
+                    "kind": "code",
+                    "head_sha": head,
+                    "status": "PASS",
+                    "blocking_findings": 0,
+                }
+            )
+            + " -->"
+        )
+        comment = {
+            "id": "one",
+            "createdAt": "2026-10-01T12:00:00Z",
+            "updatedAt": "2026-10-01T12:00:01Z",
+            "authorAssociation": "OWNER",
+            "body": marker,
+            "author": {"login": "owner"},
+        }
+        pr = {
+            "headRefOid": head,
+            "_repository_owner_login": "owner",
+            "comments": {"nodes": [comment]},
+        }
+        self.assertEqual("BLOCKED", pr_monitor._latest_chatgpt_review(pr)["verdict"])
+        comment["updatedAt"] = comment["createdAt"]
+        comment["authorAssociation"] = "CONTRIBUTOR"
+        self.assertEqual("BLOCKED", pr_monitor._latest_chatgpt_review(pr)["verdict"])
+        comment["author"] = {"login": "bot"}
+        self.assertEqual({}, pr_monitor._latest_chatgpt_review(pr))
+
+    def test_pending_transport_polls_on_304_but_idle_timer_does_not_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "etag": "same",
+                        "state": "OPEN",
+                        "merged": False,
+                        "resume_pending": True,
+                        "unchanged_polls": 1,
+                    }
+                )
+            )
+            monitor_args = args(trusted_root=Path("/trusted"))
+            with (
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(304, None, "same")
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    return_value=pr_monitor.ResumeOutcome(False),
+                ) as resume,
+            ):
+                pr_monitor.poll_once(monitor_args, state, "token")
+                resume.assert_called_once_with(monitor_args, poll_existing_only=True)
+                resume.reset_mock()
+                pr_monitor.poll_once(monitor_args, state, "token")
+                resume.assert_not_called()
+
+    def test_marker_event_resumes_trusted_controller_without_user_notification(self):
+        head = "a" * 40
+        previous = {
+            "etag": "before",
+            "state": "OPEN",
+            "merged": False,
+            "head_sha": head,
+            "chatgpt_review": {},
+            "owner_authorization": {},
+            "exact_head_verified": True,
+        }
+        current = {
+            **previous,
+            "etag": "after",
+            "chatgpt_review": {"code": {"status": "PASS", "comment_id": "new-marker"}},
+        }
+        payload = {
+            "data": {
+                "repository": {
+                    "owner": {"login": "dst-red-Wire"},
+                    "pullRequest": {"state": "OPEN", "headRefOid": head},
+                }
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps(previous))
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=Path("/trusted"),
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(200, payload, "after")
+                ),
+                mock.patch.object(pr_monitor, "snapshot", return_value=current),
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    return_value=pr_monitor.ResumeOutcome(False),
+                ) as resume,
+                mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
+            ):
+                pr_monitor.poll_once(monitor_args, state, "token")
+            resume.assert_called_once_with(monitor_args, poll_existing_only=False)
+            checkout.assert_not_called()
+
+    def test_resume_passes_exact_campaign_consent_and_polls_existing_submission(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+            owner_authorization_binding="169:" + "a" * 40,
+        )
+        completed = mock.Mock(
+            stdout=json.dumps(
+                {
+                    "pr": 169,
+                    "state": "CHATGPT_REVIEW_REQUIRED",
+                    "head_sha": "a" * 40,
+                    "review_dispatch": {
+                        "status": "RUNNING",
+                        "submission_id": "submission-1",
+                        "head_sha": "a" * 40,
+                        "pr": 169,
+                    },
+                }
+            ),
+            returncode=0,
+        )
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(
+                pr_monitor.subprocess, "run", return_value=completed
+            ) as runner,
+        ):
+            pending = pr_monitor.resume_trusted_transition(monitor_args)
+        self.assertTrue(pending.pending)
+        self.assertFalse(pending.transient_error)
+        command = runner.call_args.args[0]
+        self.assertIn("--owner-authorization-binding", command)
+        self.assertEqual("169:" + "a" * 40, command[-1])
+        self.assertEqual(["-I", "-c"], command[1:3])
+        self.assertEqual(
+            "/trusted/scripts/pr_review_dispatch_transition.py", command[4]
+        )
+        self.assertEqual(Path("/trusted"), runner.call_args.kwargs["cwd"])
+
+    def test_structured_trusted_fetch_failure_is_retryable_before_checkpoint(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+        )
+        completed = mock.Mock(
+            stdout=json.dumps(
+                {
+                    "pr": 169,
+                    "state": "BLOCKED",
+                    "error_code": "TRUSTED_HEAD_FETCH_FAILED",
+                    "retryable": True,
+                    "blockers": ["trusted exact HEAD fetch failed"],
+                }
+            ),
+            returncode=1,
+        )
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(
+                pr_monitor.subprocess, "run", return_value=completed
+            ) as runner,
+            self.assertRaises(pr_monitor.TransientTrustedHeadFetchError),
+        ):
+            pr_monitor.resume_trusted_transition(monitor_args)
+        runner.assert_called_once()
+
+    def test_structured_github_revalidation_outage_is_retryable(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+        )
+        completed = mock.Mock(
+            stdout=json.dumps(
+                {
+                    "pr": 169,
+                    "state": "BLOCKED",
+                    "error_code": "TRUSTED_GITHUB_REVALIDATION_UNAVAILABLE",
+                    "retryable": True,
+                    "blockers": ["trusted exact PR revalidation is unavailable"],
+                }
+            ),
+            returncode=1,
+        )
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(pr_monitor.subprocess, "run", return_value=completed),
+            self.assertRaises(pr_monitor.TransientTrustedAuthorityError),
+        ):
+            pr_monitor.resume_trusted_transition(monitor_args)
+
+    def test_monitor_binding_api_outage_retries_but_contradiction_blocks(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+        )
+        for reason, expected in (
+            (
+                "GitHub API request failed: repos/dst-red-Wire/ecommerce-1/pulls/169",
+                pr_monitor.TransientTrustedAuthorityError,
+            ),
+            (
+                "expected exactly one open PR for the exact source; found 0",
+                RuntimeError,
+            ),
+        ):
+            with (
+                self.subTest(reason=reason),
+                mock.patch.object(
+                    pr_monitor,
+                    "_trusted_roots",
+                    return_value=(Path("/trusted"), Path("/target")),
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "_git_value",
+                    side_effect=["a" * 40, "feature", ""],
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "resolve_managed_gh",
+                    return_value=("gh", "1.0.0", "digest"),
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "resolve_exact_open_pr",
+                    side_effect=ExactPRBindingError(reason),
+                ),
+                self.assertRaises(expected),
+            ):
+                pr_monitor._verified_resume_context(monitor_args)
+
+    def test_monitor_revalidation_api_outage_is_retryable(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+        )
+        binding = ExactPRBinding(
+            "dst-red-Wire/ecommerce-1",
+            169,
+            "main",
+            "b" * 40,
+            "feature",
+            "a" * 40,
+        )
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_trusted_roots",
+                return_value=(Path("/trusted"), Path("/target")),
+            ),
+            mock.patch.object(
+                pr_monitor,
+                "_git_value",
+                side_effect=["a" * 40, "feature", ""],
+            ),
+            mock.patch.object(
+                pr_monitor,
+                "resolve_managed_gh",
+                return_value=("gh", "1.0.0", "digest"),
+            ),
+            mock.patch.object(
+                pr_monitor, "resolve_exact_open_pr", return_value=binding
+            ),
+            mock.patch.object(
+                pr_monitor,
+                "_trusted_adapter",
+                return_value=Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+            ),
+            mock.patch.object(
+                pr_monitor,
+                "revalidate_exact_open_pr",
+                side_effect=ExactPRBindingError("GitHub API request failed: PR detail"),
+            ),
+            self.assertRaises(pr_monitor.TransientTrustedAuthorityError),
+        ):
+            pr_monitor._verified_resume_context(monitor_args)
+
+    def test_adapter_api_outage_does_not_checkpoint_or_submit(self):
+        head = "a" * 40
+        previous = {
+            "etag": "old",
+            "head_sha": head,
+            "state": "OPEN",
+            "merged": False,
+            "checks": {},
+            "reviews": {},
+            "open_findings": {},
+            "exact_head_verified": True,
+        }
+        current = dict(previous, etag="new")
+        payload = {
+            "data": {
+                "repository": {"pullRequest": {"state": "OPEN", "headRefOid": head}}
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps(previous))
+            original = state.read_text()
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=Path("/trusted"),
+                target_root=Path("/target"),
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(200, payload, "new")
+                ),
+                mock.patch.object(pr_monitor, "snapshot", return_value=current),
+                mock.patch.object(pr_monitor, "sync_exact_pr_head") as sync,
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    side_effect=pr_monitor.TransientTrustedAuthorityError(
+                        "trusted exact PR GitHub revalidation is unavailable"
+                    ),
+                ),
+                self.assertRaises(pr_monitor.TransientTrustedAuthorityError),
+            ):
+                pr_monitor.poll_once(monitor_args, state, "token", bootstrap=True)
+            self.assertEqual(original, state.read_text())
+            sync.assert_called_once_with(monitor_args, head)
+
+    def test_trusted_authority_retry_is_bounded(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+            interval=1,
+            max_interval=1,
+            state="/tmp/pr-monitor-test-state.json",
+            once=False,
+        )
+        with (
+            mock.patch.object(pr_monitor, "parse_args", return_value=monitor_args),
+            mock.patch.object(
+                pr_monitor,
+                "_trusted_roots",
+                return_value=(Path("/trusted"), Path("/target")),
+            ),
+            mock.patch.dict(pr_monitor.os.environ, {"GITHUB_TOKEN": "test-token"}),
+            mock.patch.object(
+                pr_monitor,
+                "poll_once",
+                side_effect=pr_monitor.TransientTrustedAuthorityError(
+                    "trusted exact PR GitHub revalidation is unavailable"
+                ),
+            ) as poll,
+            mock.patch.object(pr_monitor.time, "sleep") as sleep,
+            mock.patch("builtins.print"),
+        ):
+            rc = pr_monitor.main()
+        self.assertEqual(3, rc)
+        self.assertEqual(pr_monitor.MAX_TRANSIENT_RESUME_RETRIES, poll.call_count)
+        self.assertEqual(pr_monitor.MAX_TRANSIENT_RESUME_RETRIES - 1, sleep.call_count)
+
+    def test_transient_transport_retry_is_bounded_and_timer_polls_only_existing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "etag": "same",
+                        "state": "OPEN",
+                        "merged": False,
+                        "resume_pending": True,
+                        "resume_retry_count": 0,
+                    }
+                )
+            )
+            monitor_args = args(trusted_root=Path("/trusted"))
+            with (
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(304, None, "same")
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    return_value=pr_monitor.ResumeOutcome(True, transient_error=True),
+                ) as resume,
+            ):
+                for count in range(1, 4):
+                    pr_monitor.poll_once(monitor_args, state, "token")
+                    saved = json.loads(state.read_text())
+                    self.assertEqual(count, saved["resume_retry_count"])
+                    self.assertEqual(
+                        count < pr_monitor.MAX_TRANSIENT_RESUME_RETRIES,
+                        saved["resume_pending"],
+                    )
+                pr_monitor.poll_once(monitor_args, state, "token")
+            self.assertEqual(3, resume.call_count)
+            for call in resume.call_args_list:
+                self.assertTrue(call.kwargs["poll_existing_only"])
+
+    def test_transient_retry_requires_exact_existing_submission(self):
+        monitor_args = args(
+            owner="dst-red-Wire",
+            repo="ecommerce-1",
+            pr=169,
+            trusted_root=Path("/trusted"),
+            target_root=Path("/target"),
+        )
+        dispatch = {
+            "status": "BLOCKED",
+            "reason": "BLOCKED_EXTERNAL_REVIEW_TRANSPORT",
+            "submission_id": "submission-1",
+            "head_sha": "a" * 40,
+            "pr": 169,
+        }
+        result = {
+            "pr": 169,
+            "head_sha": "a" * 40,
+            "state": "CHATGPT_REVIEW_REQUIRED",
+            "review_dispatch": dispatch,
+        }
+        with (
+            mock.patch.object(
+                pr_monitor,
+                "_verified_resume_context",
+                return_value=(
+                    Path("/trusted"),
+                    Path("/target"),
+                    Path("/trusted/scripts/pr_review_dispatch_transition.py"),
+                ),
+            ),
+            mock.patch.object(
+                pr_monitor.subprocess,
+                "run",
+                return_value=mock.Mock(stdout=json.dumps(result), returncode=0),
+            ) as runner,
+        ):
+            outcome = pr_monitor.resume_trusted_transition(
+                monitor_args, poll_existing_only=True
+            )
+            self.assertEqual(pr_monitor.ResumeOutcome(True, True), outcome)
+            self.assertIn("--poll-existing-only", runner.call_args.args[0])
+            dispatch["submission_id"] = None
+            runner.return_value.stdout = json.dumps(result)
+            outcome = pr_monitor.resume_trusted_transition(
+                monitor_args, poll_existing_only=True
+            )
+            self.assertEqual(pr_monitor.ResumeOutcome(False), outcome)
+
+    def test_head_change_syncs_before_trusted_resume(self):
+        old_head = "a" * 40
+        new_head = "b" * 40
+        previous = {
+            "etag": "old",
+            "head_sha": old_head,
+            "state": "OPEN",
+            "merged": False,
+            "checks": {},
+            "reviews": {},
+            "open_findings": {},
+        }
+        current = {**previous, "head_sha": new_head, "etag": "new"}
+        payload = {
+            "data": {
+                "repository": {"pullRequest": {"state": "OPEN", "headRefOid": new_head}}
+            }
+        }
+        order = []
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps(previous))
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=Path("/trusted"),
+                target_root=Path("/target"),
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", Path("/trusted")),
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(200, payload, "new")
+                ),
+                mock.patch.object(pr_monitor, "snapshot", return_value=current),
+                mock.patch.object(pr_monitor, "changed_files", return_value=["x.py"]),
+                mock.patch.object(pr_monitor, "exact_head_worktree") as checkout,
+                mock.patch.object(
+                    pr_monitor,
+                    "sync_exact_pr_head",
+                    side_effect=lambda *_: order.append("sync"),
+                ) as sync,
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    side_effect=lambda *_args, **_kwargs: (
+                        order.append("resume"),
+                        pr_monitor.ResumeOutcome(False),
+                    )[1],
+                ) as resume,
+            ):
+                checkout.return_value.__enter__.return_value = Path("/exact")
+                checkout.return_value.__exit__.return_value = False
+                pr_monitor.poll_once(monitor_args, state, "token")
+            self.assertEqual(["sync", "resume"], order)
+            sync.assert_called_once_with(monitor_args, new_head)
+            resume.assert_called_once_with(monitor_args, poll_existing_only=False)
+
+    def test_bootstrap_resyncs_target_even_when_checkpoint_head_is_unchanged(self):
+        head = "b" * 40
+        previous = {
+            "etag": "saved-etag",
+            "head_sha": head,
+            "state": "OPEN",
+            "merged": False,
+            "checks": {},
+            "reviews": {},
+            "open_findings": {},
+            "resume_pending": False,
+            "exact_head_verified": True,
+        }
+        current = dict(previous, etag="new-etag")
+        payload = {
+            "data": {
+                "repository": {"pullRequest": {"state": "OPEN", "headRefOid": head}}
+            }
+        }
+        order = []
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(json.dumps(previous))
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=Path("/trusted"),
+                target_root=Path("/target"),
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor,
+                    "github_request",
+                    return_value=(200, payload, "new-etag"),
+                ) as github,
+                mock.patch.object(pr_monitor, "snapshot", return_value=current),
+                mock.patch.object(
+                    pr_monitor,
+                    "sync_exact_pr_head",
+                    side_effect=lambda *_: order.append("sync"),
+                ) as sync,
+                mock.patch.object(
+                    pr_monitor,
+                    "resume_trusted_transition",
+                    side_effect=lambda *_args, **_kwargs: (
+                        order.append("resume"),
+                        pr_monitor.ResumeOutcome(False),
+                    )[1],
+                ) as resume,
+            ):
+                pr_monitor.poll_once(monitor_args, state, "token", bootstrap=True)
+        self.assertEqual(["sync", "resume"], order)
+        self.assertEqual("", github.call_args.kwargs["etag"])
+        sync.assert_called_once_with(monitor_args, head)
+        resume.assert_called_once_with(monitor_args, poll_existing_only=False)
+
+    def test_bootstrap_rejects_304_without_exact_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state.json"
+            state.write_text(
+                json.dumps(
+                    {
+                        "etag": "saved-etag",
+                        "head_sha": "b" * 40,
+                        "state": "OPEN",
+                        "merged": False,
+                    }
+                )
+            )
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=Path("/trusted"),
+                target_root=Path("/target"),
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor, "github_request", return_value=(304, None, "same")
+                ) as github,
+                mock.patch.object(pr_monitor, "sync_exact_pr_head") as sync,
+                mock.patch.object(pr_monitor, "resume_trusted_transition") as resume,
+                self.assertRaisesRegex(
+                    pr_monitor.TransientGitHubError, "exact PR snapshot"
+                ),
+            ):
+                pr_monitor.poll_once(monitor_args, state, "token", bootstrap=True)
+            self.assertEqual("", github.call_args.kwargs["etag"])
+            sync.assert_not_called()
+            resume.assert_not_called()
+
+    def test_exact_head_sync_fast_forwards_only_clean_descendant(self):
+        def git(root: Path, *arguments: str) -> str:
+            result = subprocess.run(
+                ["git", *arguments],
+                cwd=root,
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            return result.stdout.strip()
+
+        with tempfile.TemporaryDirectory() as directory:
+            origin = Path(directory) / "origin.git"
+            checkout = Path(directory) / "checkout"
+            trusted = Path(directory) / "trusted"
+            subprocess.run(
+                ["git", "init", "--bare", str(origin)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(checkout)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            git(checkout, "config", "user.email", "monitor-test@example.invalid")
+            git(checkout, "config", "user.name", "Monitor Test")
+            git(checkout, "remote", "add", "origin", str(origin))
+            (checkout / "base.txt").write_text("base")
+            git(checkout, "add", "base.txt")
+            git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "base")
+            base_sha = git(checkout, "rev-parse", "HEAD")
+            git(checkout, "push", "origin", "main")
+            subprocess.run(
+                ["git", "clone", "--branch", "main", str(origin), str(trusted)],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            git(checkout, "checkout", "-b", "feature")
+            (checkout / "feature.txt").write_text("old")
+            git(checkout, "add", "feature.txt")
+            git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "old")
+            old_sha = git(checkout, "rev-parse", "HEAD")
+            (checkout / "feature.txt").write_text("new")
+            git(checkout, "add", "feature.txt")
+            git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "new")
+            new_sha = git(checkout, "rev-parse", "HEAD")
+            git(checkout, "push", "origin", "feature")
+            git(checkout, "reset", "--hard", old_sha)
+            binding = ExactPRBinding(
+                "dst-red-Wire/ecommerce-1", 169, "main", base_sha, "feature", new_sha
+            )
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=checkout,
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", trusted),
+                mock.patch.object(
+                    pr_monitor,
+                    "_trusted_adapter",
+                    return_value=trusted / "scripts/pr_review_dispatch_transition.py",
+                ),
+                mock.patch.object(
+                    pr_monitor,
+                    "resolve_managed_gh",
+                    return_value=("gh", "1.0.0", "digest"),
+                ),
+                mock.patch.object(
+                    pr_monitor, "resolve_exact_open_pr", return_value=binding
+                ),
+                mock.patch.object(
+                    pr_monitor, "revalidate_exact_open_pr", return_value=binding
+                ) as revalidate,
+            ):
+                pr_monitor.sync_exact_pr_head(monitor_args, new_sha)
+                self.assertEqual(new_sha, git(checkout, "rev-parse", "HEAD"))
+                self.assertEqual(base_sha, git(trusted, "rev-parse", "HEAD"))
+                self.assertEqual("", git(checkout, "status", "--porcelain"))
+                self.assertGreaterEqual(revalidate.call_count, 3)
+                git(checkout, "reset", "--hard", old_sha)
+                (checkout / "feature.txt").write_text("diverged")
+                git(checkout, "add", "feature.txt")
+                git(checkout, "-c", "commit.gpgsign=false", "commit", "-m", "diverged")
+                divergent_sha = git(checkout, "rev-parse", "HEAD")
+                with self.assertRaisesRegex(
+                    pr_monitor.SupersededHeadError, "SUPERSEDED"
+                ):
+                    pr_monitor.sync_exact_pr_head(monitor_args, new_sha)
+                self.assertEqual(divergent_sha, git(checkout, "rev-parse", "HEAD"))
+
     def test_transient_http_failures_are_classified_for_retry(self):
         error = urllib.error.HTTPError(
             "https://api.github.com", 503, "unavailable", {}, None
         )
         error.read = mock.Mock(return_value=b"down")
-        with mock.patch("urllib.request.urlopen", side_effect=error):
-            with self.assertRaises(pr_monitor.TransientGitHubError):
-                pr_monitor.github_request("https://api.github.com", "token")
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(pr_monitor.TransientGitHubError),
+        ):
+            pr_monitor.github_request("https://api.github.com", "token")
+
+    def test_malicious_target_adapter_is_never_selected_for_resume(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            target = root / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            (target / "scripts").mkdir(parents=True)
+            safe_adapter = trusted / "scripts/pr_review_dispatch_transition.py"
+            malicious_adapter = target / "scripts/pr_review_dispatch_transition.py"
+            safe_adapter.write_text("raise SystemExit(0)\n")
+            malicious_adapter.write_text('raise RuntimeError("stolen token")\n')
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=target,
+            )
+            completed = mock.Mock(
+                stdout=json.dumps({"pr": 169, "state": "MERGE_READY"}),
+                returncode=0,
+            )
+            with (
+                mock.patch.object(
+                    pr_monitor,
+                    "_verified_resume_context",
+                    return_value=(trusted, target, safe_adapter),
+                ),
+                mock.patch.object(
+                    pr_monitor.subprocess, "run", return_value=completed
+                ) as runner,
+            ):
+                pr_monitor.resume_trusted_transition(monitor_args)
+            command = runner.call_args.args[0]
+            self.assertEqual(str(safe_adapter), command[4])
+            self.assertNotIn(str(malicious_adapter), command)
+            self.assertEqual(trusted, runner.call_args.kwargs["cwd"])
+            self.assertEqual(["-I", "-c"], command[1:3])
+            self.assertEqual(str(target), command[command.index("--target-root") + 1])
+
+    def test_monitor_git_status_never_runs_checkout_fsmonitor(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            tracked = checkout / "tracked.txt"
+            tracked.write_text("one\n")
+            for command in (
+                ["config", "user.name", "Test"],
+                ["config", "user.email", "test@example.invalid"],
+                ["add", "tracked.txt"],
+                ["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), *command],
+                    check=True, capture_output=True,
+                )
+            canary = checkout / "credential-canary"
+            fsmonitor = checkout / "fsmonitor.sh"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" > '{canary}'\n"
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "core.fsmonitor", str(fsmonitor)],
+                check=True, capture_output=True,
+            )
+            exposed = dict(os.environ)
+            exposed["GH_TOKEN"] = "synthetic-owner-token"
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "status", "--porcelain"],
+                env=exposed, check=True, capture_output=True,
+            )
+            self.assertEqual("synthetic-owner-token", canary.read_text())
+            canary.unlink()
+            with mock.patch.dict(os.environ, {
+                "GH_TOKEN": "synthetic-owner-token",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": str(fsmonitor),
+            }):
+                pr_monitor._git_value(checkout, "status", "--porcelain")
+            self.assertFalse(canary.exists())
+
+    def test_monitor_remote_helper_rejects_url_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "remote.origin.url",
+                 "https://github.com/dst-red-Wire/ecommerce-1.git"],
+                check=True, capture_output=True,
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", checkout),
+                mock.patch.object(
+                    pr_monitor, "resolve_managed_gh",
+                    return_value=("/trusted/pinned/gh", "1.0.0", "a" * 64),
+                ) as resolver,
+            ):
+                self.assertEqual(
+                    "/trusted/pinned/gh",
+                    pr_monitor._git_remote_helper(checkout),
+                )
+                self.assertEqual(
+                    "/usr/bin:/bin",
+                    resolver.call_args.kwargs["env"]["PATH"],
+                )
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), "config",
+                     "url.https://evil.invalid.insteadOf",
+                     "https://github.com/"],
+                    check=True, capture_output=True,
+                )
+                with self.assertRaisesRegex(RuntimeError, "BLOCKED_AUTHORITY"):
+                    pr_monitor._git_remote_helper(checkout)
+
+    def test_old_exact_base_without_isolation_capability_blocks_dispatch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            trusted = Path(directory) / "trusted"
+            target = Path(directory) / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            target.mkdir()
+            for relative in pr_monitor._TRUSTED_SOURCE_PATHS:
+                source = trusted / relative
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text("# committed exact-base source\n")
+            (trusted / "scripts/qualification_isolation.py").write_text(
+                "def run_isolated_qualification(*args, **kwargs): pass\n"
+            )
+            (trusted / "scripts/repoctl.py").write_text(
+                "# old controller lacks validate-only CLI\n"
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(trusted)],
+                capture_output=True, text=True, check=True,
+            )
+            for command in (
+                ["git", "config", "user.email", "monitor-test@example.invalid"],
+                ["git", "config", "user.name", "Monitor Test"],
+                ["git", "add", "scripts"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "old base"],
+            ):
+                subprocess.run(
+                    command, cwd=trusted, capture_output=True,
+                    text=True, check=True,
+                )
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=trusted,
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            binding = ExactPRBinding(
+                "dst-red-Wire/ecommerce-1", 169, "main", base_sha,
+                "feature", "a" * 40,
+            )
+            monitor_args = args(
+                owner="dst-red-Wire", repo="ecommerce-1", pr=169,
+                trusted_root=trusted, target_root=target,
+            )
+            with mock.patch.object(pr_monitor, "ROOT", trusted), (
+                self.assertRaisesRegex(RuntimeError, "BLOCKED_AUTHORITY")
+            ):
+                pr_monitor._trusted_adapter(monitor_args, binding)
+
+    def test_missing_base_adapter_blocks_without_target_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trusted = root / "trusted"
+            target = root / "target"
+            (trusted / "scripts").mkdir(parents=True)
+            (target / "scripts").mkdir(parents=True)
+            (trusted / "scripts/pr_monitor.py").write_bytes(
+                Path(pr_monitor.__file__).read_bytes()
+            )
+            (target / "scripts/pr_review_dispatch_transition.py").write_text(
+                'raise RuntimeError("malicious PR HEAD")\n'
+            )
+            subprocess.run(
+                ["git", "init", "-b", "main", str(trusted)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            for command in (
+                ["git", "config", "user.email", "monitor-test@example.invalid"],
+                ["git", "config", "user.name", "Monitor Test"],
+                ["git", "add", "scripts/pr_monitor.py"],
+                ["git", "-c", "commit.gpgsign=false", "commit", "-m", "trusted base"],
+            ):
+                subprocess.run(
+                    command, cwd=trusted, capture_output=True, text=True, check=True
+                )
+            base_sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=trusted,
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            binding = ExactPRBinding(
+                "dst-red-Wire/ecommerce-1",
+                169,
+                "main",
+                base_sha,
+                "feature",
+                "a" * 40,
+            )
+            monitor_args = args(
+                owner="dst-red-Wire",
+                repo="ecommerce-1",
+                pr=169,
+                trusted_root=trusted,
+                target_root=target,
+            )
+            with (
+                mock.patch.object(pr_monitor, "ROOT", trusted),
+                self.assertRaisesRegex(
+                    RuntimeError, "trusted exact-base source is unavailable"
+                ),
+            ):
+                pr_monitor._trusted_adapter(monitor_args, binding)
+            with (
+                mock.patch.object(
+                    pr_monitor,
+                    "_verified_resume_context",
+                    side_effect=RuntimeError(
+                        "trusted exact-base source is unavailable"
+                    ),
+                ),
+                mock.patch.object(pr_monitor.subprocess, "run") as runner,
+                self.assertRaises(RuntimeError),
+            ):
+                pr_monitor.resume_trusted_transition(monitor_args)
+            runner.assert_not_called()
 
 
 if __name__ == "__main__":

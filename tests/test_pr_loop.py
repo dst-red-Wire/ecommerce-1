@@ -1303,17 +1303,363 @@ class PRLoopOrchestrationTests(unittest.TestCase):
             side_effect=qualification_results,
         ), mock.patch.object(
             REPOCTL, "pull_request_authority_evidence", side_effect=self.missing_authorities
-        ), mock.patch.object(REPOCTL, "run", return_value=self.completed()) as run:
+        ), mock.patch.object(REPOCTL, "run", return_value=self.completed()) as run, mock.patch(
+            "qualification_isolation.run_isolated_qualification",
+            return_value=self.completed(),
+        ) as isolated:
             rc, payload = self.run_json(dry_run=False)
         self.assertEqual(0, rc)
         self.assertEqual("CHATGPT_REVIEW_REQUIRED", payload["state"])
         self.assertEqual("CODE", payload["review_kind"])
         self.assertEqual("executed", payload["qualification"]["source"])
-        commands = [call.args[0] for call in run.call_args_list]
+        self.assertFalse(any(
+            "qualification-proof" in call.args[0] for call in run.call_args_list
+        ))
+        isolated.assert_called_once()
+        args, kwargs = isolated.call_args
         self.assertEqual(
-            1,
-            sum("qualification-proof" in command for command in commands),
+            ["/usr/bin/python3",
+             *REPOCTL._controller_command(
+                 "qualification-proof", "--base", "c" * 40,
+             )[1:]],
+            args[0],
         )
+        self.assertEqual(self.root, kwargs["target_root"])
+        self.assertEqual("c" * 40, kwargs["base_sha"])
+        self.assertEqual(self.SHA_A, kwargs["head_sha"])
+        self.assertTrue(kwargs["force_full"])
+        self.assertTrue(kwargs["capture"])
+
+    def test_isolation_error_blocks_before_chatgpt_handoff_without_secret(self):
+        patches = self.common()
+        with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+            REPOCTL, "_github_pr_snapshot", return_value=self.snapshot()
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_qualification",
+            return_value={"status": "MISSING", "source": "none"},
+        ), mock.patch.object(
+            REPOCTL, "pull_request_authority_evidence",
+            side_effect=self.missing_authorities,
+        ), mock.patch.object(
+            REPOCTL, "_pr_loop_chatgpt_handoff",
+        ) as handoff, mock.patch.object(
+            REPOCTL, "run", return_value=self.completed(),
+        ) as run, mock.patch(
+            "qualification_isolation.run_isolated_qualification",
+            side_effect=RuntimeError("GH_TOKEN=secret-value"),
+        ) as isolated:
+            rc, payload = self.run_json(dry_run=False)
+        self.assertEqual(1, rc)
+        self.assertEqual("BLOCKED_AUTHORITY", payload["state"])
+        self.assertEqual("FIX_QUALIFICATION_ISOLATION", payload["next_action"])
+        self.assertEqual("MISSING", payload["qualification"]["status"])
+        self.assertFalse(payload["merge_ready"])
+        self.assertNotIn("review_request", payload)
+        self.assertNotIn("secret-value", json.dumps(payload))
+        self.assertFalse(any(
+            "qualification-proof" in call.args[0] for call in run.call_args_list
+        ))
+        isolated.assert_called_once()
+        handoff.assert_not_called()
+
+    def test_trusted_receipt_binds_fresh_proof_bytes_without_host_gates(self):
+        import hashlib
+
+        evidence = self.root / ".context/evidence" / f"{self.SHA_A}.json"
+        audit = self.root / ".context/performance" / f"{self.SHA_A}.json"
+        evidence.parent.mkdir(parents=True)
+        audit.parent.mkdir(parents=True)
+        evidence.write_bytes(b'{"status":"PASS"}')
+        audit.write_bytes(b'{"evidence_status":"PASS"}')
+        receipt = {
+            "schema_version": 1,
+            "base_sha": "c" * 40,
+            "head_sha": self.SHA_A,
+            "head_tree_sha": "d" * 40,
+            "evidence_sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+            "audit_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+            "bwrap_sha256": "e" * 64,
+            "child_pid": 42,
+            "namespace_witness": True,
+            "validator_child_pid": 43,
+            "validator_namespace_witness": True,
+            "trusted_controller": "/trusted/base/scripts/repoctl.py",
+            "validation": "trusted-base-validate-only-v1",
+        }
+        token = REPOCTL._QUALIFICATION_ISOLATED_RECEIPT.set(receipt)
+        try:
+            with mock.patch.object(
+                REPOCTL, "_trusted_pr_execution_context",
+                return_value={"trusted_root": Path("/trusted/base")},
+            ), mock.patch.object(
+                REPOCTL, "_qualification_audit_path", return_value=audit,
+            ), mock.patch.object(
+                REPOCTL, "git", return_value="d" * 40,
+            ), mock.patch.object(
+                REPOCTL, "run", side_effect=AssertionError("host gate execution forbidden"),
+            ) as host_run:
+                self.assertEqual(
+                    (evidence, audit, receipt),
+                    REPOCTL._trusted_isolated_artifacts("c" * 40, self.SHA_A),
+                )
+                evidence.write_bytes(b'{"status":"FAIL"}')
+                with self.assertRaises(REPOCTL.QualificationAuthorityError):
+                    REPOCTL._trusted_isolated_artifacts("c" * 40, self.SHA_A)
+                host_run.assert_not_called()
+        finally:
+            REPOCTL._QUALIFICATION_ISOLATED_RECEIPT.reset(token)
+
+    def test_trusted_git_status_does_not_execute_checkout_fsmonitor(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            tracked = checkout / "tracked.txt"
+            tracked.write_text("one\n")
+            for command in (
+                ["config", "user.name", "Test"],
+                ["config", "user.email", "test@example.invalid"],
+                ["add", "tracked.txt"],
+                ["-c", "commit.gpgsign=false", "commit", "-qm", "initial"],
+            ):
+                subprocess.run(
+                    ["/usr/bin/git", "-C", str(checkout), *command],
+                    check=True, capture_output=True,
+                )
+            canary = checkout / "credential-canary"
+            fsmonitor = checkout / "fsmonitor.sh"
+            fsmonitor.write_text(
+                f"#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" > '{canary}'\n"
+            )
+            fsmonitor.chmod(0o700)
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "core.fsmonitor", str(fsmonitor)],
+                check=True, capture_output=True,
+            )
+            exposed = dict(os.environ)
+            exposed["GH_TOKEN"] = "synthetic-owner-token"
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "status", "--porcelain"],
+                env=exposed, check=True, capture_output=True,
+            )
+            self.assertEqual("synthetic-owner-token", canary.read_text())
+            canary.unlink()
+            with mock.patch.dict(os.environ, {
+                "REPOCTL_TRUSTED_CONTROLLER": "/trusted/base/scripts/repoctl.py",
+                "GH_TOKEN": "synthetic-owner-token",
+                "GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "core.fsmonitor",
+                "GIT_CONFIG_VALUE_0": str(fsmonitor),
+            }):
+                REPOCTL.run(
+                    ["git", "status", "--porcelain"], cwd=checkout,
+                    capture=True,
+                )
+            self.assertFalse(canary.exists())
+
+    def test_qualification_uses_system_python_even_with_target_venv_parent(self):
+        command = [
+            "/target/.venv/qualification/bin/python",
+            "/trusted/base/scripts/repoctl.py",
+            "qualification-proof", "--base", "c" * 40,
+        ]
+        with mock.patch.object(
+            REPOCTL, "_controller_command", return_value=command,
+        ), mock.patch(
+            "qualification_isolation.run_isolated_qualification",
+            return_value=self.completed(),
+        ) as isolated:
+            REPOCTL._run_pr_qualification(
+                "c" * 40, self.SHA_A, force_full=True, capture=True,
+            )
+        self.assertEqual(
+            ["/usr/bin/python3", *command[1:]],
+            isolated.call_args.args[0],
+        )
+
+    def test_trusted_gh_uses_managed_binary_not_checkout_path(self):
+        import managed_gh
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            attacker = root / "checkout/bin"
+            trusted = root / "managed/bin"
+            attacker.mkdir(parents=True)
+            trusted.mkdir(parents=True)
+            canary = root / "credential-canary"
+            fake_gh = attacker / "gh"
+            fake_gh.write_text(
+                f"#!/bin/sh\nprintf '%s' \"$GH_TOKEN\" > '{canary}'\n"
+            )
+            fake_gh.chmod(0o700)
+            pinned = trusted / "gh"
+            pinned.write_text("#!/bin/sh\nprintf managed\n")
+            pinned.chmod(0o700)
+            previous = REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT
+            REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT = {
+                "trusted_root": root,
+            }
+            try:
+                with mock.patch.dict(os.environ, {
+                    "REPOCTL_TRUSTED_CONTROLLER": "/trusted/base/scripts/repoctl.py",
+                    "PATH": str(attacker) + ":/usr/bin:/bin",
+                    "GH_TOKEN": "synthetic-owner-token",
+                }), mock.patch.object(
+                    managed_gh, "resolve_managed_gh",
+                    return_value=(str(pinned), "1.0.0", "a" * 64),
+                ) as resolver:
+                    self.assertEqual(str(pinned), REPOCTL._gh_binary())
+                    result = REPOCTL.run(
+                        [str(fake_gh), "--version"], capture=True,
+                    )
+                    self.assertEqual("managed", result.stdout)
+                    self.assertFalse(canary.exists())
+                    self.assertEqual(
+                        "/usr/bin:/bin", resolver.call_args.kwargs["env"]["PATH"],
+                    )
+            finally:
+                REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT = previous
+
+    def test_trusted_remote_requires_canonical_origin_and_pinned_gh(self):
+        import managed_gh
+        import os
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = Path(directory)
+            subprocess.run(
+                ["/usr/bin/git", "init", "-q", str(checkout)],
+                check=True, capture_output=True,
+            )
+            subprocess.run(
+                ["/usr/bin/git", "-C", str(checkout), "config",
+                 "remote.origin.url",
+                 "https://github.com/dst-red-Wire/ecommerce-1.git"],
+                check=True, capture_output=True,
+            )
+            previous = REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT
+            REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT = {
+                "trusted_root": checkout,
+            }
+            try:
+                with mock.patch.dict(os.environ, {
+                    "GH_TOKEN": "synthetic-owner-token",
+                }), mock.patch.object(
+                    managed_gh, "resolve_managed_gh",
+                    return_value=("/trusted/pinned/gh", "1.0.0", "a" * 64),
+                ) as resolver:
+                    self.assertEqual(
+                        "/trusted/pinned/gh",
+                        REPOCTL._git_remote_authority(checkout),
+                    )
+                    self.assertEqual(
+                        "synthetic-owner-token",
+                        resolver.call_args.kwargs["env"]["GH_TOKEN"],
+                    )
+                    subprocess.run(
+                        ["/usr/bin/git", "-C", str(checkout), "config",
+                         "url.https://evil.invalid.insteadOf",
+                         "https://github.com/"],
+                        check=True, capture_output=True,
+                    )
+                    with self.assertRaisesRegex(
+                        RuntimeError, "BLOCKED_AUTHORITY"
+                    ):
+                        REPOCTL._git_remote_authority(checkout)
+            finally:
+                REPOCTL._TRUSTED_PR_EXECUTION_CONTEXT = previous
+
+    def test_validate_only_rechecks_exact_proof_without_running_gates(self):
+        head = self.SHA_A
+        evidence = self.root / ".context/evidence" / f"{head}.json"
+        audit = self.root / ".context/performance" / f"{head}.json"
+        policy = {
+            "merge_authoritative": True,
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "verify_change_runs": 1,
+            "performance_audit_runs": 1,
+        }
+
+        def git_read(*args, **_kwargs):
+            return "" if args[0] == "status" else head
+
+        with mock.patch.object(
+            REPOCTL, "qualification_workflow", return_value=policy,
+        ), mock.patch.object(
+            REPOCTL, "git", side_effect=git_read,
+        ), mock.patch.object(
+            REPOCTL, "_valid_exact_evidence", return_value=evidence,
+        ) as valid_evidence, mock.patch.object(
+            REPOCTL, "_valid_performance_audit", return_value=audit,
+        ) as valid_audit, mock.patch.object(
+            REPOCTL, "verify_change",
+            side_effect=AssertionError("validation must not execute gates"),
+        ) as gates, mock.patch.object(
+            REPOCTL, "run",
+            side_effect=AssertionError("validation must not launch a gate"),
+        ) as runner, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(0, REPOCTL.qualification_proof_validate_only("c" * 40))
+            valid_evidence.assert_called_once_with("c" * 40, head)
+            valid_audit.assert_called_once_with("c" * 40, head)
+            gates.assert_not_called()
+            runner.assert_not_called()
+
+    def test_validate_only_rejects_missing_proof_before_audit(self):
+        head = self.SHA_A
+        policy = {
+            "merge_authoritative": True,
+            "exact_sha_required": True,
+            "clean_worktree_required": True,
+            "verify_change_runs": 1,
+            "performance_audit_runs": 1,
+        }
+        with mock.patch.object(
+            REPOCTL, "qualification_workflow", return_value=policy,
+        ), mock.patch.object(
+            REPOCTL, "git", return_value=head,
+        ), mock.patch.object(
+            REPOCTL, "_valid_exact_evidence", return_value=None,
+        ), mock.patch.object(
+            REPOCTL, "_valid_performance_audit",
+        ) as audit, mock.patch.object(
+            REPOCTL, "verify_change",
+        ) as gates, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(2, REPOCTL.qualification_proof_validate_only("c" * 40))
+            audit.assert_not_called()
+            gates.assert_not_called()
+
+    def test_finish_pr_fresh_qualification_uses_isolated_boundary(self):
+        import qualification_compatibility
+
+        with mock.patch.object(
+            REPOCTL, "_require_trusted_pr_execution",
+        ), mock.patch.object(
+            qualification_compatibility, "archive_head_artifacts",
+        ), mock.patch.object(
+            REPOCTL, "git", return_value="c" * 40,
+        ), mock.patch.object(
+            REPOCTL, "_qualification_audit_path",
+            return_value=self.root / ".context/audit.json",
+        ), mock.patch.object(
+            REPOCTL, "_run_pr_qualification",
+            return_value=self.completed(),
+        ) as isolated, mock.patch.object(
+            REPOCTL, "_create_pr_qualification_envelope",
+        ) as envelope, mock.patch.object(REPOCTL, "run") as run:
+            REPOCTL._fresh_qualification_for_finish(
+                "origin/main", self.SHA_A, "owner/repo",
+            )
+        isolated.assert_called_once_with(
+            "c" * 40, self.SHA_A, force_full=True, capture=True,
+        )
+        envelope.assert_called_once_with("origin/main", self.SHA_A)
+        run.assert_not_called()
 
     def test_github_unavailable_fails_closed(self):
         patches = self.common()

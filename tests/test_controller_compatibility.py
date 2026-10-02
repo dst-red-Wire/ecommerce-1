@@ -615,7 +615,8 @@ class BaseControllerEnvelopeCompositionTests(unittest.TestCase):
         )
 
     def compose(self, scenario="canonical"):
-        program = r"""import importlib.util
+        program = r"""import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -664,7 +665,30 @@ with mock.patch.object(module, "_qualification_toolchain", return_value=({}, set
         "canonical_raw_valid": module._valid_exact_evidence(base, head) == raw,
         "canonical_audit_valid": module._valid_performance_audit(base, head) == audit,
     }
+    # Model the helper's fresh, byte-bound sandbox receipt in this archive
+    # fixture; production only obtains it from run_isolated_qualification.
+    module._QUALIFICATION_ISOLATED_RECEIPT.set({
+        "schema_version": 1, "base_sha": base, "head_sha": head,
+        "head_tree_sha": proof["head_tree_sha"],
+        "trusted_controller": str(controller),
+        "validation": "trusted-base-validate-only-v1",
+        "namespace_witness": True, "validator_namespace_witness": True,
+        "child_pid": 101, "validator_child_pid": 102,
+        "evidence_sha256": hashlib.sha256(raw.read_bytes()).hexdigest(),
+        "audit_sha256": hashlib.sha256(audit.read_bytes()).hexdigest(),
+        "bwrap_sha256": "a" * 64,
+    })
     module._PR_LOOP_REPOSITORY.set("dst-red-Wire/ecommerce-1")
+    if sys.argv[1] == "missing_receipt":
+        module._QUALIFICATION_ISOLATED_RECEIPT.set(None)
+        try:
+            module._create_pr_qualification_envelope(base, head)
+        except module.QualificationAuthorityError as exc:
+            result["blocked"] = str(exc)
+        else:
+            raise AssertionError("envelope accepted without isolation receipt")
+        print(json.dumps(result))
+        sys.exit(0)
     envelope = module._create_pr_qualification_envelope(base, head)
     result["envelope"] = envelope
     scenario = sys.argv[1]
@@ -734,6 +758,10 @@ with mock.patch.object(module, "_qualification_toolchain", return_value=({}, set
         result = self.compose("missing_witness")
         self.assertEqual("PASS", result["envelope"]["status"])
         self.assertEqual("MISSING", result["reread"]["status"])
+
+    def test_envelope_rejects_missing_isolation_receipt(self):
+        result = self.compose("missing_receipt")
+        self.assertIn("isolation receipt is unavailable", result["blocked"])
 
 
 class TrustedQualificationBoundaryTests(unittest.TestCase):
@@ -919,6 +947,14 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
                 ),
             ),
             mock.patch.object(
+                repoctl,
+                "_trusted_isolated_receipt",
+                return_value={
+                    "evidence_sha256": "a" * 64,
+                    "audit_sha256": "b" * 64,
+                },
+            ),
+            mock.patch.object(
                 compatibility,
                 "find_envelope",
                 return_value=found,
@@ -964,6 +1000,14 @@ class TrustedQualificationBoundaryTests(unittest.TestCase):
                 side_effect=lambda *args: (
                     "a" * 40 if args[-1] == "a" * 40 else "c" * 40
                 ),
+            ),
+            mock.patch.object(
+                repoctl,
+                "_trusted_isolated_receipt",
+                return_value={
+                    "evidence_sha256": "a" * 64,
+                    "audit_sha256": "b" * 64,
+                },
             ),
             mock.patch.object(
                 compatibility,

@@ -28,6 +28,8 @@ class FakeTransport:
         self.results = []
         self.state = "RUNNING"
         self.bad_result = False
+        self.review_status = "PASS"
+        self.blocking_findings = 0
 
     def submit(self, request, *, idempotency_key):
         self.submissions.append((request, idempotency_key))
@@ -44,11 +46,12 @@ class FakeTransport:
             "submission_id": submission_id,
             "identity": identity,
             "provider": "ChatGPT",
+            "repository": self.submissions[0][0]["repository"],
             "kind": self.submissions[0][0]["review_kind"].lower(),
             "pr": self.submissions[0][0]["pr"],
             "head_sha": self.submissions[0][0]["head_sha"],
-            "status": "PASS",
-            "blocking_findings": 0,
+            "status": self.review_status,
+            "blocking_findings": self.blocking_findings,
             "output": "Review text is evidence only.",
         }
         if self.bad_result:
@@ -606,6 +609,68 @@ class ReviewDispatcherTests(unittest.TestCase):
         self.assertEqual(1, len(transport.submissions))
         self.assertEqual(["job-one"], transport.polls)
 
+    def test_poll_only_never_submits_when_outbox_is_absent(self):
+        request = self.request()
+        transport = FakeTransport()
+        blocked = self.dispatch(request, transport=transport, allow_submit=False)
+        self.assertEqual("BLOCKED", blocked["state"])
+        self.assertEqual("SUBMIT_NOT_ALLOWED", blocked["reason"])
+        self.assertEqual("", blocked["submission_id"])
+        self.assertEqual([], transport.submissions)
+        self.assertEqual([], transport.polls)
+        self.assertEqual([], transport.results)
+        submitted = self.dispatch(request, transport=transport, allow_submit=True)
+        self.assertEqual("REQUESTED", submitted["state"])
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(blocked["identity"], submitted["identity"])
+
+    def test_poll_only_resumes_existing_submission_by_id(self):
+        request = self.request()
+        transport = FakeTransport()
+        submitted = self.dispatch(request, transport=transport)
+        resumed = self.dispatch(request, transport=transport, allow_submit=False)
+        self.assertEqual("RUNNING", resumed["state"])
+        self.assertEqual(submitted["submission_id"], resumed["submission_id"])
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one"], transport.polls)
+
+    def test_poll_only_accepts_existing_owner_proof_without_submission(self):
+        request = self.request()
+        transport = FakeTransport()
+        verified = self.dispatch(
+            request,
+            transport=transport,
+            allow_submit=False,
+            owner_marker_lookup=lambda _, kind: (
+                self.proof("CODE") if kind == "code" else None
+            ),
+        )
+        self.assertEqual("PASS", verified["state"])
+        self.assertEqual("OWNER_MARKER_VERIFIED", verified["reason"])
+        self.assertEqual([], transport.submissions)
+
+    def test_poll_only_rejects_corrupt_outbox_without_transport_call(self):
+        request = self.request()
+        blocked = self.dispatch(request, allow_submit=False)
+        path = Path(blocked["outbox_path"])
+        record = json.loads(path.read_text())
+        record["request"]["head_sha"] = NEXT_HEAD_SHA
+        path.write_text(json.dumps(record))
+        transport = FakeTransport()
+        with self.assertRaises(dispatcher.ReviewDispatchError):
+            self.dispatch(request, transport=transport, allow_submit=False)
+        self.assertEqual([], transport.submissions)
+        self.assertEqual([], transport.polls)
+
+    def test_poll_only_flag_must_be_boolean(self):
+        transport = FakeTransport()
+        with self.assertRaisesRegex(
+            dispatcher.ReviewDispatchError, "allow_submit must be a boolean"
+        ):
+            self.dispatch(self.request(), transport=transport, allow_submit="false")
+        self.assertFalse(self.outbox.exists())
+        self.assertEqual([], transport.submissions)
+
     def test_transport_completion_never_becomes_review_authority(self):
         request = self.request()
         transport = FakeTransport()
@@ -634,6 +699,7 @@ class ReviewDispatcherTests(unittest.TestCase):
             "submission_id": "job-one",
             "identity": "d" * 64,
             "review_kind": "CODE",
+            "repository": REPOSITORY,
             "pr": PR,
             "head_sha": HEAD_SHA,
         }
@@ -641,6 +707,7 @@ class ReviewDispatcherTests(unittest.TestCase):
             "submission_id": "job-one",
             "identity": "d" * 64,
             "provider": "ChatGPT",
+            "repository": REPOSITORY,
             "kind": "code",
             "pr": PR,
             "head_sha": HEAD_SHA,
@@ -650,16 +717,339 @@ class ReviewDispatcherTests(unittest.TestCase):
         }
         self.assertEqual(64, len(dispatcher._transport_result(response, record)))
         for changes in (
+            {"repository": "wrong/repository"},
+            {"pr": PR + 1},
+            {"head_sha": NEXT_HEAD_SHA},
             {"kind": "security"},
+            {"identity": "e" * 64},
+            {"submission_id": "wrong-job"},
             {"status": "PASS", "blocking_findings": 1},
             {"status": "FAIL", "blocking_findings": 0},
             {"provider": "Codex"},
+            {"output": "x" * 8193},
+            {"output": ""},
         ):
             with (
                 self.subTest(changes=changes),
                 self.assertRaises(dispatcher.ReviewResultError),
             ):
                 dispatcher._transport_result({**response, **changes}, record)
+
+    def test_queued_and_running_resume_without_fetch_or_resubmit(self):
+        request = self.request()
+        transport = FakeTransport()
+        self.dispatch(request, transport=transport)
+        transport.state = "QUEUED"
+        queued = self.dispatch(request, transport=transport)
+        self.assertEqual("REQUESTED", queued["state"])
+        transport.state = "RUNNING"
+        running = self.dispatch(request, transport=transport)
+        self.assertEqual("RUNNING", running["state"])
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one", "job-one"], transport.polls)
+        self.assertEqual([], transport.results)
+
+    def test_bound_fail_requires_owner_marker_and_blocks_security(self):
+        request = self.request()
+        transport = FakeTransport()
+        transport.review_status = "FAIL"
+        transport.blocking_findings = 2
+        published = []
+
+        def lookup(_, kind):
+            if not published or kind != "code":
+                return None
+            proof = self.proof("CODE")
+            proof["status"] = "FAIL"
+            proof["blocking_findings"] = 2
+            return proof
+
+        self.dispatch(request, transport=transport, owner_marker_lookup=lookup)
+        transport.state = "COMPLETED"
+        failed = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=lambda *args: published.append(args),
+        )
+        self.assertEqual("FAIL", failed["state"])
+        self.assertEqual("OWNER_MARKER_VERIFIED", failed["reason"])
+        self.assertEqual("FAIL", failed["result_status"])
+        self.assertEqual(2, failed["result_blocking_findings"])
+        self.assertIs(failed["verdict_authority"], False)
+        self.assertEqual([(self.binding, "code", "FAIL", 2)], published)
+        waiting = self.dispatch(
+            self.request("SECURITY"),
+            transport=transport,
+            owner_marker_lookup=lookup,
+        )
+        self.assertEqual("CODE_REVIEW_FAILED", waiting["reason"])
+        self.assertEqual(1, len(transport.submissions))
+
+    def test_bound_fail_without_owner_marker_remains_blocked(self):
+        request = self.request()
+        transport = FakeTransport()
+        transport.review_status = "FAIL"
+        transport.blocking_findings = 3
+        self.dispatch(request, transport=transport)
+        transport.state = "COMPLETED"
+        result = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lambda *_: None,
+            owner_marker_publisher=lambda *_: False,
+        )
+        self.assertEqual("BLOCKED", result["state"])
+        self.assertEqual("AWAITING_OWNER_MARKER", result["reason"])
+        self.assertEqual("FAIL", result["result_status"])
+        self.assertEqual(3, result["result_blocking_findings"])
+
+    def test_security_result_publishes_only_after_code_and_owner_lookup(self):
+        request = self.request("SECURITY")
+        transport = FakeTransport()
+        published = []
+
+        def lookup(_, kind):
+            if kind == "code":
+                return self.proof("CODE")
+            return self.proof("SECURITY") if published else None
+
+        def publish(*args):
+            published.append(args)
+            return True
+
+        submitted = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        self.assertEqual("REQUESTED", submitted["state"])
+        transport.state = "COMPLETED"
+        verified = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        self.assertEqual("PASS", verified["state"])
+        self.assertEqual("OWNER_MARKER_VERIFIED", verified["reason"])
+        self.assertEqual([(self.binding, "security", "PASS", 0)], published)
+        self.assertEqual(101, verified["owner_comment_id"])
+        self.assertEqual(100, verified["code_comment_id"])
+
+    def test_owner_marker_must_match_fetched_verdict(self):
+        request = self.request()
+        transport = FakeTransport()
+        published = []
+
+        def lookup(_, kind):
+            if not published or kind != "code":
+                return None
+            proof = self.proof("CODE")
+            proof["status"] = "FAIL"
+            proof["blocking_findings"] = 1
+            return proof
+
+        self.dispatch(request, transport=transport, owner_marker_lookup=lookup)
+        transport.state = "COMPLETED"
+        result = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=lambda *args: published.append(args),
+        )
+        self.assertEqual("BLOCKED", result["state"])
+        self.assertEqual("OWNER_MARKER_RESULT_MISMATCH", result["reason"])
+        self.assertNotIn("owner_comment_id", result)
+
+    def test_bound_pass_publishes_once_and_requires_fresh_owner_lookup(self):
+        request = self.request()
+        transport = FakeTransport()
+        published = []
+
+        def lookup(_, kind):
+            return self.proof("CODE") if published and kind == "code" else None
+
+        def publish(binding, kind, status, blockers):
+            published.append((binding, kind, status, blockers))
+            return True
+
+        self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        transport.state = "COMPLETED"
+        verified = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        self.assertEqual("PASS", verified["state"])
+        self.assertEqual("OWNER_MARKER_VERIFIED", verified["reason"])
+        self.assertEqual(100, verified["owner_comment_id"])
+        self.assertEqual([(self.binding, "code", "PASS", 0)], published)
+        self.assertEqual(1, len(transport.submissions))
+        self.assertEqual(["job-one"], transport.polls)
+        self.assertEqual(["job-one"], transport.results)
+        restarted = self.dispatch(request, owner_marker_lookup=lookup)
+        self.assertEqual("PASS", restarted["state"])
+        self.assertEqual([(self.binding, "code", "PASS", 0)], published)
+
+    def test_lost_post_response_reuses_visible_owner_marker(self):
+        request = self.request()
+        transport = FakeTransport()
+        published = []
+
+        def lookup(_, kind):
+            return self.proof("CODE") if published and kind == "code" else None
+
+        def publish(*args):
+            published.append(args)
+            raise OSError("POST response lost after GitHub accepted comment")
+
+        self.dispatch(request, transport=transport, owner_marker_lookup=lookup)
+        transport.state = "COMPLETED"
+        verified = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        self.assertEqual("PASS", verified["state"])
+        self.assertEqual("OWNER_MARKER_VERIFIED", verified["reason"])
+        self.assertEqual(1, len(published))
+        restarted = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lookup,
+            owner_marker_publisher=publish,
+        )
+        self.assertEqual("PASS", restarted["state"])
+        self.assertEqual(1, len(published))
+        self.assertEqual(1, len(transport.submissions))
+
+    def test_transport_pass_without_owner_marker_never_becomes_pass(self):
+        request = self.request()
+        transport = FakeTransport()
+        self.dispatch(request, transport=transport)
+        transport.state = "COMPLETED"
+        awaiting = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lambda *_: None,
+            owner_marker_publisher=lambda *_: False,
+        )
+        self.assertEqual("BLOCKED", awaiting["state"])
+        self.assertEqual("AWAITING_OWNER_MARKER", awaiting["reason"])
+        self.assertEqual("PASS", awaiting["result_status"])
+        self.assertIs(awaiting["verdict_authority"], False)
+        restarted = self.dispatch(request, owner_marker_lookup=lambda *_: None)
+        self.assertEqual("AWAITING_OWNER_MARKER", restarted["reason"])
+
+    def test_head_change_before_marker_publish_supersedes_without_comment(self):
+        request = self.request()
+        transport = FakeTransport()
+        self.dispatch(request, transport=transport)
+        transport.state = "COMPLETED"
+        calls = 0
+        published = []
+
+        def revalidate(value):
+            nonlocal calls
+            calls += 1
+            if calls <= 2:
+                return value
+            raise ExactPRBindingChanged("HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA)
+
+        stale = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lambda *_: None,
+            owner_marker_publisher=lambda *args: published.append(args),
+            binding_revalidator=revalidate,
+        )
+        self.assertEqual("SUPERSEDED", stale["state"])
+        self.assertEqual(3, calls)
+        self.assertEqual([], published)
+
+    def test_head_change_after_marker_publish_cannot_return_pass(self):
+        request = self.request()
+        transport = FakeTransport()
+        self.dispatch(request, transport=transport)
+        transport.state = "COMPLETED"
+        calls = 0
+        published = []
+
+        def revalidate(value):
+            nonlocal calls
+            calls += 1
+            if calls <= 3:
+                return value
+            raise ExactPRBindingChanged("HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA)
+
+        stale = self.dispatch(
+            request,
+            transport=transport,
+            owner_marker_lookup=lambda *_: None,
+            owner_marker_publisher=lambda *args: published.append(args),
+            binding_revalidator=revalidate,
+        )
+        self.assertEqual("SUPERSEDED", stale["state"])
+        self.assertEqual(4, calls)
+        self.assertEqual([(self.binding, "code", "PASS", 0)], published)
+
+    def test_publisher_requires_authenticated_owner_and_live_binding(self):
+        user = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps({"login": "review-bot"}), stderr=""
+        )
+        with mock.patch.object(dispatcher.subprocess, "run", return_value=user) as run:
+            self.assertFalse(
+                dispatcher.github_owner_marker_publish(self.binding, "code", "PASS", 0)
+            )
+        self.assertEqual(1, run.call_count)
+        owner = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=json.dumps({"login": "dst-red-Wire"}),
+            stderr="",
+        )
+        posted = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="{}", stderr=""
+        )
+        with (
+            mock.patch.object(
+                dispatcher, "revalidate_exact_open_pr", return_value=self.binding
+            ),
+            mock.patch.object(
+                dispatcher.subprocess, "run", side_effect=[owner, posted]
+            ) as run,
+        ):
+            self.assertTrue(
+                dispatcher.github_owner_marker_publish(self.binding, "code", "PASS", 0)
+            )
+        self.assertEqual(2, run.call_count)
+        argv = run.call_args_list[1].args[0]
+        self.assertEqual("POST", argv[3])
+        self.assertEqual(f"repos/{REPOSITORY}/issues/{PR}/comments", argv[4])
+        self.assertIn(f'"head_sha":"{HEAD_SHA}"', argv[-1])
+        with (
+            mock.patch.object(
+                dispatcher,
+                "revalidate_exact_open_pr",
+                side_effect=ExactPRBindingChanged(
+                    "HEAD_CHANGED", current_head_sha=NEXT_HEAD_SHA
+                ),
+            ),
+            mock.patch.object(dispatcher.subprocess, "run", return_value=owner) as run,
+        ):
+            self.assertFalse(
+                dispatcher.github_owner_marker_publish(self.binding, "code", "PASS", 0)
+            )
+        self.assertEqual(1, run.call_count)
 
     def test_invalid_owner_proof_never_verifies_review(self):
         forged = self.proof("CODE")

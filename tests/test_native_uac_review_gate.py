@@ -322,25 +322,25 @@ class NativeUacReviewGateTests(unittest.TestCase):
                         repoctl._NATIVE_UAC_CONTROLLER_PATH.reset(token)
                     self.assertNotEqual(default_identity, exact_base_identity)
 
-                    def exact_evidence(base: str, head: str) -> Path:
+                    def exact_artifacts(base: str, head: str):
                         self.assertEqual((base, head), (binding.base_sha, SHA))
                         self.assertEqual(repoctl._controller_command()[1], str(controller))
                         self.assertEqual(repoctl.qualification_identity(), exact_base_identity)
-                        return Path("proof.json")
+                        return Path("proof.json"), Path("audit.json"), {}
 
-                    with (mock.patch.object(repoctl, "_valid_exact_evidence",
-                                            side_effect=exact_evidence) as evidence,
-                          mock.patch.object(repoctl, "_valid_performance_audit",
-                                            return_value=Path("audit.json")) as audit,
+                    with (mock.patch.object(repoctl, "_trusted_isolated_artifacts",
+                                            side_effect=exact_artifacts) as isolated,
                           mock.patch.object(repoctl, "_native_uac_qualification_witness",
                                             return_value="f" * 64)):
                         self.assertTrue(repoctl._native_uac_qualification_matches(
                             binding, str(root), expected_witness="f" * 64)[0])
-                evidence.assert_called_once_with(binding.base_sha, SHA)
-                audit.assert_called_once_with(binding.base_sha, SHA)
+                isolated.assert_called_once_with(binding.base_sha, SHA)
                 self.assertNotEqual(repoctl._controller_command()[1], str(controller))
 
-                with mock.patch.object(repoctl, "_valid_exact_evidence", return_value=None):
+                with mock.patch.object(
+                    repoctl, "_trusted_isolated_artifacts",
+                    side_effect=repoctl.QualificationAuthorityError("receipt missing"),
+                ):
                     self.assertFalse(repoctl._native_uac_qualification_matches(
                         binding, str(root), expected_witness="f" * 64)[0])
                 self.assertFalse(repoctl._native_uac_qualification_matches(
@@ -538,22 +538,22 @@ class NativeUacReviewGateTests(unittest.TestCase):
         self.assertFalse(repoctl._NATIVE_UAC_RUNTIME_LOCK_HELD.get())
 
     def test_native_git_disables_local_hooks_and_fsmonitor(self) -> None:
-        command = ["/usr/bin/git", "-c", "core.fsmonitor=false",
-                   "-c", "core.hooksPath=/dev/null", "status", "--porcelain"]
+        command = [*repoctl._NATIVE_UAC_GIT, "status", "--porcelain"]
         with (mock.patch.object(repoctl, "_NATIVE_UAC_MODE", True),
               mock.patch.object(repoctl, "run", return_value=
                                 subprocess.CompletedProcess(command, 0, "", "")) as run):
             self.assertEqual(repoctl.git("status", "--porcelain"), "")
-        run.assert_called_once_with(command, check=True, capture=True)
+        run.assert_called_once_with(["git", "status", "--porcelain"], check=True, capture=True)
 
     def test_native_generic_run_hardens_git_commands(self) -> None:
         with (mock.patch.object(repoctl, "_NATIVE_UAC_MODE", True),
+              mock.patch.object(repoctl, "_git_checkout_config_safe"),
               mock.patch.object(repoctl.subprocess, "run", return_value=
                                 subprocess.CompletedProcess([], 0, "head\n", "")) as child):
             self.assertEqual(repoctl.output(["git", "rev-parse", "HEAD"]), "head\n")
         self.assertEqual(child.call_args.args[0], [
-            "/usr/bin/git", "-c", "core.fsmonitor=false", "-c",
-            "core.hooksPath=/dev/null", "rev-parse", "HEAD"])
+            *repoctl._SAFE_GIT, "rev-parse", "HEAD"])
+        self.assertNotIn("GH_TOKEN", child.call_args.kwargs["env"])
 
     def test_native_import_uses_base_toolchain_lock(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -690,12 +690,13 @@ class NativeUacReviewGateTests(unittest.TestCase):
             context = {"trusted_root": Path(temporary) / "base", "target_root": target,
                        "base_sha": BASE_SHA, "head_sha": SHA, "pr_number": 169}
 
-            def full_run(base, head, profile=""):
-                self.assertEqual((base, head, profile), (BASE_SHA, SHA, "full"))
-                self.assertEqual(os.environ.get("ECOMMERCE_FORCE_FULL_QUALIFICATION"), "1")
+            def isolated_run(base, head, *, force_full, capture):
+                self.assertEqual((base, head), (BASE_SHA, SHA))
+                self.assertTrue(force_full)
+                self.assertTrue(capture)
                 self.assertFalse(evidence.exists())
                 self.assertFalse(audit.exists())
-                return 1
+                return subprocess.CompletedProcess([], 1, "", "")
 
             with (mock.patch.object(repoctl, "ROOT", target),
                   mock.patch.object(repoctl, "CONTEXT", target / ".context"),
@@ -712,11 +713,16 @@ class NativeUacReviewGateTests(unittest.TestCase):
                   mock.patch.object(repoctl, "_native_uac_trusted_controller",
                                     return_value=context["trusted_root"] / "scripts/repoctl.py"),
                   mock.patch.object(repoctl, "_qualification_audit_path", return_value=audit),
-                  mock.patch.object(repoctl, "verify_change", side_effect=full_run) as verify):
+                  mock.patch.object(repoctl, "_run_pr_qualification",
+                                    side_effect=isolated_run) as isolated,
+                  mock.patch.object(repoctl, "verify_change") as verify):
                 with self.assertRaisesRegex(RuntimeError, "fresh full qualification failed"):
                     repoctl._native_uac_fresh_qualification(
                         context, CAMPAIGN, VM_ID, "Prepare")
-            verify.assert_called_once_with(BASE_SHA, SHA, profile="full")
+            isolated.assert_called_once_with(
+                BASE_SHA, SHA, force_full=True, capture=True,
+            )
+            verify.assert_not_called()
             self.assertFalse(evidence.exists())
             self.assertFalse(audit.exists())
 
@@ -788,7 +794,11 @@ class NativeUacReviewGateTests(unittest.TestCase):
             with mock.patch.object(managed_gh, "resolve_managed_gh",
                                    return_value=PINNED_GH) as resolve:
                 self.assertEqual(repoctl._native_uac_pinned_gh(str(trusted)), PINNED_GH)
-            resolve.assert_called_once_with(trusted)
+            resolve.assert_called_once()
+            self.assertEqual(trusted, resolve.call_args.args[0])
+            self.assertEqual(
+                "/usr/bin:/bin", resolve.call_args.kwargs["env"]["PATH"],
+            )
 
     def test_selftest_cli_requires_vm_id_before_any_uac(self) -> None:
         result = subprocess.run(

@@ -238,10 +238,15 @@ class PublicationAuthorityTests(unittest.TestCase):
 
 class PublishPrimitiveTests(unittest.TestCase):
     HEAD = "a" * 40
+    BASE = "b" * 40
     NEW_HEAD = "c" * 40
     BRANCH = "feature/canonical-delivery"
 
-    def invoke(self, *, branch=None, dirty=False, remote_heads=None, signature_rc=0, preflight_rc=0):
+    def invoke(
+        self, *, branch=None, dirty=False, remote_heads=None,
+        signature_rc=0, preflight_rc=0, isolation_error=None,
+        verdict_error=None,
+    ):
         head = [self.HEAD]
         completed = subprocess.CompletedProcess([], 0, "", "")
 
@@ -252,6 +257,8 @@ class PublishPrimitiveTests(unittest.TestCase):
                 return " M scripts/repoctl.py\n" if dirty else ""
             if args == ("rev-parse", "HEAD"):
                 return head[0] + "\n"
+            if args == ("rev-parse", "origin/main"):
+                return self.BASE + "\n"
             raise AssertionError(args)
 
         def run(command, **_kwargs):
@@ -259,38 +266,111 @@ class PublishPrimitiveTests(unittest.TestCase):
                 head[0] = self.NEW_HEAD
             return completed
 
-        verify = mock.Mock(return_value=0)
+        isolated = mock.Mock(
+            return_value=completed,
+            side_effect=isolation_error,
+        )
         run_mock = mock.Mock(side_effect=run)
         stdout = io.StringIO()
-        with mock.patch.object(REPOCTL, "toolchain_closure", return_value=0), mock.patch.object(
+        stderr = io.StringIO()
+        with mock.patch.object(
+            REPOCTL, "_trusted_pr_execution_context",
+            return_value={"trusted_root": ROOT},
+        ), mock.patch.object(REPOCTL, "toolchain_closure", return_value=0), mock.patch.object(
             REPOCTL, "repository_delivery_policy", return_value={"default_branch": "main"}
         ), mock.patch.object(REPOCTL, "git", side_effect=git), mock.patch.object(
             REPOCTL, "run", run_mock
         ), mock.patch.object(
             REPOCTL, "commit_provenance_check", return_value=0
         ), mock.patch.object(
-            REPOCTL, "_load_promotable_worktree_evidence", return_value=None
-        ), mock.patch.object(
-            REPOCTL, "_valid_exact_evidence", return_value=None if dirty else ROOT / "proof.json"
-        ), mock.patch.object(
+            REPOCTL, "_load_promotable_worktree_evidence", return_value={"status": "PASS"}
+        ) as promotable, mock.patch.object(
+            REPOCTL, "_promote_worktree_evidence"
+        ) as promotion, mock.patch.object(
+            REPOCTL, "_valid_exact_evidence"
+        ) as host_exact, mock.patch.object(
+            REPOCTL, "_valid_performance_audit"
+        ) as host_audit, mock.patch.object(
+            REPOCTL, "_trusted_publish_qualification_verdict",
+            return_value=ROOT / "proof.json",
+            side_effect=verdict_error,
+        ) as validated, mock.patch.object(
+            REPOCTL, "_qualification_audit_path", return_value=ROOT / "audit.json"
+        ), mock.patch(
+            "qualification_compatibility.archive_head_artifacts",
+        ) as archive, mock.patch.object(
             REPOCTL, "_delivery_publish_preflight", return_value=preflight_rc
         ) as preflight, mock.patch.object(
-            REPOCTL, "verify_change", verify
+            REPOCTL, "_run_pr_qualification", isolated
         ), mock.patch.object(
+            REPOCTL, "verify_change",
+        ) as direct, mock.patch.object(
             REPOCTL, "_verify_local_delivery_signatures", return_value=signature_rc
         ), mock.patch.object(
             REPOCTL, "_remote_branch_head", side_effect=remote_heads or [self.HEAD, self.HEAD]
-        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+        ), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
             rc = REPOCTL.publish("main", "Signed canonical delivery")
+        direct.assert_not_called()
+        host_exact.assert_not_called()
+        host_audit.assert_not_called()
+        promotable.assert_not_called()
+        promotion.assert_not_called()
+        if preflight_rc == 0 and branch != "main":
+            archive.assert_called_once()
+            self.assertTrue(archive.call_args.kwargs["clear_originals"])
+            self.assertEqual(head[0], archive.call_args.kwargs["head_sha"])
+            if isolation_error is None:
+                validated.assert_called_once_with(
+                    self.BASE, head[0], ROOT / "audit.json", completed,
+                )
         if rc == 0:
             preflight.assert_called_once_with("origin/main", head[0])
-        return rc, stdout.getvalue(), run_mock, verify
+        return rc, stdout.getvalue() + stderr.getvalue(), run_mock, isolated
+
+    def test_unavailable_independent_verdict_blocks_push(self):
+        with mock.patch.object(
+            REPOCTL, "_trusted_pr_execution_context", return_value=None,
+        ), self.assertRaisesRegex(
+            REPOCTL.QualificationAuthorityError,
+            "trusted independent qualification validator is unavailable",
+        ):
+            REPOCTL._trusted_publish_qualification_verdict(
+                self.BASE, self.HEAD, ROOT / "audit.json",
+                subprocess.CompletedProcess([], 0, "", ""),
+            )
+        rc, output, run_mock, isolated = self.invoke(
+            dirty=True,
+            remote_heads=["", self.NEW_HEAD],
+            verdict_error=REPOCTL.QualificationAuthorityError(
+                "GH_TOKEN=secret-value"
+            ),
+        )
+        self.assertNotEqual(0, rc)
+        self.assertIn("BLOCKED_AUTHORITY", output)
+        self.assertNotIn("secret-value", output)
+        isolated.assert_called_once()
+        self.assertFalse(any(
+            call.args[0][:2] == ["git", "push"]
+            for call in run_mock.call_args_list
+        ))
+
+    def test_direct_publication_without_exact_base_stops_before_subprocess(self):
+        stderr = io.StringIO()
+        with mock.patch.object(
+            REPOCTL, "_trusted_pr_execution_context", return_value=None,
+        ), mock.patch.object(REPOCTL, "run") as host_run, contextlib.redirect_stderr(stderr):
+            rc = REPOCTL.publish("main", "Blocked")
+        self.assertNotEqual(0, rc)
+        self.assertIn("BLOCKED_AUTHORITY", stderr.getvalue())
+        host_run.assert_not_called()
 
     def test_rerun_does_not_commit_or_push_unchanged_head(self):
         rc, text, run_mock, verify = self.invoke()
         self.assertEqual(0, rc)
         self.assertIn("no push needed", text)
-        verify.assert_not_called()
+        verify.assert_called_once_with(
+            self.BASE, self.HEAD, force_full=True, capture=True,
+        )
         self.assertFalse(any(call.args[0][:2] in (["git", "commit"], ["git", "push"])
                              for call in run_mock.call_args_list))
 
@@ -310,10 +390,31 @@ class PublishPrimitiveTests(unittest.TestCase):
             dirty=True, remote_heads=["", self.NEW_HEAD]
         )
         self.assertEqual(0, rc)
-        verify.assert_called_once_with("origin/main", self.NEW_HEAD)
+        verify.assert_called_once_with(
+            self.BASE, self.NEW_HEAD, force_full=True, capture=True,
+        )
         pushes = [call.args[0] for call in run_mock.call_args_list if call.args[0][:2] == ["git", "push"]]
         self.assertEqual([["git", "push", "-u", "origin", f"HEAD:refs/heads/{self.BRANCH}"]], pushes)
         self.assertIn(f"sha={self.NEW_HEAD}", text)
+
+    def test_isolation_failure_blocks_push_without_exposing_credentials(self):
+        rc, output, run_mock, isolated = self.invoke(
+            dirty=True,
+            remote_heads=["", self.NEW_HEAD],
+            isolation_error=REPOCTL.QualificationAuthorityError(
+                "GH_TOKEN=secret-value"
+            ),
+        )
+        self.assertNotEqual(0, rc)
+        self.assertIn("credential-isolated qualification is unavailable", output)
+        self.assertNotIn("secret-value", output)
+        isolated.assert_called_once_with(
+            self.BASE, self.NEW_HEAD, force_full=True, capture=True,
+        )
+        self.assertFalse(any(
+            call.args[0][:2] == ["git", "push"]
+            for call in run_mock.call_args_list
+        ))
 
     def test_remote_head_mismatch_after_push_fails(self):
         rc, _, _, _ = self.invoke(remote_heads=["", "d" * 40])

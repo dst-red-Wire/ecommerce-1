@@ -325,16 +325,25 @@ roadmap-sync: ## Regenerate roadmap milestone status/tracker projections from Gi
 deliver: signing-rotation-check ## Canonical publication: qualify, sign/commit, push and create/update exact-SHA GitHub PR
 	@$(PYTHON) scripts/repoctl.py deliver --base "$${BASE:-main}" --title "$(TITLE)" --message "$(MSG)"
 
-pr-loop: ## Run trusted-pr-transition from TRUSTED_ROOT at the PR BASE_SHA, then dispatch external review; PR required
+TRUSTED_PYTHON_ENTRY := import runpy,sys;from pathlib import Path;entry=Path(sys.argv[1]);sys.path.insert(0,str(entry.parent));sys.argv=sys.argv[1:];runpy.run_path(str(entry),run_name="__main__")
+
+pr-loop: ## Run exact-base trusted PR loop; invoke this Makefile from TRUSTED_ROOT with TARGET_ROOT
 	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@test -n "$(TARGET_ROOT)" || { echo "BLOCKED TARGET_ROOT PR checkout is required" >&2; exit 1; }
 	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
-	@$(PYTHON) scripts/pr_review_dispatch_transition.py --trusted-root "$(TRUSTED_ROOT)" --target-root "$(CURDIR)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,) $(if $(LEGACY_BOOTSTRAP_BINDING),--legacy-bootstrap-binding "$(LEGACY_BOOTSTRAP_BINDING)",)
+	@test "$(realpath $(CURDIR))" = "$(realpath $(TRUSTED_ROOT))" || { echo "BLOCKED invoke make from TRUSTED_ROOT" >&2; exit 1; }
+	@test "$(realpath $(CURDIR))" != "$(realpath $(TARGET_ROOT))" || { echo "BLOCKED target and trusted checkouts must differ" >&2; exit 1; }
+	@$(PYTHON) -I -c '$(TRUSTED_PYTHON_ENTRY)' "$(TRUSTED_ROOT)/scripts/pr_review_dispatch_transition.py" --trusted-root "$(TRUSTED_ROOT)" --target-root "$(TARGET_ROOT)" --pr "$(PR)" $(if $(DRY_RUN),--dry-run,) $(if $(JSON),--json,) $(if $(LEGACY_BOOTSTRAP_BINDING),--legacy-bootstrap-binding "$(LEGACY_BOOTSTRAP_BINDING)",) $(if $(OWNER_AUTHORIZATION_BINDING),--owner-authorization-binding "$(OWNER_AUTHORIZATION_BINDING)",)
 
 .PHONY: review-dispatch-status
-review-dispatch-status: ## Read non-authoritative ChatGPT outbox status for exact PR and KIND=CODE|SECURITY
+review-dispatch-status: ## Read non-authoritative dispatch status from the exact-base adapter
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@test -n "$(TARGET_ROOT)" || { echo "BLOCKED TARGET_ROOT PR checkout is required" >&2; exit 1; }
 	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
 	@test -n "$(KIND)" || { echo "BLOCKED KIND=CODE|SECURITY is required" >&2; exit 1; }
-	@$(PYTHON) scripts/pr_review_dispatch_transition.py --target-root "$(CURDIR)" --pr "$(PR)" --status --kind "$(KIND)" --json
+	@test "$(realpath $(CURDIR))" = "$(realpath $(TRUSTED_ROOT))" || { echo "BLOCKED invoke make from TRUSTED_ROOT" >&2; exit 1; }
+	@test "$(realpath $(CURDIR))" != "$(realpath $(TARGET_ROOT))" || { echo "BLOCKED target and trusted checkouts must differ" >&2; exit 1; }
+	@$(PYTHON) -I -c '$(TRUSTED_PYTHON_ENTRY)' "$(TRUSTED_ROOT)/scripts/pr_review_dispatch_transition.py" --target-root "$(TARGET_ROOT)" --pr "$(PR)" --status --kind "$(KIND)" --json
 
 finish-pr: ## Internal only: trusted-pr-transition delegates to exact-base repoctl.py
 	@echo "BLOCKED finish-pr is internal to exact-base trusted-pr-transition" >&2
@@ -375,8 +384,13 @@ diff-context: ## Build compact diff-only context pack (hard-capped by codex-toke
 failure-context: ## Capture causal output; use GATE=... or COMPONENT=service:product
 	@$(PYTHON) scripts/repoctl.py failure-context --gate "$(GATE)" --component "$(COMPONENT)" $(if $(RERUN),--rerun,)
 
-pr-monitor: ## Poll one GitHub PR cheaply and emit bounded ChatGPT review handoffs; PR/OWNER/REPO required
-	@$(PYTHON) scripts/pr_monitor.py --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600
+pr-monitor: ## Poll exact PR from a trusted checkout; TARGET_ROOT is the separate PR checkout
+	@test -n "$(TRUSTED_ROOT)" || { echo "BLOCKED TRUSTED_ROOT exact-base checkout is required" >&2; exit 1; }
+	@test -n "$(TARGET_ROOT)" || { echo "BLOCKED TARGET_ROOT PR checkout is required" >&2; exit 1; }
+	@test -n "$(PR)" || { echo "BLOCKED PR number is required" >&2; exit 1; }
+	@test "$(realpath $(CURDIR))" = "$(realpath $(TRUSTED_ROOT))" || { echo "BLOCKED invoke make from TRUSTED_ROOT" >&2; exit 1; }
+	@test "$(realpath $(CURDIR))" != "$(realpath $(TARGET_ROOT))" || { echo "BLOCKED target and trusted checkouts must differ" >&2; exit 1; }
+	@$(PYTHON) -I -c '$(TRUSTED_PYTHON_ENTRY)' "$(TRUSTED_ROOT)/scripts/pr_monitor.py" --owner "$(OWNER)" --repo "$(REPO)" --pr "$(PR)" --interval 900 --max-interval 3600 --trusted-root "$(TRUSTED_ROOT)" --target-root "$(TARGET_ROOT)" $(if $(OWNER_AUTHORIZATION_BINDING),--owner-authorization-binding "$(OWNER_AUTHORIZATION_BINDING)",)
 
 review-budget: ## Decide whether ChatGPT exact-SHA review should run; PR and SNAPSHOT required
 	@test -n "$(PR)" || { printf '%s\n' 'ERROR: PR=<number> is required'; exit 2; }
